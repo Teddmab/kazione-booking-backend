@@ -1,0 +1,14 @@
+{
+  "name": "kazione-booking-be",
+  "version": "1.0.0",
+  "description": "KaziOne Booking Backend – Supabase Edge Functions & Migrations",
+  "scripts": {
+    "functions:serve": "supabase functions serve",
+    "db:push": "supabase db push",
+    "db:reset": "supabase db reset",
+    "lint": "deno lint supabase/functions"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.5"
+  }
+}

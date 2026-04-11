@@ -3,9 +3,13 @@
   "version": "1.0.0",
   "description": "KaziOne Booking Backend – Supabase Edge Functions & Migrations",
   "scripts": {
-    "functions:serve": "supabase functions serve",
-    "db:push": "supabase db push",
-    "db:reset": "supabase db reset",
+    "start": "npx supabase start",
+    "stop": "npx supabase stop",
+    "dev": "npx supabase functions serve",
+    "dev:remote": "npx supabase functions serve --project-ref hwvqbsqlvwvedyhfuiwt --no-verify-jwt --env-file .env",
+    "functions:serve": "npx supabase functions serve",
+    "db:push": "npx supabase db push",
+    "db:reset": "npx supabase db reset",
     "lint": "deno lint supabase/functions"
   },
   "devDependencies": {

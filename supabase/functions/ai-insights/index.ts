@@ -1,7 +1,7 @@
 import { supabaseAdmin } from "../_shared/supabaseAdmin.ts";
 import { corsHeaders, handleCors } from "../_shared/cors.ts";
 import { badRequest, serverError } from "../_shared/errors.ts";
-import { verifyAuth, requireOwnerOrManager } from "../_shared/auth.ts";
+import { requireOwnerOrManagerCtx } from "../_shared/auth.ts";
 import { withLogging } from "../_shared/logger.ts";
 
 // ---------------------------------------------------------------------------
@@ -257,9 +257,6 @@ Deno.serve(withLogging("ai-insights", async (req: Request) => {
       return badRequest("Method not allowed");
     }
 
-    // 1. Auth
-    const user = await verifyAuth(req);
-
     const body = (await req.json()) as RequestBody;
     const { business_id, period_days, question } = body;
 
@@ -267,10 +264,13 @@ Deno.serve(withLogging("ai-insights", async (req: Request) => {
       return badRequest("business_id and valid period_days (7|14|30|90) required");
     }
 
-    // 2. Role check
-    await requireOwnerOrManager(user.id, business_id);
+    // 1. Auth: verify JWT + owner/manager membership in one call
+    // business_id is verified against the DB — not blindly trusted from body
+    const ctx = await requireOwnerOrManagerCtx(req, business_id);
+    if (ctx instanceof Response) return ctx;
+    const { userId, businessId } = ctx;
 
-    // 3. Check cache — ai_insight notification from last 6 hours with same period
+    // 2. Check cache — ai_insight notification from last 6 hours with same period
     const cacheThreshold = new Date(
       Date.now() - CACHE_HOURS * 60 * 60 * 1000,
     ).toISOString();
@@ -278,7 +278,7 @@ Deno.serve(withLogging("ai-insights", async (req: Request) => {
     const { data: cached } = await supabaseAdmin
       .from("notifications")
       .select("metadata")
-      .eq("business_id", business_id)
+      .eq("business_id", businessId)
       .eq("type", "ai_insight")
       .gte("created_at", cacheThreshold)
       .order("created_at", { ascending: false })
@@ -303,7 +303,7 @@ Deno.serve(withLogging("ai-insights", async (req: Request) => {
     }
 
     // 4. Gather context
-    const context = await gatherContext(business_id, period_days);
+    const context = await gatherContext(businessId, period_days);
 
     // 5. Call Anthropic
     const insights = await callAnthropic(
@@ -313,8 +313,8 @@ Deno.serve(withLogging("ai-insights", async (req: Request) => {
 
     // 6. Store in notifications
     await supabaseAdmin.from("notifications").insert({
-      business_id,
-      user_id: user.id,
+      business_id: businessId,
+      user_id: userId,
       type: "ai_insight",
       title: "AI Business Insights",
       body: `Generated ${insights.length} insights for the last ${period_days} days`,

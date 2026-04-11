@@ -1,7 +1,7 @@
 import { supabaseAdmin } from "../_shared/supabaseAdmin.ts";
 import { corsHeaders, handleCors } from "../_shared/cors.ts";
 import { badRequest, serverError } from "../_shared/errors.ts";
-import { verifyAuth, requireOwnerOrManager } from "../_shared/auth.ts";
+import { requireOwnerOrManagerCtx } from "../_shared/auth.ts";
 import { withLogging } from "../_shared/logger.ts";
 
 // ---------------------------------------------------------------------------
@@ -15,6 +15,8 @@ type ReportType =
   | "tax_summary"
   | "staff_payroll"
   | "supplier_spend";
+
+type DirectReportType = "appointments" | "revenue" | "clients";
 
 interface ExportBody {
   business_id: string;
@@ -31,6 +33,8 @@ const VALID_REPORT_TYPES: ReportType[] = [
   "staff_payroll",
   "supplier_spend",
 ];
+
+const VALID_DIRECT_TYPES: DirectReportType[] = ["appointments", "revenue", "clients"];
 
 // ---------------------------------------------------------------------------
 // CSV helpers
@@ -318,6 +322,192 @@ async function generateSupplierSpendReport(
 }
 
 // ---------------------------------------------------------------------------
+// Direct download report generators (GET — no Storage upload)
+// ---------------------------------------------------------------------------
+
+async function generateAppointmentsExport(
+  businessId: string,
+  from: string,
+  to: string,
+): Promise<{ headers: string[]; rows: Record<string, unknown>[] }> {
+  const { data, error } = await supabaseAdmin
+    .from("appointments")
+    .select(`
+      id, status, starts_at, ends_at, price, notes, booking_reference,
+      client:clients!inner(first_name, last_name, email, phone),
+      service:services(name)
+    `)
+    .eq("business_id", businessId)
+    .gte("starts_at", from)
+    .lte("starts_at", to + "T23:59:59")
+    .order("starts_at");
+
+  if (error) throw error;
+
+  const rows = (data ?? []).map((a: any) => ({
+    date: a.starts_at?.slice(0, 10) ?? "",
+    time: a.starts_at?.slice(11, 16) ?? "",
+    client_name: `${a.client?.first_name ?? ""} ${a.client?.last_name ?? ""}`.trim(),
+    client_email: a.client?.email ?? "",
+    client_phone: a.client?.phone ?? "",
+    service: a.service?.name ?? "",
+    status: a.status ?? "",
+    price: a.price ?? "",
+    notes: a.notes ?? "",
+    booking_reference: a.booking_reference ?? "",
+  }));
+
+  return {
+    headers: ["date", "time", "client_name", "client_email", "client_phone", "service", "status", "price", "notes", "booking_reference"],
+    rows,
+  };
+}
+
+async function generateRevenueExport(
+  businessId: string,
+  from: string,
+  to: string,
+): Promise<{ headers: string[]; rows: Record<string, unknown>[] }> {
+  const { data, error } = await supabaseAdmin
+    .from("appointments")
+    .select("starts_at, price")
+    .eq("business_id", businessId)
+    .eq("status", "completed")
+    .gte("starts_at", from)
+    .lte("starts_at", to + "T23:59:59")
+    .order("starts_at");
+
+  if (error) throw error;
+
+  const grouped: Record<string, number> = {};
+  for (const a of data ?? []) {
+    const date = (a as any).starts_at?.slice(0, 10);
+    if (date) grouped[date] = (grouped[date] ?? 0) + Number((a as any).price ?? 0);
+  }
+
+  const rows = Object.entries(grouped)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([date, revenue]) => ({ date, revenue }));
+
+  return {
+    headers: ["date", "revenue"],
+    rows,
+  };
+}
+
+async function generateClientsExport(
+  businessId: string,
+  from: string,
+  to: string,
+): Promise<{ headers: string[]; rows: Record<string, unknown>[] }> {
+  const [{ data: appts, error: apptErr }, { data: clients, error: clientErr }] = await Promise.all([
+    supabaseAdmin
+      .from("appointments")
+      .select("client_id, starts_at, price")
+      .eq("business_id", businessId)
+      .gte("starts_at", from)
+      .lte("starts_at", to + "T23:59:59"),
+    supabaseAdmin
+      .from("clients")
+      .select("id, first_name, last_name, email, phone, created_at")
+      .eq("business_id", businessId)
+      .order("created_at", { ascending: false }),
+  ]);
+
+  if (apptErr) throw apptErr;
+  if (clientErr) throw clientErr;
+
+  const stats: Record<string, { visits: number; spend: number; last_visit: string | null }> = {};
+  for (const a of appts ?? []) {
+    const appt = a as any;
+    if (!appt.client_id) continue;
+    if (!stats[appt.client_id]) stats[appt.client_id] = { visits: 0, spend: 0, last_visit: null };
+    stats[appt.client_id].visits += 1;
+    stats[appt.client_id].spend += Number(appt.price ?? 0);
+    const d = appt.starts_at?.slice(0, 10);
+    if (d && (!stats[appt.client_id].last_visit || d > stats[appt.client_id].last_visit!)) {
+      stats[appt.client_id].last_visit = d;
+    }
+  }
+
+  const rows = (clients ?? []).map((c: any) => ({
+    name: `${c.first_name ?? ""} ${c.last_name ?? ""}`.trim(),
+    email: c.email ?? "",
+    phone: c.phone ?? "",
+    client_since: c.created_at?.slice(0, 10) ?? "",
+    total_visits: stats[c.id]?.visits ?? 0,
+    total_spend: stats[c.id]?.spend ?? 0,
+    last_visit: stats[c.id]?.last_visit ?? "",
+  }));
+
+  return {
+    headers: ["name", "email", "phone", "client_since", "total_visits", "total_spend", "last_visit"],
+    rows,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// GET handler — direct download (no Storage upload)
+// ---------------------------------------------------------------------------
+
+async function handleGet(req: Request): Promise<Response> {
+  try {
+    const url = new URL(req.url);
+    const type = url.searchParams.get("type") as DirectReportType | null;
+    const from = url.searchParams.get("from");
+    const to = url.searchParams.get("to");
+    const format = url.searchParams.get("format") ?? "json";
+    const businessId = url.searchParams.get("business_id");
+
+    if (!type || !VALID_DIRECT_TYPES.includes(type)) {
+      return badRequest(`type must be one of: ${VALID_DIRECT_TYPES.join(", ")}`);
+    }
+    if (!from || !to) {
+      return badRequest("from and to (YYYY-MM-DD) are required");
+    }
+
+    const ctx = await requireOwnerOrManagerCtx(req, businessId ?? undefined);
+    if (ctx instanceof Response) return ctx;
+
+    let result: { headers: string[]; rows: Record<string, unknown>[] };
+
+    if (type === "appointments") {
+      result = await generateAppointmentsExport(ctx.businessId, from, to);
+    } else if (type === "revenue") {
+      result = await generateRevenueExport(ctx.businessId, from, to);
+    } else {
+      result = await generateClientsExport(ctx.businessId, from, to);
+    }
+
+    if (format === "csv") {
+      const csv = toCsv(result.headers, result.rows);
+      return new Response(csv, {
+        status: 200,
+        headers: {
+          ...corsHeaders,
+          "Content-Type": "text/csv",
+          "Content-Disposition": `attachment; filename="${type}-${from}-${to}.csv"`,
+        },
+      });
+    }
+
+    return new Response(
+      JSON.stringify({
+        data: {
+          rows: result.rows,
+          meta: { type, from, to, count: result.rows.length },
+        },
+      }),
+      { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+    );
+  } catch (err) {
+    if (err instanceof Response) return err;
+    console.error("export-report GET error:", err);
+    return serverError(err instanceof Error ? err.message : "Failed to generate report");
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Report dispatcher
 // ---------------------------------------------------------------------------
 
@@ -341,14 +531,15 @@ Deno.serve(withLogging("export-report", async (req: Request) => {
   const corsResp = handleCors(req);
   if (corsResp) return corsResp;
 
+  if (req.method === "GET") {
+    return handleGet(req);
+  }
+
   if (req.method !== "POST") {
-    return badRequest("Only POST is allowed");
+    return badRequest("Only GET and POST are allowed");
   }
 
   try {
-    // ── Auth ──────────────────────────────────────────────────
-    const user = await verifyAuth(req);
-
     const body: ExportBody = await req.json();
 
     // ── Validate ─────────────────────────────────────────────
@@ -362,13 +553,16 @@ Deno.serve(withLogging("export-report", async (req: Request) => {
       return badRequest("date_range.from and date_range.to are required");
     }
 
-    // ── Authorize ────────────────────────────────────────────
-    await requireOwnerOrManager(user.id, body.business_id);
+    // ── Auth: verify JWT + owner/manager membership in one call ──────────────
+    // business_id is verified against the DB — not blindly trusted from body
+    const ctx = await requireOwnerOrManagerCtx(req, body.business_id);
+    if (ctx instanceof Response) return ctx;
+    const { businessId } = ctx;
 
     // ── Generate report ──────────────────────────────────────
     const generator = GENERATORS[body.report_type];
     const { headers, rows } = await generator(
-      body.business_id,
+      businessId,
       body.date_range.from,
       body.date_range.to,
     );
@@ -379,7 +573,7 @@ Deno.serve(withLogging("export-report", async (req: Request) => {
     const timestamp = Date.now();
     const year = new Date(body.date_range.from).getFullYear();
     const filename = `${body.report_type}_${timestamp}.csv`;
-    const storagePath = `reports/${body.business_id}/${year}/${filename}`;
+    const storagePath = `reports/${businessId}/${year}/${filename}`;
 
     const { error: uploadErr } = await supabaseAdmin.storage
       .from("reports")

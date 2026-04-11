@@ -177,11 +177,12 @@ $$ LANGUAGE plpgsql;
 CREATE OR REPLACE FUNCTION handle_new_user()
 RETURNS TRIGGER AS $$
 BEGIN
-  INSERT INTO public.users (id, email, full_name, avatar_url)
+  INSERT INTO public.users (id, email, first_name, last_name, avatar_url)
   VALUES (
     NEW.id,
     NEW.email,
-    COALESCE(NEW.raw_user_meta_data ->> 'full_name', ''),
+    COALESCE(NEW.raw_user_meta_data ->> 'first_name', ''),
+    COALESCE(NEW.raw_user_meta_data ->> 'last_name', ''),
     COALESCE(NEW.raw_user_meta_data ->> 'avatar_url', '')
   );
   RETURN NEW;
@@ -198,16 +199,23 @@ CREATE TRIGGER on_auth_user_created
 
 -- 3) Return all business IDs the current JWT user belongs to.
 -- Used by RLS policies:  business_id IN (SELECT get_my_business_ids())
+-- NOTE: plpgsql used (not sql) so the body is not validated at creation time —
+-- business_members is created in a later migration (002_core_tables.sql).
 CREATE OR REPLACE FUNCTION get_my_business_ids()
 RETURNS SETOF uuid AS $$
-  SELECT business_id
-  FROM public.business_members
-  WHERE user_id = auth.uid();
-$$ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public;
+BEGIN
+  RETURN QUERY
+    SELECT business_id
+    FROM public.business_members
+    WHERE user_id = auth.uid();
+END;
+$$ LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public;
 
 
 -- 4) Generate a unique booking reference in KZB-XXXXX format (base-36, upper).
 -- Retries on the (astronomically unlikely) collision.
+-- NOTE: appointments table is created in 006_appointment_tables.sql — safe because
+-- plpgsql resolves table references at call time, not creation time.
 CREATE OR REPLACE FUNCTION generate_booking_reference()
 RETURNS text AS $$
 DECLARE

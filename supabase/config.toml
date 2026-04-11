@@ -11,7 +11,7 @@ max_rows = 1000
 [db]
 port = 54322
 shadow_port = 54320
-major_version = 15
+major_version = 17
 
 [studio]
 enabled = true
@@ -43,11 +43,8 @@ enable_signup = true
 double_confirm_changes = true
 enable_confirmations = false
 
-[functions]
-verify_jwt = true
-
-# ── Cron jobs ────────────────────────────────────────────────────────────────
-# Send 24h reminders + mark no-shows — runs every hour
-[crons.send_reminders]
-schedule = "0 * * * *"
-function_name = "send-reminders"
+# ── Function config ──────────────────────────────────────────────────────────
+# JWT verification is enabled by default for all functions.
+# Add a [functions.<name>] block here to override per-function (e.g. webhooks).
+# Example: [functions.stripe-webhook]
+#          verify_jwt = false

@@ -75,6 +75,52 @@ export async function requireOwnerOrManager(
   return member;
 }
 
+// ── Verified auth context ────────────────────────────────────────────────────
+
+export type AuthContext = {
+  userId: string;
+  /** business_id verified via DB membership check — safe to use for queries */
+  businessId: string;
+  role: string;
+};
+
+/**
+ * Single-call auth helper for protected owner/manager endpoints.
+ *
+ * Validates the Bearer JWT, then confirms the user is an active owner or
+ * manager of the requested business. Returns a typed AuthContext where
+ * businessId is authoritative (proven by DB, not blindly trusted from the
+ * request body).
+ *
+ * Usage:
+ *   const body = await req.json()
+ *   const ctx = await requireOwnerOrManagerCtx(req, body.business_id)
+ *   if (ctx instanceof Response) return ctx
+ *   // ctx.businessId is now safe to use
+ */
+export async function requireOwnerOrManagerCtx(
+  req: Request,
+  businessId: string | undefined,
+): Promise<AuthContext | Response> {
+  if (!businessId) {
+    return forbidden("business_id is required");
+  }
+  try {
+    const user = await verifyAuth(req);
+    const { role } = await requireOwnerOrManager(user.id, businessId);
+    return { userId: user.id, businessId, role };
+  } catch (e) {
+    if (e instanceof Response) return e;
+    console.error("requireOwnerOrManagerCtx error:", e);
+    return new Response(
+      JSON.stringify({
+        error: { code: "INTERNAL_ERROR", message: "Auth check failed" },
+      }),
+      { status: 500, headers: { "Content-Type": "application/json" } },
+    );
+  }
+}
+
 /**
  * Find an existing client by email within a business, or create a new guest
  * client record. Returns the client row.

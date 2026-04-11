@@ -1,7 +1,7 @@
 import { supabaseAdmin } from "../_shared/supabaseAdmin.ts";
 import { corsHeaders, handleCors } from "../_shared/cors.ts";
 import { badRequest, conflict, serverError } from "../_shared/errors.ts";
-import { verifyAuth, requireOwnerOrManager } from "../_shared/auth.ts";
+import { requireOwnerOrManagerCtx } from "../_shared/auth.ts";
 import { sendEmail, staffInviteEmail } from "../_shared/resend.ts";
 import { withLogging } from "../_shared/logger.ts";
 
@@ -32,12 +32,9 @@ Deno.serve(withLogging("invite-staff", async (req: Request) => {
   }
 
   try {
-    // ── Auth: owner or manager only ───────────────────────────────────────
-    const user = await verifyAuth(req);
     const body: InviteBody = await req.json();
 
     // ── Validate ──────────────────────────────────────────────────────────
-    if (!body.business_id) return badRequest("business_id is required");
     if (!body.email) return badRequest("email is required");
     if (!EMAIL_RE.test(body.email)) return badRequest("Invalid email address");
     if (!body.display_name) return badRequest("display_name is required");
@@ -47,7 +44,11 @@ Deno.serve(withLogging("invite-staff", async (req: Request) => {
       return badRequest("role must be owner, manager, staff, or receptionist");
     }
 
-    await requireOwnerOrManager(user.id, body.business_id);
+    // ── Auth: verify JWT + owner/manager membership in one call ──────────
+    // business_id is verified against the DB — not blindly trusted from body
+    const ctx = await requireOwnerOrManagerCtx(req, body.business_id);
+    if (ctx instanceof Response) return ctx;
+    const { userId, businessId } = ctx;
 
     // ── Check for existing membership ─────────────────────────────────────
     // Look up by email in users table
@@ -62,7 +63,7 @@ Deno.serve(withLogging("invite-staff", async (req: Request) => {
       const { data: existingMember, error: memberErr } = await supabaseAdmin
         .from("business_members")
         .select("id, is_active")
-        .eq("business_id", body.business_id)
+        .eq("business_id", businessId)
         .eq("user_id", existingUser.id)
         .maybeSingle();
       if (memberErr) throw memberErr;
@@ -98,7 +99,7 @@ Deno.serve(withLogging("invite-staff", async (req: Request) => {
         .from("business_members")
         .upsert(
           {
-            business_id: body.business_id,
+            business_id: businessId,
             user_id: existingUser.id,
             role,
             is_active: false,
@@ -117,7 +118,7 @@ Deno.serve(withLogging("invite-staff", async (req: Request) => {
     const { data: staffProfile, error: staffErr } = await supabaseAdmin
       .from("staff_profiles")
       .insert({
-        business_id: body.business_id,
+        business_id: businessId,
         business_member_id: memberId,
         display_name: body.display_name,
         specialties: body.specialties ?? [],
@@ -142,19 +143,19 @@ Deno.serve(withLogging("invite-staff", async (req: Request) => {
 
     const APP_URL = Deno.env.get("APP_URL") ?? "https://kazionebooking.com";
     const acceptUrl = linkData?.properties?.action_link
-      ?? `${APP_URL}/invite?business=${body.business_id}&staff=${staffProfile.id}`;
+      ?? `${APP_URL}/invite?business=${businessId}&staff=${staffProfile.id}`;
 
     // ── Fetch inviter name & business name ────────────────────────────────
     const [inviterResult, businessResult] = await Promise.all([
       supabaseAdmin
         .from("users")
         .select("first_name, last_name")
-        .eq("id", user.id)
+        .eq("id", userId)
         .single(),
       supabaseAdmin
         .from("businesses")
         .select("name, locale")
-        .eq("id", body.business_id)
+        .eq("id", businessId)
         .single(),
     ]);
 

@@ -35,7 +35,7 @@ CREATE TABLE business_members (
   id              uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
   business_id     uuid NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
   user_id         uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  role            business_role NOT NULL DEFAULT 'staff',
+  role            member_role NOT NULL DEFAULT 'staff',
   is_active       boolean NOT NULL DEFAULT true,
   invited_at      timestamptz,
   joined_at       timestamptz,
@@ -80,13 +80,16 @@ CREATE TABLE business_settings (
   updated_at                  timestamptz NOT NULL DEFAULT now()
 );
 
--- Helper function: return all business_ids the calling user belongs to
+-- Re-define get_my_business_ids() now that business_members exists.
+-- Replaces the forward-declared stub from 001_enums.sql.
+-- Adding is_active = true filter here (production-correct version).
 CREATE OR REPLACE FUNCTION get_my_business_ids()
-RETURNS SETOF uuid
-LANGUAGE sql STABLE SECURITY DEFINER
-AS $$
-  SELECT business_id
-  FROM   business_members
-  WHERE  user_id = auth.uid()
-    AND  is_active = true;
-$$;
+RETURNS SETOF uuid AS $$
+BEGIN
+  RETURN QUERY
+    SELECT business_id
+    FROM public.business_members
+    WHERE user_id = auth.uid()
+      AND is_active = true;
+END;
+$$ LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public;

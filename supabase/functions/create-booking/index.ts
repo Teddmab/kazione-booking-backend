@@ -29,6 +29,7 @@ interface CreateBookingBody {
   };
   payment_method: "deposit" | "full" | "later";
   locale?: "en" | "et" | "fr";
+  gdpr_consent?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -106,7 +107,10 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
       time,
       client,
       payment_method,
+      gdpr_consent,
     } = body;
+
+    const gdprConsentAt = gdpr_consent ? new Date().toISOString() : null;
 
     // ── Guard: fail early on common Stripe key mismatch misconfiguration ──
     if (payment_method !== "later") {
@@ -325,6 +329,13 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
 
       if (existingClient) {
         clientId = existingClient.id;
+        // Update consent if provided (never downgrade from true to false)
+        if (gdpr_consent) {
+          await supabaseAdmin
+            .from("clients")
+            .update({ gdpr_consent: true, gdpr_consent_at: gdprConsentAt })
+            .eq("id", clientId);
+        }
       } else {
         // Check by email first
         const { data: byEmail } = await supabaseAdmin
@@ -335,10 +346,13 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
           .maybeSingle();
 
         if (byEmail) {
-          // Link existing guest record to the authenticated user
+          // Link existing guest record to the authenticated user; update consent
           await supabaseAdmin
             .from("clients")
-            .update({ user_id: userId })
+            .update({
+              user_id: userId,
+              ...(gdpr_consent ? { gdpr_consent: true, gdpr_consent_at: gdprConsentAt } : {}),
+            })
             .eq("id", byEmail.id);
           clientId = byEmail.id;
         } else {
@@ -352,6 +366,8 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
               email: client.email,
               phone: client.phone,
               source: "online",
+              gdpr_consent: gdpr_consent === true,
+              gdpr_consent_at: gdprConsentAt,
             })
             .select("id")
             .single();
@@ -370,6 +386,13 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
 
       if (existingGuest) {
         clientId = existingGuest.id;
+        // Update consent if provided
+        if (gdpr_consent) {
+          await supabaseAdmin
+            .from("clients")
+            .update({ gdpr_consent: true, gdpr_consent_at: gdprConsentAt })
+            .eq("id", clientId);
+        }
       } else {
         const { data: newGuest, error: guestErr } = await supabaseAdmin
           .from("clients")
@@ -380,6 +403,8 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
             email: client.email,
             phone: client.phone,
             source: "marketplace",
+            gdpr_consent: gdpr_consent === true,
+            gdpr_consent_at: gdprConsentAt,
           })
           .select("id")
           .single();

@@ -2,12 +2,13 @@ import { supabaseAdmin } from "../_shared/supabaseAdmin.ts";
 import { corsHeaders, handleCors } from "../_shared/cors.ts";
 import { badRequest, unauthorized, forbidden, notFound, serverError } from "../_shared/errors.ts";
 import { verifyAuth } from "../_shared/auth.ts";
-import { stripe } from "../_shared/stripe.ts";
 import { withLogging } from "../_shared/logger.ts";
+import { issueCancelToken, verifyCancelToken } from "../_shared/bookingCancelToken.ts";
 import {
   sendEmail,
   bookingCancellationEmail,
 } from "../_shared/resend.ts";
+import Stripe from "stripe";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -16,11 +17,25 @@ import {
 interface CancelBody {
   appointment_id?: string;
   booking_reference?: string;
+  cancel_token?: string;
   email?: string;
   reason?: string;
 }
 
 const APP_URL = Deno.env.get("APP_URL") ?? "https://kazionebooking.com";
+
+function getStripeClient(): Stripe | null {
+  const secret = Deno.env.get("STRIPE_SECRET_KEY");
+  if (!secret) {
+    console.warn("STRIPE_SECRET_KEY is not configured; refund calls will be skipped");
+    return null;
+  }
+
+  return new Stripe(secret, {
+    apiVersion: "2024-04-10",
+    httpClient: Stripe.createFetchHttpClient(),
+  });
+}
 
 // ---------------------------------------------------------------------------
 // Handler
@@ -37,8 +52,16 @@ Deno.serve(withLogging("cancel-booking", async (req: Request) => {
   try {
     const body: CancelBody = await req.json();
 
-    if (!body.appointment_id && !body.booking_reference) {
-      return badRequest("Either appointment_id or booking_reference is required");
+    if (!body.appointment_id && !body.booking_reference && !body.cancel_token) {
+      return badRequest("Either appointment_id, booking_reference, or cancel_token is required");
+    }
+
+    const tokenPayload = body.cancel_token
+      ? await verifyCancelToken(body.cancel_token)
+      : null;
+
+    if (body.cancel_token && !tokenPayload) {
+      return forbidden("Invalid or expired cancellation token");
     }
 
     // ── Find appointment ──────────────────────────────────────────────────
@@ -50,7 +73,9 @@ Deno.serve(withLogging("cancel-booking", async (req: Request) => {
         booking_reference, booking_source
       `);
 
-    if (body.appointment_id) {
+    if (tokenPayload?.aid) {
+      query = query.eq("id", tokenPayload.aid);
+    } else if (body.appointment_id) {
       query = query.eq("id", body.appointment_id);
     } else {
       query = query.eq("booking_reference", body.booking_reference!);
@@ -67,6 +92,12 @@ Deno.serve(withLogging("cancel-booking", async (req: Request) => {
 
     // ── Authorize ─────────────────────────────────────────────────────────
     let userId: string | null = null;
+
+    if (tokenPayload) {
+      if (tokenPayload.br !== appointment.booking_reference) {
+        return forbidden("Cancellation token does not match this booking");
+      }
+    } else {
     try {
       const user = await verifyAuth(req);
       userId = user.id;
@@ -122,6 +153,7 @@ Deno.serve(withLogging("cancel-booking", async (req: Request) => {
         return forbidden("Email does not match the booking");
       }
     }
+    }
 
     // ── Fetch business settings for cancellation policy ───────────────────
     const { data: settings, error: settingsErr } = await supabaseAdmin
@@ -157,9 +189,15 @@ Deno.serve(withLogging("cancel-booking", async (req: Request) => {
     let refundStatus: "full" | "partial" | "none" | "deposit_forfeited" = "none";
 
     if (payment && payment.status === "paid" && payment.stripe_payment_intent_id) {
+      const stripe = getStripeClient();
+      if (!stripe) {
+        console.warn("Skipping Stripe refund because client could not be initialized");
+      }
+
       if (outsideWindow) {
         // Full refund
-        try {
+        if (stripe) {
+          try {
           const refundOpts: Record<string, unknown> = {
             payment_intent: payment.stripe_payment_intent_id,
           };
@@ -184,10 +222,11 @@ Deno.serve(withLogging("cancel-booking", async (req: Request) => {
               refunded_at: new Date().toISOString(),
             })
             .eq("id", payment.id);
-        } catch (err) {
-          console.error("Stripe refund failed:", err);
-          // Continue with cancellation even if refund fails
-          refundStatus = "none";
+          } catch (err) {
+            console.error("Stripe refund failed:", err);
+            // Continue with cancellation even if refund fails
+            refundStatus = "none";
+          }
         }
       } else {
         // Inside window — deposit forfeited
@@ -197,7 +236,8 @@ Deno.serve(withLogging("cancel-booking", async (req: Request) => {
         if (paidAmount > depositAmount && depositAmount > 0) {
           // Partial refund: refund everything except the deposit
           const partialRefund = paidAmount - depositAmount;
-          try {
+          if (stripe) {
+            try {
             const refundOpts: Record<string, unknown> = {
               payment_intent: payment.stripe_payment_intent_id,
               amount: Math.round(partialRefund * 100),
@@ -223,9 +263,10 @@ Deno.serve(withLogging("cancel-booking", async (req: Request) => {
                 refunded_at: new Date().toISOString(),
               })
               .eq("id", payment.id);
-          } catch (err) {
-            console.error("Stripe partial refund failed:", err);
-            refundStatus = "deposit_forfeited";
+            } catch (err) {
+              console.error("Stripe partial refund failed:", err);
+              refundStatus = "deposit_forfeited";
+            }
           }
         } else {
           // Only deposit was paid — forfeited entirely
@@ -293,6 +334,7 @@ Deno.serve(withLogging("cancel-booking", async (req: Request) => {
       const biz = businessResult.data;
       const curr = svc.currency_code ?? biz.currency_code ?? "EUR";
       const locale = cl.preferred_locale ?? "en";
+      const cancelToken = await issueCancelToken(appointment.id, appointment.booking_reference);
 
       const emailData = bookingCancellationEmail(
         {
@@ -304,7 +346,7 @@ Deno.serve(withLogging("cancel-booking", async (req: Request) => {
           time: startsAt.toISOString().slice(11, 16),
           reference: appointment.booking_reference,
           price: `${curr === "EUR" ? "€" : curr} ${(+appointment.price).toFixed(2)}`,
-          manageUrl: `${APP_URL}/bookings/${appointment.booking_reference}`,
+          manageUrl: `${APP_URL}/booking/${appointment.booking_reference}?token=${encodeURIComponent(cancelToken)}`,
         },
         locale,
       );

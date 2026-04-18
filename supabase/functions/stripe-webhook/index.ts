@@ -5,6 +5,7 @@ import {
   sendEmail,
   bookingConfirmationEmail,
 } from "../_shared/resend.ts";
+import { issueCancelToken } from "../_shared/bookingCancelToken.ts";
 import { withLogging } from "../_shared/logger.ts";
 
 // ---------------------------------------------------------------------------
@@ -115,6 +116,12 @@ async function handlePaymentSucceeded(pi: Stripe.PaymentIntent) {
     return;
   }
 
+  // Idempotency guard — if already confirmed, this is a duplicate event; skip
+  if (appt.status === "confirmed") {
+    console.log(`payment_intent.succeeded: appointment ${appointmentId} already confirmed — duplicate event ignored`);
+    return;
+  }
+
   const oldStatus = appt.status;
 
   // UPDATE appointment → confirmed
@@ -170,6 +177,7 @@ async function handlePaymentSucceeded(pi: Stripe.PaymentIntent) {
     const curr = svc.currency_code ?? biz.currency_code ?? "EUR";
     const startsAt = new Date(appt.starts_at);
     const locale = cl.preferred_locale ?? "en";
+    const cancelToken = await issueCancelToken(appt.id, appt.booking_reference);
 
     const emailData = bookingConfirmationEmail(
       {
@@ -181,7 +189,7 @@ async function handlePaymentSucceeded(pi: Stripe.PaymentIntent) {
         time: startsAt.toISOString().slice(11, 16),
         reference: appt.booking_reference,
         price: `${curr === "EUR" ? "€" : curr} ${(+appt.price).toFixed(2)}`,
-        manageUrl: `${APP_URL}/bookings/${appt.booking_reference}`,
+        manageUrl: `${APP_URL}/booking/${appt.booking_reference}?token=${encodeURIComponent(cancelToken)}`,
       },
       locale,
     );

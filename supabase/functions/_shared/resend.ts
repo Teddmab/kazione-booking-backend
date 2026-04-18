@@ -1,6 +1,7 @@
 import { Resend } from "resend";
 
-const resend = new Resend(Deno.env.get("RESEND_API_KEY")!);
+const RESEND_API_KEY = Deno.env.get("RESEND_API_KEY");
+const resend = RESEND_API_KEY ? new Resend(RESEND_API_KEY) : null;
 
 const DEFAULT_FROM = "KaziOne Booking <noreply@kazionebooking.com>";
 
@@ -13,6 +14,11 @@ export async function sendEmail(
   html: string,
   from?: string,
 ) {
+  if (!resend) {
+    console.warn("RESEND_API_KEY is not configured; skipping transactional email send");
+    return;
+  }
+
   const { error } = await resend.emails.send({
     from: from ?? DEFAULT_FROM,
     to,

@@ -14,6 +14,7 @@ import {
   sendEmail,
   bookingRescheduleEmail,
 } from "../_shared/resend.ts";
+import { issueCancelToken } from "../_shared/bookingCancelToken.ts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -285,6 +286,7 @@ Deno.serve(withLogging("reschedule-booking", async (req: Request) => {
       const biz = businessResult.data;
       const curr = svc.currency_code ?? biz.currency_code ?? "EUR";
       const locale = cl.preferred_locale ?? "en";
+      const cancelToken = await issueCancelToken(appointment.id, appointment.booking_reference);
 
       const emailData = bookingRescheduleEmail(
         {
@@ -296,7 +298,7 @@ Deno.serve(withLogging("reschedule-booking", async (req: Request) => {
           time: body.new_time,
           reference: appointment.booking_reference,
           price: `${curr === "EUR" ? "€" : curr} ${(+appointment.price).toFixed(2)}`,
-          manageUrl: `${APP_URL}/bookings/${appointment.booking_reference}`,
+          manageUrl: `${APP_URL}/booking/${appointment.booking_reference}?token=${encodeURIComponent(cancelToken)}`,
         },
         locale,
       );

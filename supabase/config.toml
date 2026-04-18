@@ -45,6 +45,15 @@ enable_confirmations = false
 
 # ── Function config ──────────────────────────────────────────────────────────
 # JWT verification is enabled by default for all functions.
-# Add a [functions.<name>] block here to override per-function (e.g. webhooks).
-# Example: [functions.stripe-webhook]
-#          verify_jwt = false
+# Stripe webhook must accept unsigned POST requests (Stripe signs with its own
+# signature header, not a JWT). JWT verification is disabled for this function.
+[functions.stripe-webhook]
+verify_jwt = false
+
+# send-reminders is called on a cron schedule, not by an authenticated user.
+# JWT verification is disabled; it authenticates via the CRON_SECRET Bearer token instead.
+# Schedule: daily at 08:00 UTC (catches 24h-ahead appointments for that day).
+# NOTE: Supabase scheduled functions require the Pro plan or above.
+[functions.send-reminders]
+verify_jwt = false
+# schedule = "0 8 * * *"   # uncomment when deploying to cloud (Pro plan required)

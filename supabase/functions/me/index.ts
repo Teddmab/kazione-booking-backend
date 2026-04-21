@@ -1,6 +1,6 @@
 import { supabaseAdmin } from "../_shared/supabaseAdmin.ts";
 import { corsHeaders, handleCors } from "../_shared/cors.ts";
-import { serverError } from "../_shared/errors.ts";
+import { badRequest, serverError } from "../_shared/errors.ts";
 import { withLogging } from "../_shared/logger.ts";
 import { verifyAuth } from "../_shared/auth.ts";
 
@@ -23,12 +23,61 @@ Deno.serve(withLogging("me", async (req: Request) => {
   const corsResp = handleCors(req);
   if (corsResp) return corsResp;
 
-  if (req.method !== "GET") {
-    return json({ error: { code: "METHOD_NOT_ALLOWED", message: "Only GET is allowed" } }, 405);
+  if (req.method !== "GET" && req.method !== "PATCH") {
+    return json({ error: { code: "METHOD_NOT_ALLOWED", message: "Only GET and PATCH are allowed" } }, 405);
   }
 
   try {
     const user = await verifyAuth(req);
+
+    if (req.method === "PATCH") {
+      const body = await req.json().catch(() => null) as {
+        first_name?: string | null;
+        last_name?: string | null;
+        phone?: string | null;
+      } | null;
+
+      if (!body) {
+        return badRequest("Invalid JSON body");
+      }
+
+      const normalize = (value: string | null | undefined, maxLen: number) => {
+        if (value === undefined) return undefined;
+        if (value === null) return null;
+        const trimmed = value.trim();
+        if (!trimmed) return null;
+        return trimmed.slice(0, maxLen);
+      };
+
+      const updatePayload: {
+        first_name?: string | null;
+        last_name?: string | null;
+        phone?: string | null;
+      } = {};
+
+      const firstName = normalize(body.first_name, 100);
+      const lastName = normalize(body.last_name, 100);
+      const phone = normalize(body.phone, 30);
+
+      if (firstName !== undefined) updatePayload.first_name = firstName;
+      if (lastName !== undefined) updatePayload.last_name = lastName;
+      if (phone !== undefined) updatePayload.phone = phone;
+
+      if (Object.keys(updatePayload).length === 0) {
+        return badRequest("No profile fields provided");
+      }
+
+      const { data: updatedProfile, error: updateErr } = await supabaseAdmin
+        .from("users")
+        .update(updatePayload)
+        .eq("id", user.id)
+        .select("id, first_name, last_name, email, phone, avatar_url")
+        .maybeSingle();
+
+      if (updateErr) throw updateErr;
+
+      return json({ profile: updatedProfile ?? null });
+    }
 
     const [profileResult, membershipResult] = await Promise.all([
       supabaseAdmin

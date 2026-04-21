@@ -29,8 +29,9 @@ interface ServiceInfo {
 interface AvailabilityResponse {
   date: string;
   dayName: string;
-  service: ServiceInfo;
+  service: ServiceInfo | null;
   slots: Slot[];
+  reserved_slots: string[];
   isAvailable: boolean;
   reason?: string;
 }
@@ -69,6 +70,9 @@ Deno.serve(withLogging("get-availability", async (req: Request) => {
     const serviceId = url.searchParams.get("service_id");
     const dateStr = url.searchParams.get("date");
     const staffId = url.searchParams.get("staff_id") || null;
+    const requestPaymentMethod =
+      (url.searchParams.get("payment_method") as "deposit" | "full" | "later" | null) ??
+      "later";
 
     // 1. Validate required params
     const missing: string[] = [];
@@ -85,6 +89,10 @@ Deno.serve(withLogging("get-availability", async (req: Request) => {
       return badRequest("Invalid date format. Expected YYYY-MM-DD.");
     }
 
+    if (!["deposit", "full", "later"].includes(requestPaymentMethod)) {
+      return badRequest("Invalid payment_method. Expected deposit, full, or later.");
+    }
+
     const requestedDate = new Date(dateStr! + "T00:00:00Z");
     if (isNaN(requestedDate.getTime())) {
       return badRequest("Invalid date value.");
@@ -99,6 +107,7 @@ Deno.serve(withLogging("get-availability", async (req: Request) => {
         dayName: DAY_NAMES[requestedDate.getUTCDay()],
         service: null,
         slots: [],
+        reserved_slots: [],
         isAvailable: false,
         reason: "DATE_IN_PAST",
       });
@@ -122,6 +131,7 @@ Deno.serve(withLogging("get-availability", async (req: Request) => {
         dayName: DAY_NAMES[requestedDate.getUTCDay()],
         service: null,
         slots: [],
+        reserved_slots: [],
         isAvailable: false,
         reason: "OUTSIDE_BOOKING_WINDOW",
       });
@@ -220,6 +230,62 @@ Deno.serve(withLogging("get-availability", async (req: Request) => {
       .sort(([a], [b]) => a.localeCompare(b))
       .map(([time, staff]) => ({ time, staff }));
 
+    // Highlight reserved starts for the date so UI can show occupied times.
+    const dayStart = `${dateStr!}T00:00:00`;
+    const dayEnd = `${dateStr!}T23:59:59.999`;
+    let reservedSlots: string[] = [];
+
+    try {
+      const { data: appointmentRows, error: appointmentsErr } = await supabaseAdmin
+        .from("appointments")
+        .select("id, starts_at, status")
+        .eq("business_id", businessId!)
+        .gte("starts_at", dayStart)
+        .lte("starts_at", dayEnd)
+        .not("status", "in", "(cancelled,no_show)");
+
+      if (appointmentsErr) throw appointmentsErr;
+
+      const appointmentIds = (appointmentRows ?? []).map((row: { id: string }) => row.id);
+
+      let paymentMap = new Map<string, { method: string | null; status: string | null }>();
+      if (appointmentIds.length > 0) {
+        const { data: paymentRows, error: paymentsErr } = await supabaseAdmin
+          .from("payments")
+          .select("appointment_id, method, status")
+          .in("appointment_id", appointmentIds);
+
+        if (paymentsErr) throw paymentsErr;
+
+        paymentMap = new Map(
+          (paymentRows ?? []).map((row: {
+            appointment_id: string;
+            method: string | null;
+            status: string | null;
+          }) => [
+            row.appointment_id,
+            { method: row.method, status: row.status },
+          ]),
+        );
+      }
+
+      reservedSlots = [...new Set((appointmentRows ?? [])
+        .filter((row: { id: string; status: string }) => {
+          const payment = paymentMap.get(row.id) ?? null;
+          const method = payment?.method ?? null;
+          const payStatus = payment?.status ?? null;
+
+          if (method === "cash") {
+            return true;
+          }
+
+          return payStatus === "paid" || payStatus === "succeeded" || row.status === "confirmed";
+        })
+        .map((row: { starts_at: string }) => row.starts_at.slice(11, 16)))].sort((a, b) => a.localeCompare(b));
+    } catch (reservedErr) {
+      console.error("reserved slots query failed:", reservedErr);
+    }
+
     // 7. Determine reason if no slots
     let reason: string | undefined;
     if (slots.length === 0) {
@@ -245,6 +311,7 @@ Deno.serve(withLogging("get-availability", async (req: Request) => {
       dayName: DAY_NAMES[requestedDate.getUTCDay()],
       service: serviceInfo,
       slots,
+      reserved_slots: reservedSlots,
       isAvailable: slots.length > 0,
       ...(reason ? { reason } : {}),
     };

@@ -2,6 +2,7 @@ import { supabaseAdmin } from "../_shared/supabaseAdmin.ts";
 import { corsHeaders, handleCors } from "../_shared/cors.ts";
 import { badRequest, unauthorized, serverError } from "../_shared/errors.ts";
 import { withLogging } from "../_shared/logger.ts";
+import { issueCancelToken } from "../_shared/bookingCancelToken.ts";
 
 // ---------------------------------------------------------------------------
 // Auth — CRON_SECRET header check
@@ -117,7 +118,8 @@ async function sendReminders(): Promise<{ sent: number; errors: number }> {
         .join(", ");
 
       const siteUrl = Deno.env.get("SITE_URL") ?? "https://kazionebooking.com";
-      const manageUrl = `${siteUrl}/booking/${appt.booking_reference}`;
+      const cancelToken = await issueCancelToken(appt.id, appt.booking_reference);
+      const manageUrl = `${siteUrl}/booking/${appt.booking_reference}?token=${encodeURIComponent(cancelToken)}`;
 
       await sendEmailInternal(client.email, "booking_reminder", {
         clientName: `${client.first_name} ${client.last_name}`,

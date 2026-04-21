@@ -24,6 +24,20 @@ function normalizePayment(row: Record<string, unknown>) {
   return { ...row, payment: payment?.[0] ?? null };
 }
 
+interface StaffSummaryRow {
+  id: string;
+  display_name: string;
+  role: string;
+  email: string | null;
+  phone: string | null;
+  avatar_url: string | null;
+  specialties: string[];
+  status: "Active" | "Off Today" | "Inactive";
+  bookings_today: number;
+  revenue_today: number;
+  utilization_today: number;
+}
+
 /**
  * /appointments — appointments CRUD + dashboard KPIs + calendar
  *
@@ -71,6 +85,41 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
         return json((data ?? []).map(normalizePayment));
       }
 
+      // Single appointment lookup by id (no business_id param required).
+      // We infer business_id from the row and then verify membership.
+      if (id) {
+        const user = await verifyAuth(req);
+
+        const { data: existing, error: existingErr } = await supabaseAdmin
+          .from("appointments")
+          .select("id, business_id")
+          .eq("id", id)
+          .maybeSingle();
+
+        if (existingErr) return serverError(existingErr.message);
+        if (!existing) return notFound("Appointment not found");
+
+        await verifyBusinessMember(user.id, (existing as { business_id: string }).business_id);
+
+        const { data, error } = await supabaseAdmin
+          .from("appointments")
+          .select(APPT_SELECT)
+          .eq("id", id)
+          .single();
+
+        if (error) {
+          return error.code === "PGRST116" ? notFound("Appointment not found") : serverError(error.message);
+        }
+
+        const { data: statusLog } = await supabaseAdmin
+          .from("appointment_status_log")
+          .select("*")
+          .eq("appointment_id", id)
+          .order("created_at", { ascending: true });
+
+        return json({ ...normalizePayment(data), status_log: statusLog ?? [] });
+      }
+
       const businessId = url.searchParams.get("business_id");
       if (!businessId) return badRequest("business_id is required");
 
@@ -107,24 +156,95 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
         return json(data ?? []);
       }
 
-      if (id) {
-        const { data, error } = await supabaseAdmin
-          .from("appointments")
-          .select(APPT_SELECT)
-          .eq("id", id)
-          .single();
+      if (action === "staff-summary") {
+        const dayStart = new Date();
+        dayStart.setHours(0, 0, 0, 0);
+        const dayEnd = new Date(dayStart);
+        dayEnd.setDate(dayEnd.getDate() + 1);
 
-        if (error) {
-          return error.code === "PGRST116" ? notFound("Appointment not found") : serverError(error.message);
+        const [staffResult, apptResult] = await Promise.all([
+          supabaseAdmin
+            .from("staff_profiles")
+            .select(`
+              id,
+              display_name,
+              avatar_url,
+              specialties,
+              is_active,
+              business_member:business_members(role, user:users(email, phone))
+            `)
+            .eq("business_id", businessId),
+          supabaseAdmin
+            .from("appointments")
+            .select("staff_profile_id, starts_at, ends_at, status, price")
+            .eq("business_id", businessId)
+            .gte("starts_at", dayStart.toISOString())
+            .lt("starts_at", dayEnd.toISOString()),
+        ]);
+
+        if (staffResult.error) return serverError(staffResult.error.message);
+        if (apptResult.error) return serverError(apptResult.error.message);
+
+        const apptByStaff = new Map<string, Array<Record<string, unknown>>>();
+        for (const appt of apptResult.data ?? []) {
+          const sid = (appt as { staff_profile_id: string | null }).staff_profile_id;
+          if (!sid) continue;
+          if (!apptByStaff.has(sid)) apptByStaff.set(sid, []);
+          apptByStaff.get(sid)!.push(appt as Record<string, unknown>);
         }
 
-        const { data: statusLog } = await supabaseAdmin
-          .from("appointment_status_log")
-          .select("*")
-          .eq("appointment_id", id)
-          .order("created_at", { ascending: true });
+        const rows: StaffSummaryRow[] = (staffResult.data ?? []).map((raw) => {
+          const row = raw as Record<string, unknown>;
+          const staffId = row.id as string;
+          const isActive = Boolean(row.is_active);
+          const specialties = Array.isArray(row.specialties)
+            ? (row.specialties as string[])
+            : [];
 
-        return json({ ...normalizePayment(data), status_log: statusLog ?? [] });
+          const bm = row.business_member as Record<string, unknown> | null;
+          const role = (bm?.role as string | undefined) ?? "staff";
+          const user = bm?.user as Record<string, unknown> | null;
+
+          const appts = apptByStaff.get(staffId) ?? [];
+          const productive = appts.filter((a) => {
+            const status = a.status as string;
+            return status !== "cancelled" && status !== "no_show";
+          });
+
+          const bookingsToday = productive.length;
+          const revenueToday = productive.reduce((sum, a) => sum + Number(a.price ?? 0), 0);
+          const utilizedMinutes = productive.reduce((sum, a) => {
+            const startsAt = new Date(String(a.starts_at));
+            const endsAt = new Date(String(a.ends_at));
+            if (Number.isNaN(startsAt.getTime()) || Number.isNaN(endsAt.getTime())) return sum;
+            return sum + Math.max(0, (endsAt.getTime() - startsAt.getTime()) / 60000);
+          }, 0);
+
+          // Baseline workday of 8 hours when working-hours table is not joined.
+          const utilizationToday = Math.min(100, Math.round((utilizedMinutes / 480) * 100));
+
+          let status: StaffSummaryRow["status"] = "Inactive";
+          if (isActive) {
+            status = bookingsToday > 0 ? "Active" : "Off Today";
+          }
+
+          return {
+            id: staffId,
+            display_name: String(row.display_name ?? "Staff"),
+            role,
+            email: (user?.email as string | undefined) ?? null,
+            phone: (user?.phone as string | undefined) ?? null,
+            avatar_url: (row.avatar_url as string | undefined) ?? null,
+            specialties,
+            status,
+            bookings_today: bookingsToday,
+            revenue_today: Math.round(revenueToday * 100) / 100,
+            utilization_today: utilizationToday,
+          };
+        });
+
+        rows.sort((a, b) => a.display_name.localeCompare(b.display_name));
+        return json(rows);
       }
 
       // Paginated list
@@ -143,8 +263,8 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
         .eq("business_id", businessId)
         .order("starts_at", { ascending: false });
 
-      if (dateFrom) query = query.gte("starts_at", dateFrom);
-      if (dateTo) query = query.lte("starts_at", dateTo);
+      if (dateFrom) query = query.gte("starts_at", `${dateFrom}T00:00:00`);
+      if (dateTo)   query = query.lte("starts_at", `${dateTo}T23:59:59`);
       if (statusParams?.length) query = query.in("status", statusParams);
       if (staffId) query = query.eq("staff_profile_id", staffId);
       if (search) {

@@ -134,7 +134,7 @@ Deno.serve(withLogging("finance", async (req: Request) => {
             .from("payments")
             .select(`id, amount, tax_amount, paid_at, method, appointment:appointments!inner(booking_reference, service:services!inner(name))`)
             .eq("business_id", businessId)
-            .eq("status", "succeeded")
+            .eq("status", "paid")
             .gte("paid_at", from)
             .lte("paid_at", to),
           supabaseAdmin

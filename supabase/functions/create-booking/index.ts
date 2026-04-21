@@ -9,6 +9,7 @@ import {
   sendEmail,
   bookingConfirmationEmail,
 } from "../_shared/resend.ts";
+import { issueCancelToken } from "../_shared/bookingCancelToken.ts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -37,6 +38,16 @@ interface CreateBookingBody {
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const TIME_RE = /^\d{2}:\d{2}$/;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+function stripeKeyHint(key: string | null | undefined): string | null {
+  if (!key) return null;
+  const trimmed = key.trim();
+  // Capture only the first 16 chars after the mode prefix — the Stripe account
+  // segment shared by every key pair from the same account. Comparing the full
+  // key body would always fail because sk and pk bodies are always distinct.
+  const match = trimmed.match(/^(?:sk|pk)_(?:live|test)_([A-Za-z0-9]{16})/);
+  return match?.[1] ?? null;
+}
 
 function validateBody(body: CreateBookingBody): string | null {
   if (!body.business_id) return "business_id is required";
@@ -96,6 +107,35 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
       client,
       payment_method,
     } = body;
+
+    // ── Guard: fail early on common Stripe key mismatch misconfiguration ──
+    if (payment_method !== "later") {
+      const secretKey = Deno.env.get("STRIPE_SECRET_KEY")?.trim();
+      if (!secretKey) {
+        return serverError(
+          "Payments are temporarily unavailable: STRIPE_SECRET_KEY is not configured.",
+        );
+      }
+
+      const publishableKey =
+        Deno.env.get("VITE_STRIPE_PUBLISHABLE_KEY")?.trim() ??
+        Deno.env.get("STRIPE_PUBLISHABLE_KEY")?.trim();
+
+      // If both keys are present in this runtime, compare hints and fail fast
+      // with a friendly message before the client reaches the pay step.
+      if (publishableKey) {
+        const skHint = stripeKeyHint(secretKey);
+        const pkHint = stripeKeyHint(publishableKey);
+        if (skHint && pkHint && skHint !== pkHint) {
+          return serverError(
+            "Payments are temporarily unavailable due to Stripe key mismatch. Please align frontend VITE_STRIPE_PUBLISHABLE_KEY with the Stripe account used by backend STRIPE_SECRET_KEY.",
+            {
+              code: "STRIPE_KEY_MISMATCH",
+            },
+          );
+        }
+      }
+    }
 
     // ── Optional auth ─────────────────────────────────────────────────────
     let userId: string | null = null;
@@ -385,6 +425,7 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
 
     if (apptErr) throw apptErr;
     const appointmentId = appointment.id;
+    const cancelToken = await issueCancelToken(appointmentId, bookingReference);
 
     // STEP 7: INSERT appointment_services
     const { error: apptSvcErr } = await supabaseAdmin
@@ -476,7 +517,7 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
           time,
           reference: bookingReference,
           price: `${currencyCode === "EUR" ? "€" : currencyCode} ${totalAmount.toFixed(2)}`,
-          manageUrl: `${appUrl}/bookings/${bookingReference}`,
+          manageUrl: `${appUrl}/booking/${bookingReference}?token=${encodeURIComponent(cancelToken)}`,
         },
         locale,
       );
@@ -513,6 +554,7 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
       return jsonOk({
         booking_reference: bookingReference,
         appointment_id: appointmentId,
+        cancel_token: cancelToken,
         status: "confirmed",
       });
     } else {
@@ -529,6 +571,13 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
             payment_type: payment_method,
           },
           stripeAccountId,
+          {
+            email: client.email,
+            name: client.name,
+            phone: client.phone,
+            bookingReference,
+            serviceName: service.name,
+          },
         );
 
         // Update payment with Stripe PI ID
@@ -540,7 +589,10 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
         return jsonOk({
           booking_reference: bookingReference,
           appointment_id: appointmentId,
+          cancel_token: cancelToken,
           payment_intent_client_secret: paymentIntent.client_secret,
+          stripe_account_id: stripeAccountId,
+          stripe_key_hint: stripeKeyHint(Deno.env.get("STRIPE_SECRET_KEY")),
           status: "pending_payment",
         });
       } catch (stripeErr) {

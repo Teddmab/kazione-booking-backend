@@ -5,14 +5,28 @@
   "scripts": {
     "start": "npx supabase start",
     "stop": "npx supabase stop",
-    "dev": "npx supabase functions serve",
+    "dev": "npx supabase functions serve --env-file .env",
     "dev:remote": "npx supabase functions serve --project-ref hwvqbsqlvwvedyhfuiwt --no-verify-jwt --env-file .env",
-    "functions:serve": "npx supabase functions serve",
+    "functions:serve": "npx supabase functions serve --env-file .env",
     "db:push": "npx supabase db push",
     "db:reset": "npx supabase db reset",
     "lint": "deno lint supabase/functions"
   },
   "devDependencies": {
     "typescript": "^5.4.5"
+  },
+  "dependencies": {
+    "@fullcalendar/daygrid": "^6.1.20",
+    "@fullcalendar/interaction": "^6.1.20",
+    "@fullcalendar/react": "^6.1.20",
+    "@fullcalendar/timegrid": "^6.1.20",
+    "@hookform/devtools": "^4.4.0",
+    "@sentry/node": "^10.48.0",
+    "@sentry/react": "^10.48.0",
+    "@tanstack/react-query-devtools": "^5.99.0",
+    "date-fns-tz": "^3.2.0",
+    "posthog-js": "^1.367.0",
+    "resend": "^6.10.0",
+    "stripe": "^22.0.1"
   }
 }

@@ -10,7 +10,8 @@
     "functions:serve": "npx supabase functions serve --env-file .env",
     "db:push": "npx supabase db push",
     "db:reset": "npx supabase db reset",
-    "lint": "deno lint supabase/functions"
+    "lint": "deno lint supabase/functions",
+    "test:backend": "deno test supabase/functions/ --allow-env --allow-net --allow-read"
   },
   "devDependencies": {
     "typescript": "^5.4.5"

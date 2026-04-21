@@ -57,3 +57,12 @@ verify_jwt = false
 [functions.send-reminders]
 verify_jwt = false
 # schedule = "0 8 * * *"   # uncomment when deploying to cloud (Pro plan required)
+
+# pawapay-webhook receives signed POSTs from PawaPay's servers, not authenticated users.
+# JWT verification is disabled; signature is verified via HMAC-SHA256 in the function.
+[functions.pawapay-webhook]
+verify_jwt = false
+
+# pawapay-payment is a public endpoint called by the frontend before the user has a JWT.
+[functions.pawapay-payment]
+verify_jwt = false

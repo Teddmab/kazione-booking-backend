@@ -53,7 +53,10 @@ Deno.serve(withLogging("storefront-owner", async (req: Request) => {
     if (method === "PATCH") {
       if (action === "reorder-gallery") {
         const body = await req.json() as Record<string, unknown>;
-        const ctx = await requireOwnerOrManagerCtx(req, body.business_id as string);
+        const ctx = await requireOwnerOrManagerCtx(
+          req,
+          body.business_id as string,
+        );
         if (ctx instanceof Response) return ctx;
 
         const storefrontId = body.storefront_id as string;
@@ -79,10 +82,35 @@ Deno.serve(withLogging("storefront-owner", async (req: Request) => {
       if (ctx instanceof Response) return ctx;
 
       const { business_id: _, ...updates } = body;
+
+      // Merge sections JSONB instead of replacing it, so a partial update
+      // (e.g. { sections: { reviews: true } }) preserves all other section keys.
+      if (
+        updates.sections !== undefined &&
+        typeof updates.sections === "object" && updates.sections !== null
+      ) {
+        const { data: existing } = await supabaseAdmin
+          .from("storefronts")
+          .select("sections")
+          .eq("business_id", ctx.businessId)
+          .maybeSingle();
+
+        const baseSections = (existing?.sections as Record<string, boolean>) ??
+          {};
+        updates.sections = {
+          ...baseSections,
+          ...(updates.sections as Record<string, boolean>),
+        };
+      }
+
       const { data, error } = await supabaseAdmin
         .from("storefronts")
         .upsert(
-          { business_id: ctx.businessId, ...updates, updated_at: new Date().toISOString() },
+          {
+            business_id: ctx.businessId,
+            ...updates,
+            updated_at: new Date().toISOString(),
+          },
           { onConflict: "business_id" },
         )
         .select("*")
@@ -103,7 +131,11 @@ Deno.serve(withLogging("storefront-owner", async (req: Request) => {
       if (action === "publish") {
         const { error } = await supabaseAdmin
           .from("storefronts")
-          .update({ is_published: true, marketplace_status: "active", updated_at: new Date().toISOString() })
+          .update({
+            is_published: true,
+            marketplace_status: "active",
+            updated_at: new Date().toISOString(),
+          })
           .eq("business_id", ctx.businessId);
 
         if (error) return serverError(error.message);
@@ -113,7 +145,11 @@ Deno.serve(withLogging("storefront-owner", async (req: Request) => {
       if (action === "unpublish") {
         const { error } = await supabaseAdmin
           .from("storefronts")
-          .update({ is_published: false, marketplace_status: "draft", updated_at: new Date().toISOString() })
+          .update({
+            is_published: false,
+            marketplace_status: "draft",
+            updated_at: new Date().toISOString(),
+          })
           .eq("business_id", ctx.businessId);
 
         if (error) return serverError(error.message);
@@ -157,11 +193,17 @@ Deno.serve(withLogging("storefront-owner", async (req: Request) => {
         const { data: sfRow } = await supabaseAdmin
           .from("storefronts")
           .select("business_id")
-          .eq("id", (galleryRow as Record<string, unknown>).storefront_id as string)
+          .eq(
+            "id",
+            (galleryRow as Record<string, unknown>).storefront_id as string,
+          )
           .maybeSingle();
 
         if (sfRow) {
-          const ctx = await requireOwnerOrManagerCtx(req, (sfRow as Record<string, unknown>).business_id as string);
+          const ctx = await requireOwnerOrManagerCtx(
+            req,
+            (sfRow as Record<string, unknown>).business_id as string,
+          );
           if (ctx instanceof Response) return ctx;
         }
       }
@@ -172,7 +214,9 @@ Deno.serve(withLogging("storefront-owner", async (req: Request) => {
         const idx = imageUrl.indexOf(marker);
         if (idx !== -1) {
           const storagePath = imageUrl.slice(idx + marker.length);
-          await supabaseAdmin.storage.from("business-assets").remove([storagePath]);
+          await supabaseAdmin.storage.from("business-assets").remove([
+            storagePath,
+          ]);
         }
       }
 

@@ -24,7 +24,12 @@ Deno.serve(withLogging("me", async (req: Request) => {
   if (corsResp) return corsResp;
 
   if (req.method !== "GET" && req.method !== "PATCH") {
-    return json({ error: { code: "METHOD_NOT_ALLOWED", message: "Only GET and PATCH are allowed" } }, 405);
+    return json({
+      error: {
+        code: "METHOD_NOT_ALLOWED",
+        message: "Only GET and PATCH are allowed",
+      },
+    }, 405);
   }
 
   try {
@@ -79,7 +84,7 @@ Deno.serve(withLogging("me", async (req: Request) => {
       return json({ profile: updatedProfile ?? null });
     }
 
-    const [profileResult, membershipResult] = await Promise.all([
+    const [profileResult, membershipsResult] = await Promise.all([
       supabaseAdmin
         .from("users")
         .select("id, first_name, last_name, email, phone, avatar_url")
@@ -90,24 +95,25 @@ Deno.serve(withLogging("me", async (req: Request) => {
         .select("business_id, role, businesses(name)")
         .eq("user_id", user.id)
         .eq("is_active", true)
-        .limit(1)
-        .maybeSingle(),
+        .order("created_at", { ascending: true }),
     ]);
 
     const profile = profileResult.data ?? null;
-    const membership = membershipResult.data ?? null;
+    const memberships = (membershipsResult.data ?? []) as unknown as Array<{
+      business_id: string;
+      role: string;
+      businesses: { name: string } | null;
+    }>;
 
-    let tenant = null;
-    if (membership) {
-      const biz = membership.businesses as unknown as { name: string } | null;
-      tenant = {
-        businessId: membership.business_id as string,
-        businessName: biz?.name ?? "",
-        role: membership.role as string,
-      };
-    }
+    const businesses = memberships.map((m) => ({
+      businessId: m.business_id,
+      businessName: m.businesses?.name ?? "",
+      role: m.role,
+    }));
 
-    return json({ profile, tenant });
+    const tenant = businesses.length > 0 ? businesses[0] : null;
+
+    return json({ profile, tenant, businesses });
   } catch (e) {
     if (e instanceof Response) return e;
     console.error("me error:", e);

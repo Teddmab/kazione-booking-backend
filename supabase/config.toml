@@ -45,6 +45,11 @@ enable_confirmations = false
 
 # ── Function config ──────────────────────────────────────────────────────────
 # JWT verification is enabled by default for all functions.
+
+# auth-register is a public registration endpoint — the user has no JWT yet.
+[functions.auth-register]
+verify_jwt = false
+
 # Stripe webhook must accept unsigned POST requests (Stripe signs with its own
 # signature header, not a JWT). JWT verification is disabled for this function.
 [functions.stripe-webhook]

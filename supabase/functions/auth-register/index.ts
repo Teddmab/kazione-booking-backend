@@ -129,13 +129,14 @@ Deno.serve(withLogging("auth-register", async (req: Request) => {
     }
 
     // ── Customer registration ────────────────────────────────────────────────
-    const { error: userError } = await supabaseAdmin.from("users").insert({
+    // Upsert: on_auth_user_created trigger may have already inserted a bare row.
+    const { error: userError } = await supabaseAdmin.from("users").upsert({
       id: userId,
       email,
       first_name: firstName,
       last_name: lastName,
       phone: body.phone ?? null,
-    });
+    }, { onConflict: "id" });
 
     if (userError) {
       await supabaseAdmin.auth.admin.deleteUser(userId);

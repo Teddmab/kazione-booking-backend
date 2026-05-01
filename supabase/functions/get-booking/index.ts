@@ -24,7 +24,7 @@ Deno.serve(withLogging("get-booking", async (req: Request) => {
       return badRequest("Missing required query parameter: id or booking_reference");
     }
 
-    let query = supabaseAdmin
+    const baseQuery = supabaseAdmin
       .from("appointments")
       .select(`
         id, business_id, client_id, staff_profile_id, service_id,
@@ -34,16 +34,13 @@ Deno.serve(withLogging("get-booking", async (req: Request) => {
         service:services(name),
         staff:staff_profiles(display_name, avatar_url),
         business:businesses(name, country)
-      `)
-      .maybeSingle();
+      `);
 
-    if (id) {
-      query = query.eq("id", id);
-    } else {
-      query = query.eq("booking_reference", bookingRef!);
-    }
+    const filteredQuery = id
+      ? baseQuery.eq("id", id)
+      : baseQuery.eq("booking_reference", bookingRef!);
 
-    const { data: booking, error } = await query;
+    const { data: booking, error } = await filteredQuery.maybeSingle();
     if (error) {
       console.error("get-booking query error:", error);
       return serverError("Failed to fetch booking");

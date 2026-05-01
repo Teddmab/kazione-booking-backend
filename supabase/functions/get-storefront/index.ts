@@ -288,8 +288,9 @@ Deno.serve(withLogging("get-storefront", async (req: Request) => {
         ).toFixed(1);
       }
     } else {
-      rating = +(reviewAggResult.data.avg_rating ?? 0);
-      reviewCount = +(reviewAggResult.data.review_count ?? 0);
+      const agg = reviewAggResult.data as { avg_rating?: number; review_count?: number };
+      rating = +(agg.avg_rating ?? 0);
+      reviewCount = +(agg.review_count ?? 0);
     }
 
     // ── Map services with translations ────────────────────────────────────

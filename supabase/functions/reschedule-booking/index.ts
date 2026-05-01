@@ -233,8 +233,8 @@ Deno.serve(withLogging("reschedule-booking", async (req: Request) => {
 
     if (updateErr) throw updateErr;
 
-    // Update appointment_services timestamps too
-    await supabaseAdmin
+    // Update appointment_services timestamps too (fire-and-forget — non-fatal)
+    const { error: svcUpdateErr } = await supabaseAdmin
       .from("appointment_services")
       .update({
         starts_at: newStartsAt,
@@ -242,6 +242,9 @@ Deno.serve(withLogging("reschedule-booking", async (req: Request) => {
         staff_profile_id: resolvedStaffId,
       })
       .eq("appointment_id", appointment.id);
+    if (svcUpdateErr) {
+      console.error("appointment_services update failed:", svcUpdateErr.message);
+    }
 
     // ── Status log ────────────────────────────────────────────────────────
     await supabaseAdmin.from("appointment_status_log").insert({

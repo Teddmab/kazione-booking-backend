@@ -1,0 +1,36 @@
+name: CI — Backend (kazione-booking-backend)
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+
+jobs:
+  backend-ci:
+    name: Deno type check + unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Type check all edge functions
+        run: |
+          fail=0
+          for f in supabase/functions/*/index.ts; do
+            echo "Checking $f..."
+            deno check "$f" || fail=1
+          done
+          exit $fail
+
+      - name: Run unit tests
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          INTERNAL_FUNCTION_KEY: ${{ secrets.INTERNAL_FUNCTION_KEY }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: deno test supabase/functions/ --allow-env --allow-net

@@ -81,7 +81,7 @@ Deno.serve(withLogging("staff", async (req: Request) => {
 
       // Enrich with email + role from business_members → users
       const memberIds = (staffRows ?? [])
-        .map((s) => (s as Record<string, unknown>).business_member_id)
+        .map((s: Record<string, unknown>) => s.business_member_id)
         .filter(Boolean) as string[];
 
       const memberMap = new Map<string, { email: string; role: string }>();
@@ -106,7 +106,7 @@ Deno.serve(withLogging("staff", async (req: Request) => {
         Date.now() - 30 * 24 * 60 * 60 * 1000,
       ).toISOString();
       const staffIds = (staffRows ?? []).map(
-        (s) => (s as Record<string, unknown>).id as string,
+        (s: Record<string, unknown>) => s.id as string,
       );
 
       const apptCountMap = new Map<string, number>();
@@ -124,8 +124,8 @@ Deno.serve(withLogging("staff", async (req: Request) => {
         }
       }
 
-      const result = (staffRows ?? []).map((s) => {
-        const row = s as Record<string, unknown>;
+      const result = (staffRows ?? []).map((s: Record<string, unknown>) => {
+        const row = s;
         const memberId = row.business_member_id as string | null;
         const memberInfo = memberId ? memberMap.get(memberId) : undefined;
         const workingHours =
@@ -386,11 +386,11 @@ Deno.serve(withLogging("staff", async (req: Request) => {
 
       return json({
         success: true,
-        schedule: (inserted ?? []).map((r) => ({
-          day: (r as Record<string, unknown>).day_of_week,
-          is_working: (r as Record<string, unknown>).is_working,
-          start_time: (r as Record<string, unknown>).start_time ?? null,
-          end_time: (r as Record<string, unknown>).end_time ?? null,
+        schedule: (inserted ?? []).map((r: Record<string, unknown>) => ({
+          day: r.day_of_week,
+          is_working: r.is_working,
+          start_time: r.start_time ?? null,
+          end_time: r.end_time ?? null,
         })),
       });
     }

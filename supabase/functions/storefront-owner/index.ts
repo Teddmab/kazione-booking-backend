@@ -15,9 +15,11 @@ function json(data: unknown, status = 200): Response {
  * /storefront-owner — owner storefront CRUD (no image uploads — use /storefront-upload)
  *
  * GET  ?business_id=                         → getOwnerStorefront (full record, draft ok)
+ * GET  ?action=gallery&business_id=          → list gallery images for the storefront
  * PATCH body={business_id, ...updates}       → upsert storefront fields
  * POST  ?action=publish&business_id=         → publish storefront
  * POST  ?action=unpublish&business_id=       → unpublish storefront
+ * POST  ?action=gallery-record&business_id=  → insert gallery record after upload
  * DELETE ?action=gallery&id=&image_url=      → delete a gallery image
  * PATCH  ?action=reorder-gallery             → batch-update gallery display_order
  *          body={ business_id, storefront_id, ordered_ids: string[] }
@@ -38,6 +40,27 @@ Deno.serve(withLogging("storefront-owner", async (req: Request) => {
 
       const ctx = await requireOwnerOrManagerCtx(req, businessId);
       if (ctx instanceof Response) return ctx;
+
+      // GET ?action=gallery — return all gallery images for the storefront
+      if (action === "gallery") {
+        const { data: storefront, error: sfErr } = await supabaseAdmin
+          .from("storefronts")
+          .select("id")
+          .eq("business_id", ctx.businessId)
+          .maybeSingle();
+
+        if (sfErr) return serverError(sfErr.message);
+        if (!storefront) return json([]);
+
+        const { data, error } = await supabaseAdmin
+          .from("storefront_gallery")
+          .select("*")
+          .eq("storefront_id", storefront.id)
+          .order("display_order", { ascending: true });
+
+        if (error) return serverError(error.message);
+        return json(data ?? []);
+      }
 
       const { data, error } = await supabaseAdmin
         .from("storefronts")
@@ -82,6 +105,32 @@ Deno.serve(withLogging("storefront-owner", async (req: Request) => {
       if (ctx instanceof Response) return ctx;
 
       const { business_id: _, ...updates } = body;
+
+      // If the storefront row does not exist yet, an UPSERT insert path needs
+      // required fields (`slug`, `title`). Derive defaults from businesses.
+      const { data: existingStorefront, error: existingStorefrontErr } =
+        await supabaseAdmin
+          .from("storefronts")
+          .select("id")
+          .eq("business_id", ctx.businessId)
+          .maybeSingle();
+
+      if (existingStorefrontErr) return serverError(existingStorefrontErr.message);
+
+      if (!existingStorefront) {
+        const { data: business, error: bizErr } = await supabaseAdmin
+          .from("businesses")
+          .select("name, slug")
+          .eq("id", ctx.businessId)
+          .single();
+
+        if (bizErr || !business) {
+          return serverError("Failed to load business defaults");
+        }
+
+        if (updates.slug === undefined) updates.slug = business.slug;
+        if (updates.title === undefined) updates.title = business.name;
+      }
 
       // Merge sections JSONB instead of replacing it, so a partial update
       // (e.g. { sections: { reviews: true } }) preserves all other section keys.

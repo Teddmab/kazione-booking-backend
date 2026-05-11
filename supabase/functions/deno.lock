@@ -2,7 +2,10 @@
   "version": "5",
   "redirects": {
     "https://deno.land/std/testing/asserts.ts": "https://deno.land/std@0.224.0/testing/asserts.ts",
-    "https://esm.sh/@supabase/supabase-js@2": "https://esm.sh/@supabase/supabase-js@2.105.1"
+    "https://esm.sh/@supabase/supabase-js@2": "https://esm.sh/@supabase/supabase-js@2.105.1",
+    "https://esm.sh/@types/react@~19.0.10/index.d.ts": "https://esm.sh/@types/react@19.0.14/index.d.ts",
+    "https://esm.sh/resend@3?target=deno": "https://esm.sh/resend@3.5.0?target=deno",
+    "https://esm.sh/stripe@14?target=deno": "https://esm.sh/stripe@14.25.0?target=deno"
   },
   "remote": {
     "https://deno.land/std@0.224.0/assert/_constants.ts": "a271e8ef5a573f1df8e822a6eb9d09df064ad66a4390f21b3e31f820a38e0975",
@@ -39,25 +42,8 @@
     "https://deno.land/std@0.224.0/internal/format.ts": "0a98ee226fd3d43450245b1844b47003419d34d210fa989900861c79820d21c2",
     "https://deno.land/std@0.224.0/internal/mod.ts": "534125398c8e7426183e12dc255bb635d94e06d0f93c60a297723abe69d3b22e",
     "https://deno.land/std@0.224.0/testing/asserts.ts": "d0cdbabadc49cc4247a50732ee0df1403fdcd0f95360294ad448ae8c240f3f5c",
-    "https://esm.sh/@supabase/supabase-js@2.105.1": "d96e63cd3c7d0a07d5821a3573b4923d0e556e064633265c584656d95b22fa38"
-  },
-  "workspace": {
-    "packageJson": {
-      "dependencies": [
-        "npm:@fullcalendar/daygrid@^6.1.20",
-        "npm:@fullcalendar/interaction@^6.1.20",
-        "npm:@fullcalendar/react@^6.1.20",
-        "npm:@fullcalendar/timegrid@^6.1.20",
-        "npm:@hookform/devtools@^4.4.0",
-        "npm:@sentry/node@^10.48.0",
-        "npm:@sentry/react@^10.48.0",
-        "npm:@tanstack/react-query-devtools@^5.99.0",
-        "npm:date-fns-tz@^3.2.0",
-        "npm:posthog-js@^1.367.0",
-        "npm:resend@^6.10.0",
-        "npm:stripe@^22.0.1",
-        "npm:typescript@^5.4.5"
-      ]
-    }
+    "https://esm.sh/@supabase/supabase-js@2.105.1": "d96e63cd3c7d0a07d5821a3573b4923d0e556e064633265c584656d95b22fa38",
+    "https://esm.sh/resend@3.5.0?target=deno": "7bb513e7a9f8eeb5065f004f00ad85e4a6e1e31519bca6fc12fde5ddc072f769",
+    "https://esm.sh/stripe@14.25.0?target=deno": "d51f866ea5a2e00948bbd0fbcd10e389f0a74811d5320874d08fde4ff54e6ccc"
   }
 }

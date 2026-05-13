@@ -135,3 +135,43 @@ Deno.test("staff: DELETE non-existent id → 404", async () => {
   assertEquals(res.status, 404)
   await res.body?.cancel()
 })
+
+// ── GET ?action=services ──────────────────────────────────────────────────────
+
+Deno.test("staff: GET services without id → 400", async () => {
+  if (!OWNER_TOKEN) return
+  const res = await call("GET", OWNER_TOKEN, undefined, { action: "services" })
+  assertEquals(res.status, 400)
+  await res.body?.cancel()
+})
+
+Deno.test("staff: GET services non-existent id → 404", async () => {
+  if (!OWNER_TOKEN) return
+  const res = await call("GET", OWNER_TOKEN, undefined, { action: "services", id: "00000000-0000-0000-0000-000000000000" })
+  assertEquals(res.status, 404)
+  await res.body?.cancel()
+})
+
+// ── PATCH ?action=assign-services ────────────────────────────────────────────
+
+Deno.test("staff: PATCH assign-services without id → 400", async () => {
+  if (!OWNER_TOKEN) return
+  const res = await call("PATCH", OWNER_TOKEN, { service_ids: [] }, { action: "assign-services" })
+  assertEquals(res.status, 400)
+  await res.body?.cancel()
+})
+
+Deno.test("staff: PATCH assign-services missing service_ids → 400", async () => {
+  if (!OWNER_TOKEN) return
+  const res = await call("PATCH", OWNER_TOKEN, {}, { action: "assign-services", id: "00000000-0000-0000-0000-000000000001" })
+  assertEquals(res.status, 400)
+  await res.body?.cancel()
+})
+
+Deno.test("staff: PATCH assign-services invalid service_ids → 400", async () => {
+  if (!OWNER_TOKEN) return
+  const res = await call("PATCH", OWNER_TOKEN, { service_ids: ["not-a-real-uuid"] }, { action: "assign-services", id: "00000000-0000-0000-0000-000000000001" })
+  // 400 (invalid UUIDs) or 404 (staff not found under this business)
+  if (![400, 404].includes(res.status)) throw new Error(`Expected 400 or 404, got ${res.status}`)
+  await res.body?.cancel()
+})

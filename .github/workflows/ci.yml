@@ -1,0 +1,42 @@
+name: CI — Backend (kazione-booking-backend)
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+
+jobs:
+  backend-ci:
+    name: Deno type check + lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Type check all edge functions
+        run: |
+          fail=0
+          for f in supabase/functions/*/index.ts; do
+            echo "Checking $f..."
+            deno check "$f" || fail=1
+          done
+          exit $fail
+
+      - name: Lint
+        run: deno lint supabase/functions
+
+# Integration tests (supabase/functions/**/*.test.ts) require a live local
+# Supabase stack at http://127.0.0.1:54321 and cannot run in GitHub Actions
+# without a full Supabase service container setup.
+#
+# Run them locally before opening a PR:
+#   supabase start
+#   npm run test:backend          # deno test supabase/functions/ --allow-env --allow-net
+#
+# A future improvement: add a job using supabase/setup-cli + supabase start
+# to run integration tests in CI against an ephemeral local stack.

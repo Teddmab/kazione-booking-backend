@@ -52,9 +52,15 @@ Deno.serve(withLogging("staff", async (req: Request) => {
 
   try {
     // ── GET /staff ────────────────────────────────────────────────────────────
-    // business_id derived from JWT — frontend sends no business_id param.
-    if (method === "GET") {
-      const ctx = await resolveCallerBusiness(req);
+    // business_id from query param (preferred) or resolved from JWT membership.
+    if (method === "GET" && !action) {
+      const qBusinessId = url.searchParams.get("business_id");
+      let ctx: { userId: string; businessId: string; role: string } | Response;
+      if (qBusinessId) {
+        ctx = await requireOwnerOrManagerCtx(req, qBusinessId);
+      } else {
+        ctx = await resolveCallerBusiness(req);
+      }
       if (ctx instanceof Response) return ctx;
 
       const { data: staffRows, error: staffErr } = await supabaseAdmin
@@ -152,12 +158,20 @@ Deno.serve(withLogging("staff", async (req: Request) => {
       return json(result);
     }
 
-    // ── POST /staff (invite new member) ───────────────────────────────────────
-    // business_id derived from JWT — frontend sends { name, email, role }.
+    // ── POST /staff (add staff member) ───────────────────────────────────────
+    // Creates a staff_profile directly. If the email matches an existing user
+    // they are also linked via business_members. Staff is active immediately
+    // because the owner is adding them explicitly from the dashboard.
     if (method === "POST") {
       const body = await req.json() as Record<string, unknown>;
 
-      const ctx = await resolveCallerBusiness(req);
+      const qBusinessId = body.business_id as string | undefined;
+      let ctx: { userId: string; businessId: string; role: string } | Response;
+      if (qBusinessId) {
+        ctx = await requireOwnerOrManagerCtx(req, qBusinessId);
+      } else {
+        ctx = await resolveCallerBusiness(req);
+      }
       if (ctx instanceof Response) return ctx;
 
       const name = String(body.name ?? body.display_name ?? "").trim();
@@ -172,54 +186,160 @@ Deno.serve(withLogging("staff", async (req: Request) => {
         return badRequest("role must be owner, manager, staff, or receptionist");
       }
 
-      // Delegate invite logic entirely to invite-staff
-      const { data: inviteData, error: invokeErr } =
-        await supabaseAdmin.functions.invoke("invite-staff", {
-          body: {
-            business_id: ctx.businessId,
-            email,
-            display_name: name,
-            role,
-          },
-          headers: {
-            Authorization: req.headers.get("Authorization") ?? "",
-          },
-        });
+      // Link to an existing user account if the email is already registered
+      let memberId: string | null = null;
+      const { data: existingUser } = await supabaseAdmin
+        .from("users")
+        .select("id")
+        .eq("email", email)
+        .maybeSingle();
 
-      if (invokeErr) {
-        console.error("invite-staff invoke error:", invokeErr);
-        return serverError("Failed to invite staff member");
-      }
+      if (existingUser) {
+        // Check for an existing membership (active or inactive)
+        const { data: existingMember } = await supabaseAdmin
+          .from("business_members")
+          .select("id, is_active")
+          .eq("business_id", ctx.businessId)
+          .eq("user_id", existingUser.id)
+          .maybeSingle();
 
-      const invite = inviteData as Record<string, unknown>;
-
-      // Fetch created staff_profile to return consistent shape
-      if (invite?.staff_profile_id) {
-        const { data: sp } = await supabaseAdmin
-          .from("staff_profiles")
-          .select("id, display_name, avatar_url, is_active")
-          .eq("id", invite.staff_profile_id as string)
-          .single();
-
-        if (sp) {
-          const profile = sp as Record<string, unknown>;
-          return json(
-            {
-              id: profile.id,
-              display_name: profile.display_name,
-              email,
-              role,
-              is_active: profile.is_active,
-              avatar_url: profile.avatar_url ?? null,
-              working_hours: [],
-              appointments_last_30_days: 0,
-            },
-            201,
-          );
+        if (existingMember?.is_active) {
+          // Already an active member — still create a staff profile if they
+          // don't have one yet (e.g. owner adding themselves as bookable staff)
+          memberId = existingMember.id as string;
+        } else {
+          // Create or re-activate the membership
+          const { data: member, error: memberErr } = await supabaseAdmin
+            .from("business_members")
+            .upsert(
+              {
+                business_id: ctx.businessId,
+                user_id: existingUser.id,
+                role,
+                is_active: true,
+                invited_at: new Date().toISOString(),
+              },
+              { onConflict: "business_id,user_id" },
+            )
+            .select("id")
+            .single();
+          if (memberErr) return serverError(memberErr.message);
+          memberId = member.id as string;
         }
       }
 
-      return json(inviteData, 201);
+      // Create the staff profile (active immediately — owner is adding them)
+      const { data: staffProfile, error: staffErr } = await supabaseAdmin
+        .from("staff_profiles")
+        .insert({
+          business_id: ctx.businessId,
+          business_member_id: memberId,
+          display_name: name,
+          is_active: true,
+        })
+        .select("id, display_name, avatar_url, is_active")
+        .single();
+
+      if (staffErr) return serverError(staffErr.message);
+
+      const sp = staffProfile as Record<string, unknown>;
+      return json(
+        {
+          id: sp.id,
+          display_name: sp.display_name,
+          email,
+          role,
+          is_active: sp.is_active,
+          avatar_url: sp.avatar_url ?? null,
+          working_hours: [],
+          appointments_last_30_days: 0,
+        },
+        201,
+      );
+    }
+
+    // ── PATCH /staff?action=assign-services&id= (set service assignments) ───────
+    // Accepts { service_ids: string[] } — replaces ALL existing staff_services rows.
+    if (method === "PATCH" && action === "assign-services") {
+      if (!staffId) return badRequest("id query param is required");
+      const body = await req.json() as Record<string, unknown>;
+      const serviceIds = body.service_ids as string[] | undefined;
+      if (!Array.isArray(serviceIds)) return badRequest("service_ids must be an array");
+
+      const { data: existing, error: existingErr } = await supabaseAdmin
+        .from("staff_profiles")
+        .select("id, business_id")
+        .eq("id", staffId)
+        .maybeSingle();
+
+      if (existingErr) return serverError(existingErr.message);
+      if (!existing) return notFound("Staff member not found");
+
+      const ctx = await requireOwnerOrManagerCtx(
+        req,
+        (existing as Record<string, unknown>).business_id as string,
+      );
+      if (ctx instanceof Response) return ctx;
+
+      // Verify all service_ids belong to this business (active or inactive — owner decides)
+      if (serviceIds.length > 0) {
+        const { data: validSvcs, error: svcErr } = await supabaseAdmin
+          .from("services")
+          .select("id")
+          .in("id", serviceIds)
+          .eq("business_id", ctx.businessId);
+
+        if (svcErr) return serverError(svcErr.message);
+        if ((validSvcs ?? []).length !== serviceIds.length) {
+          return badRequest("One or more service_ids do not belong to this business");
+        }
+      }
+
+      // Full replace: delete existing assignments then insert new ones
+      const { error: delErr } = await supabaseAdmin
+        .from("staff_services")
+        .delete()
+        .eq("staff_profile_id", staffId);
+      if (delErr) return serverError(delErr.message);
+
+      if (serviceIds.length > 0) {
+        const rows = serviceIds.map((sid) => ({
+          staff_profile_id: staffId,
+          service_id: sid,
+        }));
+        const { error: insErr } = await supabaseAdmin
+          .from("staff_services")
+          .insert(rows);
+        if (insErr) return serverError(insErr.message);
+      }
+
+      return json({ success: true, service_ids: serviceIds });
+    }
+
+    // ── PATCH /staff?action=get-services&id= (get current service assignments) ─
+    if (method === "GET" && action === "services") {
+      if (!staffId) return badRequest("id query param is required");
+
+      const { data: existing, error: existingErr } = await supabaseAdmin
+        .from("staff_profiles")
+        .select("id, business_id")
+        .eq("id", staffId)
+        .maybeSingle();
+
+      if (existingErr) return serverError(existingErr.message);
+      if (!existing) return notFound("Staff member not found");
+
+      const ctx = await resolveCallerBusiness(req);
+      if (ctx instanceof Response) return ctx;
+
+      const { data: rows, error: svcErr } = await supabaseAdmin
+        .from("staff_services")
+        .select("service_id")
+        .eq("staff_profile_id", staffId);
+
+      if (svcErr) return serverError(svcErr.message);
+
+      return json({ service_ids: (rows ?? []).map((r: Record<string, unknown>) => r.service_id) });
     }
 
     // ── PATCH /staff?id= (update profile / role) ──────────────────────────────

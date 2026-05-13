@@ -71,3 +71,33 @@ verify_jwt = false
 # pawapay-payment is a public endpoint called by the frontend before the user has a JWT.
 [functions.pawapay-payment]
 verify_jwt = false
+
+# ── Public marketplace & booking flow ────────────────────────────────────────
+# These functions are called by unauthenticated visitors. Some accept an
+# optional JWT (create-booking, cancel-booking, reschedule-booking) for a
+# richer experience when the user is logged in, but auth is never required.
+
+[functions.marketplace-storefronts]
+verify_jwt = false
+
+[functions.get-storefront]
+verify_jwt = false
+
+[functions.get-availability]
+verify_jwt = false
+
+[functions.create-booking]
+verify_jwt = false
+
+[functions.lookup-booking]
+verify_jwt = false
+
+[functions.cancel-booking]
+verify_jwt = false
+
+[functions.reschedule-booking]
+verify_jwt = false
+
+# reviews GET is public (storefront page); POST requires auth checked internally.
+[functions.reviews]
+verify_jwt = false

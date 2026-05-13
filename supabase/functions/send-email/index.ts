@@ -1,13 +1,13 @@
 import { Resend } from "resend";
 import { corsHeaders, handleCors } from "../_shared/cors.ts";
-import { badRequest, unauthorized, serverError } from "../_shared/errors.ts";
+import { badRequest, serverError, unauthorized } from "../_shared/errors.ts";
 import {
+  bookingCancellationEmail,
   bookingConfirmationEmail,
   bookingReminderEmail,
-  bookingCancellationEmail,
   bookingRescheduleEmail,
-  staffInviteEmail,
   reviewRequestEmail,
+  staffInviteEmail,
 } from "../_shared/resend.ts";
 import { withLogging } from "../_shared/logger.ts";
 
@@ -37,7 +37,8 @@ function verifyInternalKey(req: Request): boolean {
 // ---------------------------------------------------------------------------
 
 const resend = new Resend(Deno.env.get("RESEND_API_KEY")!);
-const DEFAULT_FROM = "KaziOne Booking <noreply@kazionebooking.com>";
+const DEFAULT_FROM = Deno.env.get("BUSINESS_EMAIL_FROM") ??
+  "KaziOne Booking <onboarding@resend.dev>";
 
 // ---------------------------------------------------------------------------
 // Template types

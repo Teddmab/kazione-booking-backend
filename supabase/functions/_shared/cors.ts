@@ -1,7 +1,7 @@
 // Restrict origin to ALLOWED_ORIGIN env var (set via `supabase secrets set`).
 // Falls back to the production domain so a missing secret is never silently open.
 const allowedOrigin =
-  Deno.env.get("ALLOWED_ORIGIN") ?? "https://app.kazione.com";
+  Deno.env.get("ALLOWED_ORIGIN") ?? "https://kazione.app";
 
 export const corsHeaders: Record<string, string> = {
   "Access-Control-Allow-Origin": allowedOrigin,

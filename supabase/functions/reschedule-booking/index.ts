@@ -10,6 +10,7 @@ import {
 } from "../_shared/errors.ts";
 import { withLogging } from "../_shared/logger.ts";
 import { verifyAuth } from "../_shared/auth.ts";
+import { checkRateLimit } from "../_shared/rateLimit.ts";
 import {
   sendEmail,
   bookingRescheduleEmail,
@@ -44,6 +45,10 @@ Deno.serve(withLogging("reschedule-booking", async (req: Request) => {
   if (req.method !== "POST") {
     return badRequest("Only POST is allowed");
   }
+
+  // ── Rate limit: 10 reschedules per IP per hour ───────────────────────────
+  const rateLimited = checkRateLimit(req, 10, 3_600_000);
+  if (rateLimited) return rateLimited;
 
   try {
     const body: RescheduleBody = await req.json();

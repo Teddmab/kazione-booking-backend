@@ -3,6 +3,7 @@ import { corsHeaders, handleCors } from "../_shared/cors.ts";
 import { badRequest, unauthorized, forbidden, notFound, serverError } from "../_shared/errors.ts";
 import { verifyAuth } from "../_shared/auth.ts";
 import { withLogging } from "../_shared/logger.ts";
+import { checkRateLimit } from "../_shared/rateLimit.ts";
 import { issueCancelToken, verifyCancelToken } from "../_shared/bookingCancelToken.ts";
 import {
   sendEmail,
@@ -48,6 +49,10 @@ Deno.serve(withLogging("cancel-booking", async (req: Request) => {
   if (req.method !== "POST") {
     return badRequest("Only POST is allowed");
   }
+
+  // ── Rate limit: 10 cancellations per IP per hour ─────────────────────────
+  const rateLimited = checkRateLimit(req, 10, 3_600_000);
+  if (rateLimited) return rateLimited;
 
   try {
     const body: CancelBody = await req.json();

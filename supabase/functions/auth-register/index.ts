@@ -2,6 +2,7 @@ import { supabaseAdmin } from "../_shared/supabaseAdmin.ts";
 import { corsHeaders, handleCors } from "../_shared/cors.ts";
 import { badRequest, conflict, serverError } from "../_shared/errors.ts";
 import { withLogging } from "../_shared/logger.ts";
+import { checkRateLimit } from "../_shared/rateLimit.ts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -56,6 +57,10 @@ Deno.serve(withLogging("auth-register", async (req: Request) => {
   if (req.method !== "POST") {
     return badRequest("Only POST is allowed");
   }
+
+  // ── Rate limit: 5 registrations per IP per hour ──────────────────────────
+  const rateLimited = checkRateLimit(req, 5, 3_600_000);
+  if (rateLimited) return rateLimited;
 
   try {
     const body: RegisterBody = await req.json();

@@ -23,12 +23,12 @@ jobs:
           fail=0
           for f in supabase/functions/*/index.ts; do
             echo "Checking $f..."
-            deno check "$f" || fail=1
+            deno check --config supabase/functions/deno.json "$f" || fail=1
           done
           exit $fail
 
       - name: Lint
-        run: deno lint supabase/functions
+        run: deno lint --config supabase/functions/deno.json supabase/functions
 
 # Integration tests (supabase/functions/**/*.test.ts) require a live local
 # Supabase stack at http://127.0.0.1:54321 and cannot run in GitHub Actions

@@ -9,7 +9,7 @@ import {
   sendEmail,
   bookingCancellationEmail,
 } from "../_shared/resend.ts";
-import Stripe from "stripe";
+import Stripe from "https://esm.sh/stripe@14?target=deno";
 
 // ---------------------------------------------------------------------------
 // Types

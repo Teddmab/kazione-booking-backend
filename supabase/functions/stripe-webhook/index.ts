@@ -1,4 +1,4 @@
-import Stripe from "stripe";
+import Stripe from "https://esm.sh/stripe@14?target=deno";
 import { stripe } from "../_shared/stripe.ts";
 import { supabaseAdmin } from "../_shared/supabaseAdmin.ts";
 import {

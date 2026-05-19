@@ -1,4 +1,4 @@
-import { Resend } from "resend";
+import { Resend } from "https://esm.sh/resend@3?target=deno";
 
 const RESEND_API_KEY = Deno.env.get("RESEND_API_KEY");
 const resend = RESEND_API_KEY ? new Resend(RESEND_API_KEY) : null;

@@ -1,4 +1,4 @@
-import { Resend } from "resend";
+import { Resend } from "https://esm.sh/resend@3?target=deno";
 import { corsHeaders, handleCors } from "../_shared/cors.ts";
 import { badRequest, serverError, unauthorized } from "../_shared/errors.ts";
 import {

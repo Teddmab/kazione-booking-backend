@@ -2,19 +2,18 @@ name: CI — Backend (kazione-booking-backend)
 
 on:
   push:
-    branches: [main, dev]
+    branches: [master, main, dev]
   pull_request:
-    branches: [main, dev]
+    branches: [master, main]
 
 jobs:
-  backend-ci:
-    name: Deno type check + lint
+  type-check:
+    name: Deno Type Check
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Deno
-        uses: denoland/setup-deno@v2
+      - uses: denoland/setup-deno@v2
         with:
           deno-version: v2.x
 
@@ -27,16 +26,54 @@ jobs:
           done
           exit $fail
 
+  lint:
+    name: Deno Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
       - name: Lint
         run: deno lint --config supabase/functions/deno.json supabase/functions
 
-# Integration tests (supabase/functions/**/*.test.ts) require a live local
-# Supabase stack at http://127.0.0.1:54321 and cannot run in GitHub Actions
-# without a full Supabase service container setup.
-#
-# Run them locally before opening a PR:
-#   supabase start
-#   npm run test:backend          # deno test supabase/functions/ --allow-env --allow-net
-#
-# A future improvement: add a job using supabase/setup-cli + supabase start
-# to run integration tests in CI against an ephemeral local stack.
+  integration-tests:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Start local Supabase stack
+        run: supabase start
+
+      - name: Get test owner token (seed user)
+        run: |
+          ANON_KEY=$(supabase status | grep "anon key" | awk '{print $NF}')
+          RESPONSE=$(curl -s -X POST "http://127.0.0.1:54321/auth/v1/token?grant_type=password" \
+            -H "apikey: $ANON_KEY" \
+            -H "Content-Type: application/json" \
+            -d '{"email":"owner@afrotouch.ee","password":"Test1234!"}')
+          TOKEN=$(echo "$RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('access_token',''))" 2>/dev/null || echo "")
+          echo "TEST_OWNER_TOKEN=$TOKEN" >> "$GITHUB_ENV"
+          if [ -n "$TOKEN" ]; then echo "Owner token obtained."; else echo "Owner token not available — authenticated tests will be skipped."; fi
+
+      - name: Run integration tests
+        run: |
+          deno test supabase/functions/ \
+            --allow-env --allow-net --allow-read \
+            --config supabase/functions/deno.json \
+            --reporter=verbose
+
+      - name: Stop Supabase stack
+        if: always()
+        run: supabase stop

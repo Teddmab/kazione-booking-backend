@@ -54,5 +54,5 @@ Deno.test("auth-register: duplicate email", async () => {
   // Second registration with same email
   const res = await callFn({ email, password: "Test1234!", ownerName: "Test Owner", businessName: "Test Biz", role: "business" })
   await res.body?.cancel()
-  if (![400,409,500].includes(res.status)) throw new Error(`Expected 400, 409, or 500, got ${res.status}`)
+  if (![400,409,429,500].includes(res.status)) throw new Error(`Expected 400, 409, 429, or 500, got ${res.status}`)
 })

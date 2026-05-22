@@ -55,7 +55,8 @@ Deno.test("services: POST valid service", async () => {
   const res = await callFn("POST", OWNER_TOKEN, {
     business_id: BUSINESS_ID,
     name: uniqueName,
-    price: 25.5
+    price: 25.5,
+    duration_minutes: 60,
   });
   assertEquals(res.status, 201);
 });
@@ -67,7 +68,8 @@ Deno.test("services: PATCH service from different business", async () => {
   const createRes = await callFn("POST", OWNER_TOKEN, {
     business_id: BUSINESS_ID,
     name: uniqueName,
-    price: 15
+    price: 15,
+    duration_minutes: 60,
   });
   if (createRes.status !== 201) return;
   const created = await createRes.json();

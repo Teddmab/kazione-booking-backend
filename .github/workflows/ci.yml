@@ -72,7 +72,7 @@ jobs:
           deno test supabase/functions/ \
             --allow-env --allow-net --allow-read \
             --config supabase/functions/deno.json \
-            --reporter=verbose
+            --reporter=pretty
 
       - name: Stop Supabase stack
         if: always()

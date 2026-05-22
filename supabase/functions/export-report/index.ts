@@ -388,8 +388,9 @@ async function generateRevenueExport(
 
   const grouped: Record<string, number> = {};
   for (const a of data ?? []) {
-    const date = (a as Record<string, unknown>).starts_at?.slice(0, 10);
-    if (date) grouped[date] = (grouped[date] ?? 0) + Number((a as Record<string, unknown>).price ?? 0);
+    const aRow = a as { starts_at?: string; price?: unknown };
+    const date = aRow.starts_at?.slice(0, 10);
+    if (date) grouped[date] = (grouped[date] ?? 0) + Number(aRow.price ?? 0);
   }
 
   const rows = Object.entries(grouped)
@@ -426,7 +427,7 @@ async function generateClientsExport(
 
   const stats: Record<string, { visits: number; spend: number; last_visit: string | null }> = {};
   for (const a of appts ?? []) {
-    const appt = a as Record<string, unknown>;
+    const appt = a as { client_id: string; starts_at?: string; price?: unknown };
     if (!appt.client_id) continue;
     if (!stats[appt.client_id]) stats[appt.client_id] = { visits: 0, spend: 0, last_visit: null };
     stats[appt.client_id].visits += 1;

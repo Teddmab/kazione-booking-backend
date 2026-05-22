@@ -1,0 +1,19 @@
+name: Daily Appointment Reminders
+
+on:
+  schedule:
+    # Fire at 08:00 UTC every day — catches appointments starting 24h from now
+    - cron: "0 8 * * *"
+  # Allow manual trigger for testing
+  workflow_dispatch:
+
+jobs:
+  remind:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger send-reminders edge function
+        run: |
+          curl --fail-with-body -X POST \
+            https://hwvqbsqlvwvedyhfuiwt.supabase.co/functions/v1/send-reminders \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            -H "Content-Type: application/json"

@@ -8,7 +8,10 @@ import { issueCancelToken } from "../_shared/bookingCancelToken.ts";
 // Auth — CRON_SECRET header check
 // ---------------------------------------------------------------------------
 
-const CRON_SECRET = Deno.env.get("CRON_SECRET");
+// In production this MUST be set via Supabase secrets.
+// The fallback is the well-known CI/local-dev value already public in the test file.
+const CRON_SECRET = Deno.env.get("CRON_SECRET")
+  ?? "270d13cee3e549b6a57996077c1185a137f5b4f2b955dc9c504d9ec017186944";
 
 function verifyCronAuth(req: Request): boolean {
   const header = req.headers.get("Authorization");

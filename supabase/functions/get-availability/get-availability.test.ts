@@ -40,8 +40,12 @@ Deno.test("get-availability: invalid date format", async () => {
 
 
 Deno.test("get-availability: working day", async () => {
-  // Use a fixed future Tuesday (verified to have slots with seed data)
-  const res = await callFn({ business_id: BUSINESS_ID, service_id: SERVICE_ID, date: "2027-06-01" });
+  // Compute a future Tuesday within the 60-day booking window
+  const d = new Date();
+  d.setUTCDate(d.getUTCDate() + 14);
+  while (d.getUTCDay() !== 2) d.setUTCDate(d.getUTCDate() + 1); // advance to next Tuesday
+  const workingDay = d.toISOString().slice(0, 10);
+  const res = await callFn({ business_id: BUSINESS_ID, service_id: SERVICE_ID, date: workingDay });
   assertEquals(res.status, 200);
   const body = await res.json();
   if (!Array.isArray(body.slots) || body.slots.length === 0) throw new Error("Expected non-empty slots array");

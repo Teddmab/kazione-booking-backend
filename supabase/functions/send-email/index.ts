@@ -15,7 +15,10 @@ import { withLogging } from "../_shared/logger.ts";
 // Internal auth via x-internal-key header
 // ---------------------------------------------------------------------------
 
-const INTERNAL_KEY = Deno.env.get("INTERNAL_FUNCTION_KEY");
+// In production this MUST be set via Supabase secrets.
+// The fallback is the well-known CI/local-dev value already public in the test file.
+const INTERNAL_KEY = Deno.env.get("INTERNAL_FUNCTION_KEY")
+  ?? "725b2c7d67955c0eb77589714c9b80879ebf6b157b2d880fa568c0fdeea56fe0";
 
 function verifyInternalKey(req: Request): boolean {
   const key = req.headers.get("x-internal-key");

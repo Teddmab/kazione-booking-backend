@@ -1,6 +1,6 @@
 import { supabaseAdmin } from "../_shared/supabaseAdmin.ts";
 import { corsHeaders, handleCors } from "../_shared/cors.ts";
-import { badRequest, conflict, forbidden, notFound, serverError, unauthorized } from "../_shared/errors.ts";
+import { badRequest, conflict, forbidden, notFound, serverError } from "../_shared/errors.ts";
 import { withLogging } from "../_shared/logger.ts";
 import { requireOwnerOrManagerCtx, verifyAuth } from "../_shared/auth.ts";
 

@@ -1,4 +1,4 @@
-import Stripe from "npm:stripe@14";
+import Stripe from "stripe";
 import { stripe } from "../_shared/stripe.ts";
 import { supabaseAdmin } from "../_shared/supabaseAdmin.ts";
 import {

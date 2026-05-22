@@ -1,4 +1,4 @@
-import { Resend } from "npm:resend@3";
+import { Resend } from "resend";
 import { corsHeaders, handleCors } from "../_shared/cors.ts";
 import { badRequest, serverError, unauthorized } from "../_shared/errors.ts";
 import {

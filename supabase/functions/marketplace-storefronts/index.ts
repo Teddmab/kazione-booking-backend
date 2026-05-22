@@ -1,6 +1,6 @@
 import { supabaseAdmin } from "../_shared/supabaseAdmin.ts";
 import { corsHeaders, handleCors } from "../_shared/cors.ts";
-import { badRequest, serverError } from "../_shared/errors.ts";
+import { serverError } from "../_shared/errors.ts";
 import { withLogging } from "../_shared/logger.ts";
 
 function json(data: unknown, status = 200): Response {

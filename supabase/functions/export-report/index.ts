@@ -96,6 +96,7 @@ async function generateAccountantReport(
 
   if (expErr) throw expErr;
 
+  // deno-lint-ignore no-explicit-any
   const incomeRows = (payments ?? []).map((p: any) => ({
     date: p.paid_at?.split("T")[0] ?? "",
     type: "Income",
@@ -108,6 +109,7 @@ async function generateAccountantReport(
     reference: p.appointment?.booking_reference ?? "",
   }));
 
+  // deno-lint-ignore no-explicit-any
   const expenseRows = (expenses ?? []).map((e: any) => ({
     date: e.date ?? "",
     type: "Expense",
@@ -164,6 +166,7 @@ async function generateIncomeReport(
 
   if (error) throw error;
 
+  // deno-lint-ignore no-explicit-any
   const rows = (data ?? []).map((p: any) => ({
     date: p.paid_at?.split("T")[0] ?? "",
     client_name: `${p.appointment?.client?.first_name ?? ""} ${p.appointment?.client?.last_name ?? ""}`.trim(),
@@ -201,6 +204,7 @@ async function generateExpensesReport(
 
   if (error) throw error;
 
+  // deno-lint-ignore no-explicit-any
   const rows = (data ?? []).map((e: any) => ({
     date: e.date ?? "",
     category: e.category,
@@ -282,6 +286,7 @@ async function generateStaffPayrollReport(
 
   if (error) throw error;
 
+  // deno-lint-ignore no-explicit-any
   const rows = (data ?? []).map((s: any) => ({
     name: s.display_name ?? "",
     bookings: Number(s.bookings ?? 0),
@@ -309,6 +314,7 @@ async function generateSupplierSpendReport(
 
   if (error) throw error;
 
+  // deno-lint-ignore no-explicit-any
   const rows = (data ?? []).map((s: any) => ({
     supplier_name: s.supplier_name ?? "",
     orders: Number(s.order_count ?? 0),
@@ -344,6 +350,7 @@ async function generateAppointmentsExport(
 
   if (error) throw error;
 
+  // deno-lint-ignore no-explicit-any
   const rows = (data ?? []).map((a: any) => ({
     date: a.starts_at?.slice(0, 10) ?? "",
     time: a.starts_at?.slice(11, 16) ?? "",
@@ -381,8 +388,8 @@ async function generateRevenueExport(
 
   const grouped: Record<string, number> = {};
   for (const a of data ?? []) {
-    const date = (a as any).starts_at?.slice(0, 10);
-    if (date) grouped[date] = (grouped[date] ?? 0) + Number((a as any).price ?? 0);
+    const date = (a as Record<string, unknown>).starts_at?.slice(0, 10);
+    if (date) grouped[date] = (grouped[date] ?? 0) + Number((a as Record<string, unknown>).price ?? 0);
   }
 
   const rows = Object.entries(grouped)
@@ -419,7 +426,7 @@ async function generateClientsExport(
 
   const stats: Record<string, { visits: number; spend: number; last_visit: string | null }> = {};
   for (const a of appts ?? []) {
-    const appt = a as any;
+    const appt = a as Record<string, unknown>;
     if (!appt.client_id) continue;
     if (!stats[appt.client_id]) stats[appt.client_id] = { visits: 0, spend: 0, last_visit: null };
     stats[appt.client_id].visits += 1;
@@ -430,6 +437,7 @@ async function generateClientsExport(
     }
   }
 
+  // deno-lint-ignore no-explicit-any
   const rows = (clients ?? []).map((c: any) => ({
     name: `${c.first_name ?? ""} ${c.last_name ?? ""}`.trim(),
     email: c.email ?? "",

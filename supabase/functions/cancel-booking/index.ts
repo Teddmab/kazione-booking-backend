@@ -9,7 +9,7 @@ import {
   sendEmail,
   bookingCancellationEmail,
 } from "../_shared/resend.ts";
-import Stripe from "npm:stripe@14";
+import Stripe from "stripe";
 
 // ---------------------------------------------------------------------------
 // Types

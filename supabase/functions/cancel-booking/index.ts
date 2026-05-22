@@ -9,7 +9,7 @@ import {
   sendEmail,
   bookingCancellationEmail,
 } from "../_shared/resend.ts";
-import Stripe from "https://esm.sh/stripe@14?target=deno";
+import Stripe from "npm:stripe@14";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -33,7 +33,7 @@ function getStripeClient(): Stripe | null {
   }
 
   return new Stripe(secret, {
-    apiVersion: "2024-04-10",
+    apiVersion: "2023-10-16",
     httpClient: Stripe.createFetchHttpClient(),
   });
 }
@@ -203,18 +203,14 @@ Deno.serve(withLogging("cancel-booking", async (req: Request) => {
         // Full refund
         if (stripe) {
           try {
-          const refundOpts: Record<string, unknown> = {
+          const refundParams: Stripe.RefundCreateParams = {
             payment_intent: payment.stripe_payment_intent_id,
           };
-          const reqOpts: Record<string, unknown> = {};
-          if (stripeAccountId) {
-            (reqOpts as { stripeAccount: string }).stripeAccount = stripeAccountId;
-          }
+          const reqOpts: Stripe.RequestOptions | undefined = stripeAccountId
+            ? { stripeAccount: stripeAccountId }
+            : undefined;
 
-          await stripe.refunds.create(
-            refundOpts as Parameters<typeof stripe.refunds.create>[0],
-            reqOpts as Parameters<typeof stripe.refunds.create>[1],
-          );
+          await stripe.refunds.create(refundParams, reqOpts);
 
           refundAmount = +payment.amount;
           refundStatus = "full";
@@ -243,19 +239,15 @@ Deno.serve(withLogging("cancel-booking", async (req: Request) => {
           const partialRefund = paidAmount - depositAmount;
           if (stripe) {
             try {
-            const refundOpts: Record<string, unknown> = {
+            const refundParams: Stripe.RefundCreateParams = {
               payment_intent: payment.stripe_payment_intent_id,
               amount: Math.round(partialRefund * 100),
             };
-            const reqOpts: Record<string, unknown> = {};
-            if (stripeAccountId) {
-              (reqOpts as { stripeAccount: string }).stripeAccount = stripeAccountId;
-            }
+            const reqOpts: Stripe.RequestOptions | undefined = stripeAccountId
+              ? { stripeAccount: stripeAccountId }
+              : undefined;
 
-            await stripe.refunds.create(
-              refundOpts as Parameters<typeof stripe.refunds.create>[0],
-              reqOpts as Parameters<typeof stripe.refunds.create>[1],
-            );
+            await stripe.refunds.create(refundParams, reqOpts);
 
             refundAmount = partialRefund;
             refundStatus = "partial";

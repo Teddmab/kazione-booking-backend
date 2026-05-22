@@ -1,7 +1,7 @@
-import Stripe from "https://esm.sh/stripe@14?target=deno";
+import Stripe from "npm:stripe@14";
 
 export const stripe = new Stripe(Deno.env.get("STRIPE_SECRET_KEY")!, {
-  apiVersion: "2024-04-10",
+  apiVersion: "2023-10-16",
   httpClient: Stripe.createFetchHttpClient(),
 });
 

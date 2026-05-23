@@ -1,8 +1,7 @@
-import Stripe from "stripe";
 import { stripe } from "../_shared/stripe.ts";
 import { supabaseAdmin } from "../_shared/supabaseAdmin.ts";
 import { corsHeaders, handleCors } from "../_shared/cors.ts";
-import { badRequest, serverError, unauthorized, forbidden } from "../_shared/errors.ts";
+import { badRequest, serverError } from "../_shared/errors.ts";
 import { withLogging } from "../_shared/logger.ts";
 import { requireOwnerOrManagerCtx } from "../_shared/auth.ts";
 
@@ -55,7 +54,7 @@ Deno.serve(
       if (ctx instanceof Response) return ctx;
 
       const businessId = ctx.businessId;
-      const userId = ctx.userId;
+      const _userId = ctx.userId;
 
       // ── Get or create Stripe Account record ─────────────────────────────
 
@@ -246,7 +245,7 @@ async function handleGetDashboardLink(accountId: string): Promise<Response> {
 
 async function handleGetStatus(
   accountId: string,
-  businessId: string,
+  _businessId: string,
 ): Promise<Response> {
   try {
     const account = await stripe.accounts.retrieve(accountId);
@@ -294,7 +293,7 @@ async function handleGetBalance(accountId: string): Promise<Response> {
 }
 
 async function handleDisconnect(
-  businessId: string,
+  _businessId: string,
   accountRecordId: string,
 ): Promise<Response> {
   try {

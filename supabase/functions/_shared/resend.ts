@@ -3,7 +3,8 @@ import { Resend } from "resend";
 const RESEND_API_KEY = Deno.env.get("RESEND_API_KEY");
 const resend = RESEND_API_KEY ? new Resend(RESEND_API_KEY) : null;
 
-const DEFAULT_FROM = "KaziOne Booking <noreply@kazionebooking.com>";
+const DEFAULT_FROM = Deno.env.get("BUSINESS_EMAIL_FROM") ??
+  "KaziOne Booking <onboarding@resend.dev>";
 
 /**
  * Send a transactional email via Resend.
@@ -13,9 +14,12 @@ export async function sendEmail(
   subject: string,
   html: string,
   from?: string,
+  replyTo?: string,
 ) {
   if (!resend) {
-    console.warn("RESEND_API_KEY is not configured; skipping transactional email send");
+    console.warn(
+      "RESEND_API_KEY is not configured; skipping transactional email send",
+    );
     return;
   }
 
@@ -24,6 +28,7 @@ export async function sendEmail(
     to,
     subject,
     html,
+    reply_to: replyTo,
   });
 
   if (error) {
@@ -42,11 +47,11 @@ interface BookingEmailData {
   salonName: string;
   serviceName: string;
   staffName: string;
-  date: string;       // formatted date
-  time: string;       // formatted time
-  reference: string;  // KZB-XXXXX
-  price: string;      // e.g. "€120.00"
-  manageUrl: string;  // link to view / cancel / reschedule
+  date: string; // formatted date
+  time: string; // formatted time
+  reference: string; // KZB-XXXXX
+  price: string; // e.g. "€120.00"
+  manageUrl: string; // link to view / cancel / reschedule
 }
 
 interface StaffInviteData {
@@ -64,7 +69,10 @@ interface ReviewRequestData {
 
 // ── Booking confirmation ──────────────────────────────────────────────────
 
-const bookingConfirmationTemplates: Record<Locale, (d: BookingEmailData) => { subject: string; html: string }> = {
+const bookingConfirmationTemplates: Record<
+  Locale,
+  (d: BookingEmailData) => { subject: string; html: string }
+> = {
   en: (d) => ({
     subject: `Booking Confirmed — ${d.reference}`,
     html: `
@@ -121,7 +129,10 @@ const bookingConfirmationTemplates: Record<Locale, (d: BookingEmailData) => { su
 
 // ── Booking reminder ──────────────────────────────────────────────────────
 
-const bookingReminderTemplates: Record<Locale, (d: BookingEmailData) => { subject: string; html: string }> = {
+const bookingReminderTemplates: Record<
+  Locale,
+  (d: BookingEmailData) => { subject: string; html: string }
+> = {
   en: (d) => ({
     subject: `Reminder: Your appointment tomorrow — ${d.reference}`,
     html: `
@@ -153,7 +164,10 @@ const bookingReminderTemplates: Record<Locale, (d: BookingEmailData) => { subjec
 
 // ── Booking cancellation ──────────────────────────────────────────────────
 
-const bookingCancellationTemplates: Record<Locale, (d: BookingEmailData) => { subject: string; html: string }> = {
+const bookingCancellationTemplates: Record<
+  Locale,
+  (d: BookingEmailData) => { subject: string; html: string }
+> = {
   en: (d) => ({
     subject: `Booking Cancelled — ${d.reference}`,
     html: `
@@ -186,7 +200,10 @@ const bookingCancellationTemplates: Record<Locale, (d: BookingEmailData) => { su
 
 // ── Booking reschedule ────────────────────────────────────────────────────
 
-const bookingRescheduleTemplates: Record<Locale, (d: BookingEmailData) => { subject: string; html: string }> = {
+const bookingRescheduleTemplates: Record<
+  Locale,
+  (d: BookingEmailData) => { subject: string; html: string }
+> = {
   en: (d) => ({
     subject: `Booking Rescheduled — ${d.reference}`,
     html: `
@@ -221,7 +238,10 @@ const bookingRescheduleTemplates: Record<Locale, (d: BookingEmailData) => { subj
 
 // ── Staff invite ──────────────────────────────────────────────────────────
 
-const staffInviteTemplates: Record<Locale, (d: StaffInviteData) => { subject: string; html: string }> = {
+const staffInviteTemplates: Record<
+  Locale,
+  (d: StaffInviteData) => { subject: string; html: string }
+> = {
   en: (d) => ({
     subject: `You've been invited to join ${d.salonName}`,
     html: `
@@ -250,7 +270,10 @@ const staffInviteTemplates: Record<Locale, (d: StaffInviteData) => { subject: st
 
 // ── Review request ────────────────────────────────────────────────────────
 
-const reviewRequestTemplates: Record<Locale, (d: ReviewRequestData) => { subject: string; html: string }> = {
+const reviewRequestTemplates: Record<
+  Locale,
+  (d: ReviewRequestData) => { subject: string; html: string }
+> = {
   en: (d) => ({
     subject: `How was your visit to ${d.salonName}?`,
     html: `
@@ -290,7 +313,10 @@ function resolveLocale(locale?: string): Locale {
   return "en";
 }
 
-export function bookingConfirmationEmail(data: BookingEmailData, locale?: string) {
+export function bookingConfirmationEmail(
+  data: BookingEmailData,
+  locale?: string,
+) {
   return bookingConfirmationTemplates[resolveLocale(locale)](data);
 }
 
@@ -298,11 +324,17 @@ export function bookingReminderEmail(data: BookingEmailData, locale?: string) {
   return bookingReminderTemplates[resolveLocale(locale)](data);
 }
 
-export function bookingCancellationEmail(data: BookingEmailData, locale?: string) {
+export function bookingCancellationEmail(
+  data: BookingEmailData,
+  locale?: string,
+) {
   return bookingCancellationTemplates[resolveLocale(locale)](data);
 }
 
-export function bookingRescheduleEmail(data: BookingEmailData, locale?: string) {
+export function bookingRescheduleEmail(
+  data: BookingEmailData,
+  locale?: string,
+) {
   return bookingRescheduleTemplates[resolveLocale(locale)](data);
 }
 

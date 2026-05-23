@@ -1,0 +1,86 @@
+name: CI — Backend (kazione-booking-backend)
+
+on:
+  push:
+    branches: [master, main, dev]
+  pull_request:
+    branches: [master, main]
+
+jobs:
+  type-check:
+    name: Deno Type Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Type check all edge functions
+        run: |
+          fail=0
+          for f in supabase/functions/*/index.ts; do
+            echo "Checking $f..."
+            deno check --config supabase/functions/deno.json "$f" || fail=1
+          done
+          exit $fail
+
+  lint:
+    name: Deno Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Lint
+        run: deno lint --config supabase/functions/deno.json supabase/functions
+
+  integration-tests:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Write dev-only edge function secrets
+        run: |
+          # These values are already public in test files as hardcoded fallbacks.
+          # They exist only for local dev / CI — never used in production.
+          echo "INTERNAL_FUNCTION_KEY=725b2c7d67955c0eb77589714c9b80879ebf6b157b2d880fa568c0fdeea56fe0" >> supabase/.env
+          echo "CRON_SECRET=270d13cee3e549b6a57996077c1185a137f5b4f2b955dc9c504d9ec017186944" >> supabase/.env
+
+      - name: Start local Supabase stack
+        run: supabase start
+
+      - name: Get test owner token (seed user)
+        run: |
+          ANON_KEY=$(supabase status | grep "anon key" | awk '{print $NF}')
+          RESPONSE=$(curl -s -X POST "http://127.0.0.1:54321/auth/v1/token?grant_type=password" \
+            -H "apikey: $ANON_KEY" \
+            -H "Content-Type: application/json" \
+            -d '{"email":"owner@afrotouch.ee","password":"Test1234!"}')
+          TOKEN=$(echo "$RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('access_token',''))" 2>/dev/null || echo "")
+          echo "TEST_OWNER_TOKEN=$TOKEN" >> "$GITHUB_ENV"
+          if [ -n "$TOKEN" ]; then echo "Owner token obtained."; else echo "Owner token not available — authenticated tests will be skipped."; fi
+
+      - name: Run integration tests
+        run: |
+          deno test supabase/functions/ \
+            --allow-env --allow-net --allow-read \
+            --config supabase/functions/deno.json \
+            --reporter=pretty
+
+      - name: Stop Supabase stack
+        if: always()
+        run: supabase stop

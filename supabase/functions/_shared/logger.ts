@@ -1,4 +1,3 @@
-import { corsHeaders } from "./cors.ts";
 import { serverError } from "./errors.ts";
 
 /**

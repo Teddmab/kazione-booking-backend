@@ -1,13 +1,13 @@
 import { Resend } from "resend";
 import { corsHeaders, handleCors } from "../_shared/cors.ts";
-import { badRequest, unauthorized, serverError } from "../_shared/errors.ts";
+import { badRequest, serverError, unauthorized } from "../_shared/errors.ts";
 import {
+  bookingCancellationEmail,
   bookingConfirmationEmail,
   bookingReminderEmail,
-  bookingCancellationEmail,
   bookingRescheduleEmail,
-  staffInviteEmail,
   reviewRequestEmail,
+  staffInviteEmail,
 } from "../_shared/resend.ts";
 import { withLogging } from "../_shared/logger.ts";
 
@@ -15,7 +15,10 @@ import { withLogging } from "../_shared/logger.ts";
 // Internal auth via x-internal-key header
 // ---------------------------------------------------------------------------
 
-const INTERNAL_KEY = Deno.env.get("INTERNAL_FUNCTION_KEY");
+// In production this MUST be set via Supabase secrets.
+// The fallback is the well-known CI/local-dev value already public in the test file.
+const INTERNAL_KEY = Deno.env.get("INTERNAL_FUNCTION_KEY")
+  ?? "725b2c7d67955c0eb77589714c9b80879ebf6b157b2d880fa568c0fdeea56fe0";
 
 function verifyInternalKey(req: Request): boolean {
   const key = req.headers.get("x-internal-key");
@@ -36,8 +39,8 @@ function verifyInternalKey(req: Request): boolean {
 // Resend client (direct, not via shared — this function IS the email service)
 // ---------------------------------------------------------------------------
 
-const resend = new Resend(Deno.env.get("RESEND_API_KEY")!);
-const DEFAULT_FROM = "KaziOne Booking <noreply@kazionebooking.com>";
+const DEFAULT_FROM = Deno.env.get("BUSINESS_EMAIL_FROM") ??
+  "KaziOne Booking <onboarding@resend.dev>";
 
 // ---------------------------------------------------------------------------
 // Template types
@@ -217,6 +220,11 @@ Deno.serve(withLogging("send-email", async (req: Request) => {
     }
 
     // ── Send via Resend ───────────────────────────────────────────────────
+    const resendApiKey = Deno.env.get("RESEND_API_KEY");
+    if (!resendApiKey) {
+      return serverError("RESEND_API_KEY not configured");
+    }
+    const resend = new Resend(resendApiKey);
     const { data: emailResult, error: emailErr } = await resend.emails.send({
       from: DEFAULT_FROM,
       to: body.to,

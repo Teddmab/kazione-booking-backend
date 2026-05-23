@@ -1,10 +1,10 @@
 // supabase/functions/get-storefront/get-storefront.test.ts
-import { assertEquals } from "https://deno.land/std/testing/asserts.ts"
+import { assertEquals } from "std/assert"
 
 const BASE = "http://127.0.0.1:54321/functions/v1"
 const ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9.CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0"
 
-async function callFn(slug?: string) {
+function callFn(slug?: string) {
   const url = slug ? `${BASE}/get-storefront?slug=${slug}` : `${BASE}/get-storefront`
   return fetch(url, { method: "GET", headers: { "apikey": ANON_KEY } })
 }

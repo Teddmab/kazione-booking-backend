@@ -1,5 +1,5 @@
 // supabase/functions/pawapay-payment/pawapay-payment.test.ts
-import { assertEquals, assertMatch } from "https://deno.land/std/testing/asserts.ts";
+import { assertEquals, assertMatch } from "std/assert";
 
 const BASE = "http://127.0.0.1:54321/functions/v1";
 const ANON_KEY =
@@ -8,7 +8,7 @@ const ANON_KEY =
 // Seed data constants
 const BUSINESS_ID = "b0000000-0000-4000-8000-000000000001";
 
-async function callPayment(body: Record<string, unknown>) {
+function callPayment(body: Record<string, unknown>) {
   return fetch(`${BASE}/pawapay-payment`, {
     method: "POST",
     headers: {

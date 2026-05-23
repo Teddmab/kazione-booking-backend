@@ -39,6 +39,35 @@ Deno.serve(withLogging("storefront-owner", async (req: Request) => {
       const ctx = await requireOwnerOrManagerCtx(req, businessId);
       if (ctx instanceof Response) return ctx;
 
+      if (action === "gallery") {
+        const { data: sfRow } = await supabaseAdmin
+          .from("storefronts")
+          .select("id")
+          .eq("business_id", ctx.businessId)
+          .maybeSingle();
+        if (!sfRow) return json([]);
+
+        const { data, error } = await supabaseAdmin
+          .from("storefront_gallery")
+          .select("id, storefront_id, image_url, caption, display_order, created_at")
+          .eq("storefront_id", (sfRow as Record<string, unknown>).id as string)
+          .order("display_order", { ascending: true });
+
+        if (error) return serverError(error.message);
+        return json(data ?? []);
+      }
+
+      if (action === "promotions") {
+        const { data, error } = await supabaseAdmin
+          .from("promotions")
+          .select("*")
+          .eq("business_id", ctx.businessId)
+          .order("created_at", { ascending: false });
+
+        if (error) return serverError(error.message);
+        return json(data ?? []);
+      }
+
       const { data, error } = await supabaseAdmin
         .from("storefronts")
         .select("*")
@@ -137,6 +166,29 @@ Deno.serve(withLogging("storefront-owner", async (req: Request) => {
         return json(data, 201);
       }
 
+      if (action === "promotion") {
+        const body = await req.json() as Record<string, unknown>;
+        const title = String(body.title ?? "").trim();
+        if (!title) return badRequest("title is required");
+
+        const { data, error } = await supabaseAdmin
+          .from("promotions")
+          .insert({
+            business_id: ctx.businessId,
+            title,
+            description: body.description ?? null,
+            discount_type: "percentage",
+            discount_value: 0,
+            valid_until: body.valid_until ?? null,
+            is_active: true,
+          })
+          .select("*")
+          .single();
+
+        if (error) return serverError(error.message);
+        return json(data, 201);
+      }
+
       return badRequest(`Unknown action: ${action}`);
     }
 
@@ -180,6 +232,24 @@ Deno.serve(withLogging("storefront-owner", async (req: Request) => {
         .from("storefront_gallery")
         .delete()
         .eq("id", galleryId);
+
+      if (error) return serverError(error.message);
+      return json({ ok: true });
+    }
+
+    if (method === "DELETE" && action === "promotion") {
+      const promoId = url.searchParams.get("id");
+      const businessId = url.searchParams.get("business_id");
+      if (!promoId || !businessId) return badRequest("id and business_id are required");
+
+      const ctx = await requireOwnerOrManagerCtx(req, businessId);
+      if (ctx instanceof Response) return ctx;
+
+      const { error } = await supabaseAdmin
+        .from("promotions")
+        .delete()
+        .eq("id", promoId)
+        .eq("business_id", ctx.businessId);
 
       if (error) return serverError(error.message);
       return json({ ok: true });

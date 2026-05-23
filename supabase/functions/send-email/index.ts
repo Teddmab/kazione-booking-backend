@@ -39,7 +39,6 @@ function verifyInternalKey(req: Request): boolean {
 // Resend client (direct, not via shared — this function IS the email service)
 // ---------------------------------------------------------------------------
 
-const resend = new Resend(Deno.env.get("RESEND_API_KEY")!);
 const DEFAULT_FROM = Deno.env.get("BUSINESS_EMAIL_FROM") ??
   "KaziOne Booking <onboarding@resend.dev>";
 
@@ -221,6 +220,11 @@ Deno.serve(withLogging("send-email", async (req: Request) => {
     }
 
     // ── Send via Resend ───────────────────────────────────────────────────
+    const resendApiKey = Deno.env.get("RESEND_API_KEY");
+    if (!resendApiKey) {
+      return serverError("RESEND_API_KEY not configured");
+    }
+    const resend = new Resend(resendApiKey);
     const { data: emailResult, error: emailErr } = await resend.emails.send({
       from: DEFAULT_FROM,
       to: body.to,

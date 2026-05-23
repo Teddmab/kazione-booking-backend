@@ -55,6 +55,11 @@ verify_jwt = false
 [functions.stripe-webhook]
 verify_jwt = false
 
+# send-email is an internal function called by other edge functions (e.g. send-reminders).
+# JWT verification is disabled; it authenticates via the x-internal-key header instead.
+[functions.send-email]
+verify_jwt = false
+
 # send-reminders is called on a cron schedule, not by an authenticated user.
 # JWT verification is disabled; it authenticates via the CRON_SECRET Bearer token instead.
 # Schedule: daily at 08:00 UTC (catches 24h-ahead appointments for that day).

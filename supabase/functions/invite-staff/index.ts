@@ -123,6 +123,7 @@ Deno.serve(withLogging("invite-staff", async (req: Request) => {
         display_name: body.display_name,
         specialties: body.specialties ?? [],
         is_active: false, // Activated when invite is accepted
+        invited_email: body.email.toLowerCase(),
       })
       .select("id")
       .single();

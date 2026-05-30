@@ -12,12 +12,13 @@ function json(data: unknown, status = 200): Response {
 }
 
 /**
- * GET /me
- * Returns the authenticated user's profile and primary tenant (business membership).
+ * GET /me — Returns authenticated user's profile + all business memberships.
+ * PATCH /me — Updates first_name, last_name, phone.
  *
- * Response shape:
+ * GET response:
  *   { profile: { id, first_name, last_name, email, phone, avatar_url } | null,
- *     tenant: { businessId, businessName, role } | null }
+ *     tenant: { businessId, businessName, slug, role } | null,
+ *     businesses: { businessId, businessName, slug, role }[] }
  */
 Deno.serve(withLogging("me", async (req: Request) => {
   const corsResp = handleCors(req);

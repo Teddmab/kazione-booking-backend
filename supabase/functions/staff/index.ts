@@ -144,18 +144,11 @@ Deno.serve(withLogging("staff", async (req: Request) => {
         const workingHours =
           (row.staff_working_hours as Array<Record<string, unknown>>) ?? [];
 
-        // Pending invite: never accepted (joined_at is null) and was explicitly invited
+        // Pending invite: invited_email is only set by invite-staff (never by direct POST /staff).
+        // It remains set even after activation, so pair it with is_active=false to gate display.
         const invitedAt = memberInfo?.invited_at ?? null;
-        const joinedAt = memberInfo?.joined_at ?? null;
         const invitedEmail = (row.invited_email as string | null) ?? null;
-        const isPendingInvite =
-          !(row.is_active as boolean) &&
-          (
-            // New user invite: no business_members row, email stored on profile
-            (memberId === null && invitedEmail !== null) ||
-            // Existing user invite: invited but never joined
-            (invitedAt !== null && joinedAt === null)
-          );
+        const isPendingInvite = !(row.is_active as boolean) && invitedEmail !== null;
 
         return {
           id: row.id,
@@ -339,7 +332,7 @@ Deno.serve(withLogging("staff", async (req: Request) => {
       return json({ success: true, service_ids: serviceIds });
     }
 
-    // ── PATCH /staff?action=get-services&id= (get current service assignments) ─
+    // ── GET /staff?action=services&id= (get current service assignments) ────────
     if (method === "GET" && action === "services") {
       if (!staffId) return badRequest("id query param is required");
 
@@ -352,7 +345,11 @@ Deno.serve(withLogging("staff", async (req: Request) => {
       if (existingErr) return serverError(existingErr.message);
       if (!existing) return notFound("Staff member not found");
 
-      const ctx = await resolveCallerBusiness(req);
+      // Verify caller owns/manages the same business as this staff profile
+      const ctx = await requireOwnerOrManagerCtx(
+        req,
+        (existing as Record<string, unknown>).business_id as string,
+      );
       if (ctx instanceof Response) return ctx;
 
       const { data: rows, error: svcErr } = await supabaseAdmin

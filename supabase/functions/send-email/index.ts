@@ -114,6 +114,7 @@ Deno.serve(withLogging("send-email", async (req: Request) => {
           {
             clientName: body.data.clientName ?? "",
             salonName: body.data.salonName ?? "",
+            salonLogoUrl: body.data.salonLogoUrl || undefined,
             serviceName: body.data.serviceName ?? "",
             staffName: body.data.staffName ?? "",
             date: body.data.date ?? "",
@@ -134,6 +135,7 @@ Deno.serve(withLogging("send-email", async (req: Request) => {
           {
             clientName: body.data.clientName ?? "",
             salonName: body.data.salonName ?? "",
+            salonLogoUrl: body.data.salonLogoUrl || undefined,
             serviceName: body.data.serviceName ?? "",
             staffName: body.data.staffName ?? "",
             date: body.data.date ?? "",
@@ -154,6 +156,7 @@ Deno.serve(withLogging("send-email", async (req: Request) => {
           {
             clientName: body.data.clientName ?? "",
             salonName: body.data.salonName ?? "",
+            salonLogoUrl: body.data.salonLogoUrl || undefined,
             serviceName: body.data.serviceName ?? "",
             staffName: body.data.staffName ?? "",
             date: body.data.date ?? "",
@@ -174,6 +177,7 @@ Deno.serve(withLogging("send-email", async (req: Request) => {
           {
             clientName: body.data.clientName ?? "",
             salonName: body.data.salonName ?? "",
+            salonLogoUrl: body.data.salonLogoUrl || undefined,
             serviceName: body.data.serviceName ?? "",
             staffName: body.data.staffName ?? "",
             date: body.data.date ?? "",
@@ -193,6 +197,7 @@ Deno.serve(withLogging("send-email", async (req: Request) => {
         const result = staffInviteEmail(
           {
             salonName: body.data.salonName ?? "",
+            salonLogoUrl: body.data.salonLogoUrl || undefined,
             inviterName: body.data.inviterName ?? "",
             acceptUrl: body.data.acceptUrl ?? "",
           },
@@ -208,6 +213,7 @@ Deno.serve(withLogging("send-email", async (req: Request) => {
           {
             clientName: body.data.clientName ?? "",
             salonName: body.data.salonName ?? "",
+            salonLogoUrl: body.data.salonLogoUrl || undefined,
             serviceName: body.data.serviceName ?? "",
             reviewUrl: body.data.reviewUrl ?? "",
           },

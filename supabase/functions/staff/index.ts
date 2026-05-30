@@ -3,6 +3,7 @@ import { corsHeaders, handleCors } from "../_shared/cors.ts";
 import { badRequest, forbidden, notFound, serverError } from "../_shared/errors.ts";
 import { requireOwnerOrManagerCtx, verifyAuth } from "../_shared/auth.ts";
 import { withLogging } from "../_shared/logger.ts";
+import { sendEmail, staffInviteEmail } from "../_shared/resend.ts";
 
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
@@ -70,6 +71,7 @@ Deno.serve(withLogging("staff", async (req: Request) => {
           display_name,
           avatar_url,
           is_active,
+          invited_email,
           business_member_id,
           staff_working_hours (
             id,
@@ -85,16 +87,19 @@ Deno.serve(withLogging("staff", async (req: Request) => {
 
       if (staffErr) return serverError(staffErr.message);
 
-      // Enrich with email + role from business_members → users
+      // Enrich with email + role + invited_at/joined_at from business_members → users
       const memberIds = (staffRows ?? [])
         .map((s: Record<string, unknown>) => s.business_member_id)
         .filter(Boolean) as string[];
 
-      const memberMap = new Map<string, { email: string; role: string }>();
+      const memberMap = new Map<
+        string,
+        { email: string; role: string; invited_at: string | null; joined_at: string | null }
+      >();
       if (memberIds.length > 0) {
         const { data: members } = await supabaseAdmin
           .from("business_members")
-          .select("id, role, users(email)")
+          .select("id, role, invited_at, joined_at, users(email)")
           .in("id", memberIds);
 
         for (const m of members ?? []) {
@@ -103,6 +108,8 @@ Deno.serve(withLogging("staff", async (req: Request) => {
           memberMap.set(row.id as string, {
             email: usersObj?.email ?? "",
             role: row.role as string,
+            invited_at: (row.invited_at as string | null) ?? null,
+            joined_at: (row.joined_at as string | null) ?? null,
           });
         }
       }
@@ -137,13 +144,22 @@ Deno.serve(withLogging("staff", async (req: Request) => {
         const workingHours =
           (row.staff_working_hours as Array<Record<string, unknown>>) ?? [];
 
+        // Pending invite: invited_email is only set by invite-staff (never by direct POST /staff).
+        // It remains set even after activation, so pair it with is_active=false to gate display.
+        const invitedAt = memberInfo?.invited_at ?? null;
+        const invitedEmail = (row.invited_email as string | null) ?? null;
+        const isPendingInvite = !(row.is_active as boolean) && invitedEmail !== null;
+
         return {
           id: row.id,
           display_name: row.display_name,
-          email: memberInfo?.email ?? null,
+          email: memberInfo?.email ?? invitedEmail ?? null,
           role: memberInfo?.role ?? "staff",
           is_active: row.is_active,
           avatar_url: row.avatar_url ?? null,
+          invited_at: invitedAt,
+          invited_email: invitedEmail,
+          is_pending_invite: isPendingInvite,
           working_hours: workingHours.map((wh) => ({
             day: wh.day_of_week,
             is_working: wh.is_working,
@@ -316,7 +332,7 @@ Deno.serve(withLogging("staff", async (req: Request) => {
       return json({ success: true, service_ids: serviceIds });
     }
 
-    // ── PATCH /staff?action=get-services&id= (get current service assignments) ─
+    // ── GET /staff?action=services&id= (get current service assignments) ────────
     if (method === "GET" && action === "services") {
       if (!staffId) return badRequest("id query param is required");
 
@@ -329,7 +345,11 @@ Deno.serve(withLogging("staff", async (req: Request) => {
       if (existingErr) return serverError(existingErr.message);
       if (!existing) return notFound("Staff member not found");
 
-      const ctx = await resolveCallerBusiness(req);
+      // Verify caller owns/manages the same business as this staff profile
+      const ctx = await requireOwnerOrManagerCtx(
+        req,
+        (existing as Record<string, unknown>).business_id as string,
+      );
       if (ctx instanceof Response) return ctx;
 
       const { data: rows, error: svcErr } = await supabaseAdmin
@@ -340,6 +360,110 @@ Deno.serve(withLogging("staff", async (req: Request) => {
       if (svcErr) return serverError(svcErr.message);
 
       return json({ service_ids: (rows ?? []).map((r: Record<string, unknown>) => r.service_id) });
+    }
+
+    // ── PATCH /staff?action=resend-invite&id= (resend invitation email) ─────────
+    // Re-generates the magic link and resends the email without creating new rows.
+    if (method === "PATCH" && action === "resend-invite") {
+      if (!staffId) return badRequest("id query param is required");
+
+      const { data: existing, error: existingErr } = await supabaseAdmin
+        .from("staff_profiles")
+        .select("id, business_id, business_member_id, display_name, invited_email, is_active")
+        .eq("id", staffId)
+        .maybeSingle();
+
+      if (existingErr) return serverError(existingErr.message);
+      if (!existing) return notFound("Staff member not found");
+
+      const sp = existing as Record<string, unknown>;
+
+      if (sp.is_active) {
+        return badRequest("Staff member is already active — no pending invitation to resend");
+      }
+
+      const ctx = await requireOwnerOrManagerCtx(req, sp.business_id as string);
+      if (ctx instanceof Response) return ctx;
+
+      // Resolve the email to send to
+      let toEmail: string | null = sp.invited_email as string | null;
+      if (!toEmail && sp.business_member_id) {
+        const { data: memberRow } = await supabaseAdmin
+          .from("business_members")
+          .select("users(email)")
+          .eq("id", sp.business_member_id as string)
+          .single();
+        const usersObj = (memberRow as Record<string, unknown> | null)?.users as { email?: string } | null;
+        toEmail = usersObj?.email ?? null;
+      }
+
+      if (!toEmail) {
+        return badRequest("No email found for this invitation — cannot resend");
+      }
+
+      // Update invited_at timestamp and reset join state
+      if (sp.business_member_id) {
+        await supabaseAdmin
+          .from("business_members")
+          .update({ invited_at: new Date().toISOString() })
+          .eq("id", sp.business_member_id as string);
+      }
+
+      // Fetch business info + caller name for the email
+      const [inviterResult, businessResult] = await Promise.all([
+        supabaseAdmin
+          .from("users")
+          .select("first_name, last_name, email")
+          .eq("id", ctx.userId)
+          .single(),
+        supabaseAdmin
+          .from("businesses")
+          .select("name, locale")
+          .eq("id", sp.business_id as string)
+          .single(),
+      ]);
+
+      const inviterName = inviterResult.data
+        ? `${inviterResult.data.first_name ?? ""} ${inviterResult.data.last_name ?? ""}`.trim() || "Your salon"
+        : "Your salon";
+      const inviterEmail = inviterResult.data?.email?.trim() || null;
+      const salonName = businessResult.data?.name ?? "the salon";
+      const locale = businessResult.data?.locale ?? "en";
+
+      // Generate a fresh magic link
+      const APP_URL = Deno.env.get("APP_URL") ?? "https://kazionebooking.com";
+      const { data: linkData } = await supabaseAdmin.auth.admin.generateLink({
+        type: "magiclink",
+        email: toEmail,
+      });
+      const acceptUrl = linkData?.properties?.action_link ??
+        `${APP_URL}/invite?business=${sp.business_id}&staff=${staffId}`;
+
+      // Send the email via the shared helper
+      const emailData = staffInviteEmail({ salonName, inviterName, acceptUrl }, locale);
+
+      let inviteSent = true;
+      let emailError: string | null = null;
+      try {
+        if (!Deno.env.get("RESEND_API_KEY")) {
+          inviteSent = false;
+          emailError = "RESEND_API_KEY is not configured";
+        } else {
+          await sendEmail(
+            toEmail,
+            emailData.subject,
+            emailData.html,
+            undefined,
+            inviterEmail ? `${inviterName} <${inviterEmail}>` : undefined,
+          );
+        }
+      } catch (err) {
+        inviteSent = false;
+        emailError = err instanceof Error ? err.message : "Email delivery failed";
+        console.error("staff resend-invite email failed:", err);
+      }
+
+      return json({ invite_sent: inviteSent, email: toEmail, email_error: emailError });
     }
 
     // ── PATCH /staff?id= (update profile / role) ──────────────────────────────

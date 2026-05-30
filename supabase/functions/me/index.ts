@@ -92,7 +92,7 @@ Deno.serve(withLogging("me", async (req: Request) => {
         .maybeSingle(),
       supabaseAdmin
         .from("business_members")
-        .select("business_id, role, businesses(name)")
+        .select("business_id, role, businesses(name, slug)")
         .eq("user_id", user.id)
         .eq("is_active", true)
         .order("created_at", { ascending: true }),
@@ -102,12 +102,13 @@ Deno.serve(withLogging("me", async (req: Request) => {
     const memberships = (membershipsResult.data ?? []) as unknown as Array<{
       business_id: string;
       role: string;
-      businesses: { name: string } | null;
+      businesses: { name: string; slug: string } | null;
     }>;
 
     const businesses = memberships.map((m) => ({
       businessId: m.business_id,
       businessName: m.businesses?.name ?? "",
+      slug: m.businesses?.slug ?? "",
       role: m.role,
     }));
 

@@ -117,6 +117,9 @@ interface StorefrontData {
   // Aggregates
   rating: number;
   reviewCount: number;
+  taxEnabled: boolean;
+  taxRate: number;
+  depositPercent: number;
 
   // Nested
   contact: StorefrontContact;

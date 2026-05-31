@@ -56,14 +56,17 @@ function validateBody(body: CreateBookingBody): string | null {
   if (!TIME_RE.test(body.time)) return "time must be HH:MM";
   if (!body.client) return "client object is required";
   // At least one contact field is required so the salon can reach the client
-  const hasName = !!body.client.name?.trim();
-  const hasEmail = !!body.client.email?.trim();
-  const hasPhone = !!body.client.phone?.trim();
+  const name = body.client.name?.trim() ?? "";
+  const email = body.client.email?.trim() ?? "";
+  const phone = body.client.phone?.trim() ?? "";
+  const hasName = !!name;
+  const hasEmail = !!email;
+  const hasPhone = !!phone;
   if (!hasName && !hasEmail && !hasPhone) {
     return "At least one of client.name, client.email, or client.phone is required";
   }
   // Validate email format only when an email is supplied
-  if (hasEmail && !EMAIL_RE.test(body.client.email.trim())) {
+  if (hasEmail && !EMAIL_RE.test(email)) {
     return "client.email is invalid";
   }
   if (!["deposit", "full", "later"].includes(body.payment_method)) {
@@ -73,7 +76,7 @@ function validateBody(body: CreateBookingBody): string | null {
 }
 
 // Split "FirstName Lastname" → { first, last }. Falls back to "Guest" when name is absent.
-function splitName(name: string): { first: string; last: string } {
+function splitName(name?: string): { first: string; last: string } {
   const trimmed = (name ?? "").trim();
   if (!trimmed) return { first: "Guest", last: "" };
   const parts = trimmed.split(/\s+/);
@@ -647,6 +650,9 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
       // ── Stripe payment (deposit or full) ─────────────────────────────
       try {
         const stripeAccountId = settings?.stripe_account_id ?? undefined;
+        const customerEmail = client.email?.trim() ?? "";
+        const customerName = client.name?.trim() ?? "";
+        const customerPhone = client.phone?.trim() ?? undefined;
         const paymentIntent = await createPaymentIntent(
           chargeAmount,
           currencyCode,
@@ -658,9 +664,9 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
           },
           stripeAccountId,
           {
-            email: client.email,
-            name: client.name,
-            phone: client.phone,
+            email: customerEmail,
+            name: customerName,
+            phone: customerPhone,
             bookingReference,
             serviceName: service.name,
           },

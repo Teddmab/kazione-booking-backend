@@ -58,22 +58,29 @@ function validateBody(body: CreateBookingBody): string | null {
   if (!DATE_RE.test(body.date)) return "date must be YYYY-MM-DD";
   if (!TIME_RE.test(body.time)) return "time must be HH:MM";
   if (!body.client) return "client object is required";
-  if (!body.client.name) return "client.name is required";
-  if (!body.client.email) return "client.email is required";
-  if (!EMAIL_RE.test(body.client.email)) return "client.email is invalid";
-  if (!body.client.phone) return "client.phone is required";
+  // At least one contact field is required so the salon can reach the client
+  const hasName = !!body.client.name?.trim();
+  const hasEmail = !!body.client.email?.trim();
+  const hasPhone = !!body.client.phone?.trim();
+  if (!hasName && !hasEmail && !hasPhone) {
+    return "At least one of client.name, client.email, or client.phone is required";
+  }
+  // Validate email format only when an email is supplied
+  if (hasEmail && !EMAIL_RE.test(body.client.email.trim())) {
+    return "client.email is invalid";
+  }
   if (!["deposit", "full", "later"].includes(body.payment_method)) {
     return "payment_method must be 'deposit', 'full', or 'later'";
   }
   return null;
 }
 
-// Split "FirstName Lastname" → { first, last }
+// Split "FirstName Lastname" → { first, last }. Falls back to "Guest" when name is absent.
 function splitName(name: string): { first: string; last: string } {
-  const parts = name.trim().split(/\s+/);
-  const first = parts[0] || name;
-  const last = parts.slice(1).join(" ") || "";
-  return { first, last };
+  const trimmed = (name ?? "").trim();
+  if (!trimmed) return { first: "Guest", last: "" };
+  const parts = trimmed.split(/\s+/);
+  return { first: parts[0], last: parts.slice(1).join(" ") };
 }
 
 // ---------------------------------------------------------------------------
@@ -337,13 +344,17 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
             .eq("id", clientId);
         }
       } else {
-        // Check by email first
-        const { data: byEmail } = await supabaseAdmin
-          .from("clients")
-          .select("id")
-          .eq("business_id", business_id)
-          .eq("email", client.email)
-          .maybeSingle();
+        // Check by email first (only when email was provided)
+        let byEmail: { id: string } | null = null;
+        if (client.email) {
+          const { data } = await supabaseAdmin
+            .from("clients")
+            .select("id")
+            .eq("business_id", business_id)
+            .eq("email", client.email)
+            .maybeSingle();
+          byEmail = data;
+        }
 
         if (byEmail) {
           // Link existing guest record to the authenticated user; update consent
@@ -363,8 +374,8 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
               user_id: userId,
               first_name: first,
               last_name: last,
-              email: client.email,
-              phone: client.phone,
+              email: client.email || null,
+              phone: client.phone || null,
               source: "online",
               gdpr_consent: gdpr_consent === true,
               gdpr_consent_at: gdprConsentAt,
@@ -376,13 +387,25 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
         }
       }
     } else {
-      // Guest booking
-      const { data: existingGuest } = await supabaseAdmin
-        .from("clients")
-        .select("id")
-        .eq("business_id", business_id)
-        .eq("email", client.email)
-        .maybeSingle();
+      // Guest booking — look up by email first, then phone as fallback
+      let existingGuest: { id: string } | null = null;
+      if (client.email) {
+        const { data } = await supabaseAdmin
+          .from("clients")
+          .select("id")
+          .eq("business_id", business_id)
+          .eq("email", client.email)
+          .maybeSingle();
+        existingGuest = data;
+      } else if (client.phone) {
+        const { data } = await supabaseAdmin
+          .from("clients")
+          .select("id")
+          .eq("business_id", business_id)
+          .eq("phone", client.phone)
+          .maybeSingle();
+        existingGuest = data;
+      }
 
       if (existingGuest) {
         clientId = existingGuest.id;
@@ -400,8 +423,8 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
             business_id,
             first_name: first,
             last_name: last,
-            email: client.email,
-            phone: client.phone,
+            email: client.email || null,
+            phone: client.phone || null,
             source: "marketplace",
             gdpr_consent: gdpr_consent === true,
             gdpr_consent_at: gdprConsentAt,
@@ -564,9 +587,11 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
         locale,
       );
 
-      sendEmail(client.email, emailData.subject, emailData.html).catch(
-        (err) => console.error("Email send failed:", err),
-      );
+      if (client.email) {
+        sendEmail(client.email, emailData.subject, emailData.html).catch(
+          (err) => console.error("Email send failed:", err),
+        );
+      }
 
       // Insert notification for business
       // Find the owner's user_id for the notification

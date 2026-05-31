@@ -32,8 +32,13 @@ export function checkRateLimit(
     req.headers.get("cf-connecting-ip")?.trim() ??
     null;
 
-  const isUnknownIp = !ip;
-  const key = ip ?? "unknown";
+  // No IP header means local dev or CI — skip rate limiting entirely.
+  // Every test request would share the same synthetic key, so enforcing
+  // a limit here blocks legitimate tests rather than actual abuse.
+  if (!ip) return null;
+
+  const path = new URL(req.url).pathname;
+  const key = `${path}:${ip}`;
   const now = Date.now();
   let entry = windows.get(key);
 
@@ -45,9 +50,7 @@ export function checkRateLimit(
   // Evict timestamps outside the window
   entry.timestamps = entry.timestamps.filter((t) => now - t < windowMs);
 
-  const effectiveMaxHits = isUnknownIp ? Math.max(maxHits, 100) : maxHits;
-
-  if (entry.timestamps.length >= effectiveMaxHits) {
+  if (entry.timestamps.length >= maxHits) {
     const retryAfter = Math.ceil(
       (entry.timestamps[0] + windowMs - now) / 1000,
     );

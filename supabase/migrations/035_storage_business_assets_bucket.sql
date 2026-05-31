@@ -22,6 +22,13 @@ CREATE POLICY "public can read business assets"
   TO public
   USING (bucket_id = 'business-assets');
 
+-- Allow authenticated users to overwrite (upsert) objects — needed for logo/cover re-uploads.
+CREATE POLICY "owners can update business assets"
+  ON storage.objects FOR UPDATE
+  TO authenticated
+  USING (bucket_id = 'business-assets')
+  WITH CHECK (bucket_id = 'business-assets');
+
 -- Allow authenticated users to delete objects in their business folder.
 CREATE POLICY "owners can delete business assets"
   ON storage.objects FOR DELETE

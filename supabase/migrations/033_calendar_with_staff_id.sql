@@ -1,8 +1,13 @@
 -- 033_calendar_with_staff_id.sql
 -- Adds staff_profile_id to get_business_calendar so the frontend can group
 -- appointments by staff for conflict/overlap detection and visual highlighting.
+--
+-- PostgreSQL does not allow CREATE OR REPLACE FUNCTION when the return type
+-- changes, so we DROP first.
 
-CREATE OR REPLACE FUNCTION get_business_calendar(
+DROP FUNCTION IF EXISTS get_business_calendar(uuid, date, date, uuid);
+
+CREATE FUNCTION get_business_calendar(
   p_business_id uuid,
   p_start_date  date,
   p_end_date    date,

@@ -452,15 +452,18 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
     );
 
     if (apptErr) {
-      // P0001 = PostgreSQL user-raised exception (RAISE EXCEPTION).
-      // create_booking_atomic only raises P0001 for SLOT_TAKEN, so this
-      // is safe. Also match message string for belt-and-suspenders.
+      // The advisory lock in create_booking_atomic raises P0001 (PostgreSQL
+      // user-raised exception) when the slot is taken. Match all error fields
+      // because the exact format varies between Supabase client / PostgREST
+      // versions (message, code, details, hint may all carry the text).
+      const errStr = JSON.stringify(apptErr).toUpperCase();
       const isSlotTaken =
         apptErr.code === "P0001" ||
-        apptErr.message?.includes("SLOT_TAKEN");
+        errStr.includes("SLOT_TAKEN");
       if (isSlotTaken) {
         return conflict("SLOT_TAKEN", "This time slot was just booked by another client");
       }
+      console.error("create_booking_atomic unexpected error:", JSON.stringify(apptErr));
       throw apptErr;
     }
     const appointmentId = atomicId as string;

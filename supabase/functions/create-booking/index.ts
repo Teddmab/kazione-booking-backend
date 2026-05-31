@@ -22,9 +22,9 @@ interface CreateBookingBody {
   date: string;
   time: string;
   client: {
-    name: string;
-    email: string;
-    phone: string;
+    name?: string;
+    email?: string;
+    phone?: string;
     notes?: string;
   };
   payment_method: "deposit" | "full" | "later";

@@ -27,8 +27,36 @@ Deno.test("create-booking: missing starts_at", async () => {
   await res.body?.cancel()
 })
 
-Deno.test("create-booking: missing client email", async () => {
-  const res = await callFn({ business_id: BUSINESS_ID, service_id: SERVICE_ID, date: "2026-05-01", time: "10:00", client: { name: "Test", phone: "123" }, payment_method: "later" })
+Deno.test("create-booking: missing client email when phone is provided", async () => {
+  const slot = await findAvailableSlot();
+  if (!slot) {
+    console.warn("No available slots found — reset DB with: supabase db reset");
+    return;
+  }
+
+  const res = await callFn({
+    business_id: BUSINESS_ID,
+    service_id: SERVICE_ID,
+    staff_profile_id: slot.staffId,
+    date: slot.date,
+    time: slot.time,
+    client: { name: "Test", phone: "123" },
+    payment_method: "later",
+  })
+  assertEquals(res.status, 201)
+  const body = await res.json()
+  if (!body.appointment_id || !body.booking_reference) throw new Error("Missing appointment_id or booking_reference")
+})
+
+Deno.test("create-booking: missing client contact returns 400", async () => {
+  const res = await callFn({
+    business_id: BUSINESS_ID,
+    service_id: SERVICE_ID,
+    date: "2026-05-01",
+    time: "10:00",
+    client: { name: "", email: "", phone: "" },
+    payment_method: "later",
+  })
   assertEquals(res.status, 400)
   await res.body?.cancel()
 })

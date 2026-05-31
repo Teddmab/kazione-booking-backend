@@ -14,6 +14,8 @@ interface RegisterBody {
   ownerName: string;
   phone?: string;
   businessName?: string;
+  businessType?: string;
+  country?: string;
   role: "business" | "customer";
 }
 
@@ -95,7 +97,11 @@ Deno.serve(withLogging("auth-register", async (req: Request) => {
 
     if (authError) {
       const msg = authError.message.toLowerCase();
-      if (msg.includes("already registered") || msg.includes("already exists")) {
+      if (
+        msg.includes("already registered") ||
+        msg.includes("already been registered") ||
+        msg.includes("already exists")
+      ) {
         return conflict("EMAIL_TAKEN", "An account with this email already exists");
       }
       return badRequest(authError.message);
@@ -115,6 +121,8 @@ Deno.serve(withLogging("auth-register", async (req: Request) => {
         p_phone: body.phone ?? null,
         p_business_name: body.businessName!.trim(),
         p_business_slug: slug,
+        p_country: body.country ?? "EE",
+        p_business_type: body.businessType ?? null,
       });
 
       if (setupError) {

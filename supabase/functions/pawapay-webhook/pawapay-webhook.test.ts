@@ -1,5 +1,5 @@
 // supabase/functions/pawapay-webhook/pawapay-webhook.test.ts
-import { assertEquals } from "https://deno.land/std/testing/asserts.ts";
+import { assertEquals } from "std/assert";
 
 const BASE = "http://127.0.0.1:54321/functions/v1";
 const ANON_KEY =

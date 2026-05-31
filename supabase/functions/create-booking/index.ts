@@ -5,10 +5,7 @@ import { verifyAuth } from "../_shared/auth.ts";
 import { createPaymentIntent } from "../_shared/stripe.ts";
 import { withLogging } from "../_shared/logger.ts";
 import { checkRateLimit } from "../_shared/rateLimit.ts";
-import {
-  sendEmail,
-  bookingConfirmationEmail,
-} from "../_shared/resend.ts";
+import { bookingConfirmationEmail, sendEmail } from "../_shared/resend.ts";
 import { issueCancelToken } from "../_shared/bookingCancelToken.ts";
 
 // ---------------------------------------------------------------------------
@@ -22,9 +19,9 @@ interface CreateBookingBody {
   date: string;
   time: string;
   client: {
-    name: string;
-    email: string;
-    phone: string;
+    name?: string;
+    email?: string;
+    phone?: string;
     notes?: string;
   };
   payment_method: "deposit" | "full" | "later";
@@ -58,22 +55,32 @@ function validateBody(body: CreateBookingBody): string | null {
   if (!DATE_RE.test(body.date)) return "date must be YYYY-MM-DD";
   if (!TIME_RE.test(body.time)) return "time must be HH:MM";
   if (!body.client) return "client object is required";
-  if (!body.client.name) return "client.name is required";
-  if (!body.client.email) return "client.email is required";
-  if (!EMAIL_RE.test(body.client.email)) return "client.email is invalid";
-  if (!body.client.phone) return "client.phone is required";
+  // At least one contact field is required so the salon can reach the client
+  const name = body.client.name?.trim() ?? "";
+  const email = body.client.email?.trim() ?? "";
+  const phone = body.client.phone?.trim() ?? "";
+  const hasName = !!name;
+  const hasEmail = !!email;
+  const hasPhone = !!phone;
+  if (!hasName && !hasEmail && !hasPhone) {
+    return "At least one of client.name, client.email, or client.phone is required";
+  }
+  // Validate email format only when an email is supplied
+  if (hasEmail && !EMAIL_RE.test(email)) {
+    return "client.email is invalid";
+  }
   if (!["deposit", "full", "later"].includes(body.payment_method)) {
     return "payment_method must be 'deposit', 'full', or 'later'";
   }
   return null;
 }
 
-// Split "FirstName Lastname" → { first, last }
-function splitName(name: string): { first: string; last: string } {
-  const parts = name.trim().split(/\s+/);
-  const first = parts[0] || name;
-  const last = parts.slice(1).join(" ") || "";
-  return { first, last };
+// Split "FirstName Lastname" → { first, last }. Falls back to "Guest" when name is absent.
+function splitName(name?: string): { first: string; last: string } {
+  const trimmed = (name ?? "").trim();
+  if (!trimmed) return { first: "Guest", last: "" };
+  const parts = trimmed.split(/\s+/);
+  return { first: parts[0], last: parts.slice(1).join(" ") };
 }
 
 // ---------------------------------------------------------------------------
@@ -123,7 +130,7 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
 
       const publishableKey =
         Deno.env.get("VITE_STRIPE_PUBLISHABLE_KEY")?.trim() ??
-        Deno.env.get("STRIPE_PUBLISHABLE_KEY")?.trim();
+          Deno.env.get("STRIPE_PUBLISHABLE_KEY")?.trim();
 
       // If both keys are present in this runtime, compare hints and fail fast
       // with a friendly message before the client reaches the pay step.
@@ -225,7 +232,9 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
     // ── Fetch service info ────────────────────────────────────────────────
     const { data: service, error: svcErr } = await supabaseAdmin
       .from("services")
-      .select("id, name, duration_minutes, price, currency_code, deposit_amount")
+      .select(
+        "id, name, duration_minutes, price, currency_code, deposit_amount",
+      )
       .eq("id", service_id)
       .eq("business_id", business_id)
       .single();
@@ -251,7 +260,8 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
     if (businessResult.error) throw businessResult.error;
     const settings = settingsResult.data;
     const business = businessResult.data;
-    const currencyCode = service.currency_code ?? business.currency_code ?? "EUR";
+    const currencyCode = service.currency_code ?? business.currency_code ??
+      "EUR";
 
     // ── STEP 4: Calculate pricing ─────────────────────────────────────────
     const basePrice = +(selectedSlot.custom_price ?? service.price);
@@ -272,8 +282,8 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
       // Find best applicable promotion
       for (const promo of promos) {
         const appliesTo = promo.applies_to as string[] | null;
-        const applies =
-          !appliesTo || appliesTo.length === 0 || appliesTo.includes(service_id);
+        const applies = !appliesTo || appliesTo.length === 0 ||
+          appliesTo.includes(service_id);
         if (!applies) continue;
 
         let disc = 0;
@@ -296,13 +306,14 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
 
     // Deposit
     const depositPct = +(settings?.deposit_percentage ?? 0);
-    const serviceDeposit = service.deposit_amount != null ? +service.deposit_amount : null;
+    const serviceDeposit = service.deposit_amount != null
+      ? +service.deposit_amount
+      : null;
     let depositAmount = 0;
     if (payment_method === "deposit") {
-      depositAmount =
-        serviceDeposit != null
-          ? serviceDeposit
-          : +(totalAmount * (depositPct / 100)).toFixed(2);
+      depositAmount = serviceDeposit != null
+        ? serviceDeposit
+        : +(totalAmount * (depositPct / 100)).toFixed(2);
     } else if (payment_method === "full") {
       depositAmount = totalAmount;
     }
@@ -337,13 +348,17 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
             .eq("id", clientId);
         }
       } else {
-        // Check by email first
-        const { data: byEmail } = await supabaseAdmin
-          .from("clients")
-          .select("id")
-          .eq("business_id", business_id)
-          .eq("email", client.email)
-          .maybeSingle();
+        // Check by email first (only when email was provided)
+        let byEmail: { id: string } | null = null;
+        if (client.email) {
+          const { data } = await supabaseAdmin
+            .from("clients")
+            .select("id")
+            .eq("business_id", business_id)
+            .eq("email", client.email)
+            .maybeSingle();
+          byEmail = data;
+        }
 
         if (byEmail) {
           // Link existing guest record to the authenticated user; update consent
@@ -351,7 +366,9 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
             .from("clients")
             .update({
               user_id: userId,
-              ...(gdpr_consent ? { gdpr_consent: true, gdpr_consent_at: gdprConsentAt } : {}),
+              ...(gdpr_consent
+                ? { gdpr_consent: true, gdpr_consent_at: gdprConsentAt }
+                : {}),
             })
             .eq("id", byEmail.id);
           clientId = byEmail.id;
@@ -363,8 +380,8 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
               user_id: userId,
               first_name: first,
               last_name: last,
-              email: client.email,
-              phone: client.phone,
+              email: client.email || null,
+              phone: client.phone || null,
               source: "online",
               gdpr_consent: gdpr_consent === true,
               gdpr_consent_at: gdprConsentAt,
@@ -376,13 +393,25 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
         }
       }
     } else {
-      // Guest booking
-      const { data: existingGuest } = await supabaseAdmin
-        .from("clients")
-        .select("id")
-        .eq("business_id", business_id)
-        .eq("email", client.email)
-        .maybeSingle();
+      // Guest booking — look up by email first, then phone as fallback
+      let existingGuest: { id: string } | null = null;
+      if (client.email) {
+        const { data } = await supabaseAdmin
+          .from("clients")
+          .select("id")
+          .eq("business_id", business_id)
+          .eq("email", client.email)
+          .maybeSingle();
+        existingGuest = data;
+      } else if (client.phone) {
+        const { data } = await supabaseAdmin
+          .from("clients")
+          .select("id")
+          .eq("business_id", business_id)
+          .eq("phone", client.phone)
+          .maybeSingle();
+        existingGuest = data;
+      }
 
       if (existingGuest) {
         clientId = existingGuest.id;
@@ -400,8 +429,8 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
             business_id,
             first_name: first,
             last_name: last,
-            email: client.email,
-            phone: client.phone,
+            email: client.email || null,
+            phone: client.phone || null,
             source: "marketplace",
             gdpr_consent: gdpr_consent === true,
             gdpr_consent_at: gdprConsentAt,
@@ -420,36 +449,63 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
     if (refErr) throw refErr;
     const bookingReference = refData as string;
 
-    // Build timestamps
-    const startsAt = `${date}T${time}:00`;
+    // Build timestamps.
+    // Append "Z" so the literal is parsed as UTC everywhere — slot times from
+    // get_available_slots are already in UTC (the edge-runtime is UTC-only) and
+    // the frontend sends the date in local components to avoid the toISOString()
+    // UTC-shift bug. Storing as explicit UTC prevents any ambiguity in
+    // new Date() across runtimes.
+    const startsAt = `${date}T${time}:00Z`;
     const durationMinutes = service.duration_minutes;
     const startsDate = new Date(startsAt);
     const endsDate = new Date(startsDate.getTime() + durationMinutes * 60_000);
     const endsAt = endsDate.toISOString();
 
-    // STEP 6: INSERT appointment
-    const { data: appointment, error: apptErr } = await supabaseAdmin
-      .from("appointments")
-      .insert({
-        business_id,
-        client_id: clientId,
-        staff_profile_id: selectedStaffId,
-        service_id,
-        status: "pending",
-        starts_at: startsAt,
-        ends_at: endsAt,
-        duration_minutes: durationMinutes,
-        price: totalAmount,
-        deposit_amount: depositAmount,
-        booking_source: "online",
-        booking_reference: bookingReference,
-        notes: client.notes ?? null,
-      })
-      .select("id")
-      .single();
+    // STEP 6: Atomically insert appointment with advisory lock.
+    // create_booking_atomic acquires pg_advisory_xact_lock on
+    // (business_id, staff_id, slot) before re-checking availability and
+    // inserting — preventing double-booking under concurrent requests.
+    const { data: atomicId, error: apptErr } = await supabaseAdmin.rpc(
+      "create_booking_atomic",
+      {
+        p_business_id: business_id,
+        p_service_id: service_id,
+        p_staff_id: selectedStaffId,
+        p_starts_at: startsAt,
+        p_ends_at: endsAt,
+        p_client_id: clientId,
+        p_booking_reference: bookingReference,
+        p_price: totalAmount,
+        p_deposit_amount: depositAmount,
+        p_booking_source: "online",
+        p_is_walk_in: false,
+        p_notes: client.notes ?? null,
+        p_payment_method: payment_method,
+        p_payment_status: "pending",
+      },
+    );
 
-    if (apptErr) throw apptErr;
-    const appointmentId = appointment.id;
+    if (apptErr) {
+      // The advisory lock in create_booking_atomic raises P0001 (PostgreSQL
+      // user-raised exception) when the slot is taken. Match all error fields
+      // because the exact format varies between Supabase client / PostgREST
+      // versions (message, code, details, hint may all carry the text).
+      const errStr = JSON.stringify(apptErr).toUpperCase();
+      const isSlotTaken = apptErr.code === "P0001" ||
+        errStr.includes("SLOT_TAKEN");
+      if (isSlotTaken) {
+        return conflict(
+          "SLOT_TAKEN",
+          "This time slot was just booked by another client",
+        );
+      }
+      console.error(
+        "create_booking_atomic unexpected error:",
+        JSON.stringify(apptErr),
+      );
+      throw apptErr;
+    }
+    const appointmentId = atomicId as string;
     const cancelToken = await issueCancelToken(appointmentId, bookingReference);
 
     // STEP 7: INSERT appointment_services
@@ -472,7 +528,9 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
     }
 
     // STEP 8: INSERT payment
-    const paymentAmount = payment_method === "later" ? totalAmount : chargeAmount;
+    const paymentAmount = payment_method === "later"
+      ? totalAmount
+      : chargeAmount;
     const { data: payment, error: payErr } = await supabaseAdmin
       .from("payments")
       .insert({
@@ -541,15 +599,21 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
           date,
           time,
           reference: bookingReference,
-          price: `${currencyCode === "EUR" ? "€" : currencyCode} ${totalAmount.toFixed(2)}`,
-          manageUrl: `${appUrl}/booking/${bookingReference}?token=${encodeURIComponent(cancelToken)}`,
+          price: `${currencyCode === "EUR" ? "€" : currencyCode} ${
+            totalAmount.toFixed(2)
+          }`,
+          manageUrl: `${appUrl}/booking/${bookingReference}?token=${
+            encodeURIComponent(cancelToken)
+          }`,
         },
         locale,
       );
 
-      sendEmail(client.email, emailData.subject, emailData.html).catch(
-        (err) => console.error("Email send failed:", err),
-      );
+      if (client.email) {
+        sendEmail(client.email, emailData.subject, emailData.html).catch(
+          (err) => console.error("Email send failed:", err),
+        );
+      }
 
       // Insert notification for business
       // Find the owner's user_id for the notification
@@ -586,6 +650,9 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
       // ── Stripe payment (deposit or full) ─────────────────────────────
       try {
         const stripeAccountId = settings?.stripe_account_id ?? undefined;
+        const customerEmail = client.email?.trim() ?? "";
+        const customerName = client.name?.trim() ?? "";
+        const customerPhone = client.phone?.trim() ?? undefined;
         const paymentIntent = await createPaymentIntent(
           chargeAmount,
           currencyCode,
@@ -597,9 +664,9 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
           },
           stripeAccountId,
           {
-            email: client.email,
-            name: client.name,
-            phone: client.phone,
+            email: customerEmail,
+            name: customerName,
+            phone: customerPhone,
             bookingReference,
             serviceName: service.name,
           },

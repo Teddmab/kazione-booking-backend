@@ -1,12 +1,12 @@
 // supabase/functions/send-email/send-email.test.ts
-import { assertEquals } from "https://deno.land/std/testing/asserts.ts"
+import { assertEquals } from "std/assert"
 
 const BASE = "http://127.0.0.1:54321/functions/v1"
 const ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9.CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0"
 // Local dev key from .env — safe to hardcode (dev-only secret)
 const INTERNAL_KEY = Deno.env.get("INTERNAL_FUNCTION_KEY") || "725b2c7d67955c0eb77589714c9b80879ebf6b157b2d880fa568c0fdeea56fe0"
 
-async function callFn(body: any, key?: string) {
+function callFn(body: unknown, key?: string) {
   return fetch(`${BASE}/send-email`, {
     method: "POST",
     headers: { "Content-Type": "application/json", "apikey": ANON_KEY, "x-internal-key": key || INTERNAL_KEY },

@@ -1,5 +1,3 @@
-/// <reference path="../_shared/deno-globals.d.ts" />
-
 import { corsHeaders, handleCors } from "../_shared/cors.ts";
 import { requireOwnerOrManagerCtx } from "../_shared/auth.ts";
 import { badRequest, serverError } from "../_shared/errors.ts";

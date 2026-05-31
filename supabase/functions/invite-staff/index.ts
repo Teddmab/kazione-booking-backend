@@ -123,6 +123,7 @@ Deno.serve(withLogging("invite-staff", async (req: Request) => {
         display_name: body.display_name,
         specialties: body.specialties ?? [],
         is_active: false, // Activated when invite is accepted
+        invited_email: body.email.toLowerCase(),
       })
       .select("id")
       .single();
@@ -130,8 +131,8 @@ Deno.serve(withLogging("invite-staff", async (req: Request) => {
     if (staffErr) throw staffErr;
 
     // ── Generate magic link for invitation ────────────────────────────────
-    const { data: linkData, error: linkErr } =
-      await supabaseAdmin.auth.admin.generateLink({
+    const { data: linkData, error: linkErr } = await supabaseAdmin.auth.admin
+      .generateLink({
         type: "magiclink",
         email: body.email,
       });
@@ -142,14 +143,14 @@ Deno.serve(withLogging("invite-staff", async (req: Request) => {
     }
 
     const APP_URL = Deno.env.get("APP_URL") ?? "https://kazionebooking.com";
-    const acceptUrl = linkData?.properties?.action_link
-      ?? `${APP_URL}/invite?business=${businessId}&staff=${staffProfile.id}`;
+    const acceptUrl = linkData?.properties?.action_link ??
+      `${APP_URL}/invite?business=${businessId}&staff=${staffProfile.id}`;
 
     // ── Fetch inviter name & business name ────────────────────────────────
     const [inviterResult, businessResult] = await Promise.all([
       supabaseAdmin
         .from("users")
-        .select("first_name, last_name")
+        .select("first_name, last_name, email")
         .eq("id", userId)
         .single(),
       supabaseAdmin
@@ -160,8 +161,11 @@ Deno.serve(withLogging("invite-staff", async (req: Request) => {
     ]);
 
     const inviterName = inviterResult.data
-      ? `${inviterResult.data.first_name ?? ""} ${inviterResult.data.last_name ?? ""}`.trim() || "Your salon"
+      ? `${inviterResult.data.first_name ?? ""} ${
+        inviterResult.data.last_name ?? ""
+      }`.trim() || "Your salon"
       : "Your salon";
+    const inviterEmail = inviterResult.data?.email?.trim() || null;
     const salonName = businessResult.data?.name ?? "the salon";
     const locale = businessResult.data?.locale ?? "en";
 
@@ -171,14 +175,34 @@ Deno.serve(withLogging("invite-staff", async (req: Request) => {
       locale,
     );
 
-    await sendEmail(body.email, emailData.subject, emailData.html);
+    let inviteSent = true;
+    let emailError: string | null = null;
+    try {
+      if (!Deno.env.get("RESEND_API_KEY")) {
+        inviteSent = false;
+        emailError = "RESEND_API_KEY is not configured";
+      } else {
+        await sendEmail(
+          body.email,
+          emailData.subject,
+          emailData.html,
+          undefined,
+          inviterEmail ? `${inviterName} <${inviterEmail}>` : undefined,
+        );
+      }
+    } catch (err) {
+      inviteSent = false;
+      emailError = err instanceof Error ? err.message : "Email delivery failed";
+      console.error("invite-staff email send failed:", err);
+    }
 
     return new Response(
       JSON.stringify({
-        invite_sent: true,
+        invite_sent: inviteSent,
         email: body.email,
         staff_profile_id: staffProfile.id,
         member_id: memberId,
+        email_error: emailError,
       }),
       {
         status: 201,

@@ -35,14 +35,19 @@ Deno.serve(withLogging("storefront-upload", async (req: Request) => {
   }
 
   try {
-    const body = await req.json() as Record<string, unknown>;
-    const businessId = body.business_id as string;
-    const assetType = body.asset_type as string;
+    // Parameters come as query-string params (no JSON body).
+    const url = new URL(req.url);
+    const businessId = url.searchParams.get("business_id") ?? undefined;
+    const assetType = url.searchParams.get("asset_type") ?? "";
 
+    if (!businessId) return badRequest("business_id is required");
     if (!assetType || !["logo", "cover", "gallery"].includes(assetType)) {
       return badRequest("asset_type must be logo, cover, or gallery");
     }
 
+    // Auth: verify JWT and confirm caller owns/manages this business.
+    // ctx.businessId is the DB-verified value — use it for storage paths,
+    // never the raw body value.
     const ctx = await requireOwnerOrManagerCtx(req, businessId);
     if (ctx instanceof Response) return ctx;
 
@@ -58,7 +63,7 @@ Deno.serve(withLogging("storefront-upload", async (req: Request) => {
 
     const { data, error } = await supabaseAdmin.storage
       .from("business-assets")
-      .createSignedUploadUrl(storagePath);
+      .createSignedUploadUrl(storagePath, { upsert: true });
 
     if (error) return serverError(error.message);
 
@@ -66,9 +71,22 @@ Deno.serve(withLogging("storefront-upload", async (req: Request) => {
       .from("business-assets")
       .getPublicUrl(storagePath);
 
+    // In local dev Supabase returns internal Docker hostnames (kong:8000).
+    // Detect this and rewrite to the externally reachable address so the
+    // browser can PUT the file directly. In production the URL is already
+    // public and the replace is a no-op.
+    const internalUrl = Deno.env.get("SUPABASE_URL") ?? "";
+    const isLocalDocker = internalUrl.includes("kong") ||
+      internalUrl.includes("supabase_");
+    const publicBase = isLocalDocker
+      ? "http://127.0.0.1:54321"
+      : internalUrl.replace(/\/$/, "");
+    const rewrite = (u: string) =>
+      u.replace(/^https?:\/\/[^/]+(?=\/storage\/)/, publicBase);
+
     return json({
-      upload_url: data.signedUrl,
-      public_url: urlData.publicUrl,
+      upload_url: rewrite(data.signedUrl),
+      public_url: rewrite(urlData.publicUrl),
       path: storagePath,
     });
   } catch (err) {

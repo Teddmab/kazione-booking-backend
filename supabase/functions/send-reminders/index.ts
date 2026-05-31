@@ -11,8 +11,12 @@ import { issueCancelToken } from "../_shared/bookingCancelToken.ts";
 const CRON_SECRET = Deno.env.get("CRON_SECRET");
 
 function verifyCronAuth(req: Request): boolean {
+  if (!CRON_SECRET) {
+    console.error("[send-reminders] CRON_SECRET env var is not set");
+    return false;
+  }
   const header = req.headers.get("Authorization");
-  if (!header?.startsWith("Bearer ") || !CRON_SECRET) return false;
+  if (!header?.startsWith("Bearer ")) return false;
 
   const token = header.replace("Bearer ", "");
   const a = new TextEncoder().encode(token);
@@ -57,14 +61,17 @@ async function sendEmailInternal(
 // ---------------------------------------------------------------------------
 
 async function sendReminders(): Promise<{ sent: number; errors: number }> {
+  // Fetch all confirmed, un-reminded appointments in a generous 48h look-ahead
+  // window. We then filter down per-business using reminder_hours_before from
+  // business_settings (no direct FK between appointments and business_settings,
+  // so we do the join in application code).
   const now = new Date();
-  const from23h = new Date(now.getTime() + 23 * 60 * 60 * 1000).toISOString();
-  const to25h = new Date(now.getTime() + 25 * 60 * 60 * 1000).toISOString();
+  const maxLookahead = new Date(now.getTime() + 49 * 60 * 60 * 1000).toISOString();
 
   const { data: appointments, error } = await supabaseAdmin
     .from("appointments")
     .select(`
-      id, starts_at, booking_reference, price,
+      id, starts_at, booking_reference, price, business_id,
       client:clients!inner(email, first_name, last_name, preferred_locale),
       service:services!inner(name),
       staff:staff_profiles(display_name),
@@ -72,18 +79,48 @@ async function sendReminders(): Promise<{ sent: number; errors: number }> {
     `)
     .eq("status", "confirmed")
     .is("reminder_sent_at", null)
-    .gte("starts_at", from23h)
-    .lte("starts_at", to25h);
+    .gte("starts_at", now.toISOString())
+    .lte("starts_at", maxLookahead);
 
   if (error) {
     console.error("Failed to query reminder appointments:", error.message);
     return { sent: 0, errors: 1 };
   }
 
+  if (!appointments || appointments.length === 0) return { sent: 0, errors: 0 };
+
+  // Fetch reminder_hours_before for each distinct business
+  const businessIds = [...new Set(appointments.map((a) => a.business_id as string))];
+  const { data: settingsRows, error: settingsErr } = await supabaseAdmin
+    .from("business_settings")
+    .select("business_id, reminder_hours_before")
+    .in("business_id", businessIds);
+
+  if (settingsErr) {
+    console.error("Failed to query business_settings:", settingsErr.message);
+    return { sent: 0, errors: 1 };
+  }
+
+  const settingsMap = new Map<string, number>(
+    (settingsRows ?? []).map((s) => [
+      s.business_id as string,
+      (s.reminder_hours_before as number) ?? 24,
+    ]),
+  );
+
+  // Filter appointments whose window matches their business's reminder_hours_before
+  const filteredAppointments = (appointments ?? []).filter((appt) => {
+    const hours = settingsMap.get(appt.business_id as string) ?? 24;
+    const windowStart = new Date(now.getTime() + (hours - 1) * 60 * 60 * 1000);
+    const windowEnd = new Date(now.getTime() + (hours + 1) * 60 * 60 * 1000);
+    const startsAt = new Date(appt.starts_at);
+    return startsAt >= windowStart && startsAt <= windowEnd;
+  });
+
   let sent = 0;
   let errors = 0;
 
-  for (const appt of appointments ?? []) {
+  for (const appt of filteredAppointments) {
     try {
       const client = appt.client as unknown as {
         email: string | null;
@@ -239,6 +276,14 @@ Deno.serve(withLogging("send-reminders", async (req: Request) => {
 
   if (req.method !== "POST") {
     return badRequest("Only POST is allowed");
+  }
+
+  if (!CRON_SECRET) {
+    console.error("[send-reminders] CRON_SECRET env var is not set — refusing to run");
+    return new Response(
+      JSON.stringify({ error: { code: "MISCONFIGURED", message: "CRON_SECRET is not configured" } }),
+      { status: 500, headers: { "Content-Type": "application/json" } },
+    );
   }
 
   if (!verifyCronAuth(req)) {

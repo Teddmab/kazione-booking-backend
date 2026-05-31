@@ -12,17 +12,21 @@ function json(data: unknown, status = 200): Response {
 }
 
 // ---------------------------------------------------------------------------
-// GDPR — Data Export + Anonymisation
+// GDPR — Data Export + Erasure
 //
 // GET  /gdpr?action=export
 //   Auth: verifyAuth (client requesting their own data)
 //   Returns client record + appointment history + payments — no business-private fields.
 //
-// DELETE /gdpr?action=delete
-//   Auth: requireOwnerOrManagerCtx (owner deleting a client)
-//        OR verifyAuth (client requesting self-deletion)
-//   Anonymises the client row in place — NEVER hard deletes.
-//   Appointment and payment rows are preserved for financial compliance.
+// DELETE /gdpr                          ← GDPR Article 17 — right to erasure (client self-service)
+//   Body: { confirm: true }
+//   Auth: verifyAuth (client deletes their own account)
+//   Hard deletes: appointment_status_log → appointments → clients → auth user
+//
+// DELETE /gdpr?action=delete            ← Owner-initiated anonymisation
+//   Body: { business_id, client_id }
+//   Auth: requireOwnerOrManagerCtx
+//   Anonymises PII in-place — preserves appointment rows for financial compliance.
 // ---------------------------------------------------------------------------
 
 Deno.serve(withLogging("gdpr", async (req: Request) => {
@@ -32,21 +36,18 @@ Deno.serve(withLogging("gdpr", async (req: Request) => {
   const url = new URL(req.url);
   const action = url.searchParams.get("action");
 
-  if (!action) return badRequest("action query param is required (export | delete)");
-  if (!["export", "delete"].includes(action)) {
-    return badRequest("action must be 'export' or 'delete'");
-  }
-
   try {
     // ── GET /gdpr?action=export ─────────────────────────────────────────────
-    if (req.method === "GET" && action === "export") {
-      // Client authenticates with their own JWT
+    if (req.method === "GET") {
+      if (action !== "export") {
+        return badRequest("action must be 'export' for GET requests");
+      }
+
       const user = await verifyAuth(req).catch((e: unknown) => {
         if (e instanceof Response) throw e;
         throw e;
       });
 
-      // Find the client record by user_id (could span multiple businesses)
       const { data: clients, error: clientErr } = await supabaseAdmin
         .from("clients")
         .select("id, business_id, first_name, last_name, email, phone, gdpr_consent, gdpr_consent_at")
@@ -57,7 +58,6 @@ Deno.serve(withLogging("gdpr", async (req: Request) => {
         return notFound("No client record found for this account");
       }
 
-      // Export all data across all businesses this client belongs to
       const clientIds = clients.map((c: Record<string, unknown>) => c.id as string);
 
       const [appointmentsResult, paymentsResult] = await Promise.all([
@@ -86,158 +86,165 @@ Deno.serve(withLogging("gdpr", async (req: Request) => {
       if (paymentsResult.error) return serverError(paymentsResult.error.message);
 
       const appointments = (appointmentsResult.data ?? []).map((a: Record<string, unknown>) => {
-        const row = a;
-        const service = row.services as { name?: string } | null;
-        const staff = row.staff_profiles as { display_name?: string } | null;
+        const service = a.services as { name?: string } | null;
+        const staff = a.staff_profiles as { display_name?: string } | null;
         return {
-          id: row.id,
-          starts_at: row.starts_at,
-          booking_reference: row.booking_reference,
+          id: a.id,
+          starts_at: a.starts_at,
+          booking_reference: a.booking_reference,
           service_name: service?.name ?? null,
           staff_name: staff?.display_name ?? null,
-          status: row.status,
-          price: row.price,
+          status: a.status,
+          price: a.price,
         };
       });
 
-      const payments = (paymentsResult.data ?? []).map((p: Record<string, unknown>) => {
-        const row = p;
-        return {
-          id: row.id,
-          amount: row.amount,
-          currency: row.currency_code,
-          status: row.status,
-          paid_at: row.paid_at ?? null,
-          provider: (row.provider as string | null) ?? (row.method as string) ?? null,
-        };
-      });
+      const payments = (paymentsResult.data ?? []).map((p: Record<string, unknown>) => ({
+        id: p.id,
+        amount: p.amount,
+        currency: p.currency_code,
+        status: p.status,
+        paid_at: p.paid_at ?? null,
+        provider: (p.provider as string | null) ?? (p.method as string) ?? null,
+      }));
 
-      // Return the first client record's fields as the canonical profile
-      // (most clients belong to only one business)
       const primaryClient = clients[0] as Record<string, unknown>;
 
       return json({
-        exportedAt: new Date().toISOString(),
-        client: {
-          id: primaryClient.id,
+        exported_at: new Date().toISOString(),
+        profile: {
           first_name: primaryClient.first_name,
           last_name: primaryClient.last_name,
           email: primaryClient.email ?? null,
           phone: primaryClient.phone ?? null,
-          gdpr_consent: primaryClient.gdpr_consent,
-          gdpr_consent_at: primaryClient.gdpr_consent_at ?? null,
         },
         appointments,
         payments,
+        consents: {
+          gdpr_consent: primaryClient.gdpr_consent,
+          gdpr_consent_at: primaryClient.gdpr_consent_at ?? null,
+        },
       });
     }
 
-    // ── DELETE /gdpr?action=delete ──────────────────────────────────────────
-    if (req.method === "DELETE" && action === "delete") {
-      // Two auth modes:
-      //  1. Owner/manager provides { business_id, client_id } in body
-      //  2. Client self-deletes using their own JWT (no business_id needed)
+    // ── DELETE /gdpr — client self-erasure (GDPR Article 17) ───────────────
+    if (req.method === "DELETE" && !action) {
+      const user = await verifyAuth(req).catch((e: unknown) => {
+        if (e instanceof Response) throw e;
+        throw e;
+      });
+
       const body = await req.json().catch(() => ({})) as Record<string, unknown>;
 
-      const businessId = body.business_id as string | undefined;
-
-      let clientId: string | undefined;
-      let isOwnerRequest = false;
-
-      if (businessId) {
-        // Owner-initiated deletion
-        const ctx = await requireOwnerOrManagerCtx(req, businessId);
-        if (ctx instanceof Response) return ctx;
-
-        clientId = body.client_id as string | undefined;
-        if (!clientId) return badRequest("client_id is required when business_id is provided");
-
-        // Verify client belongs to the authenticated business
-        const { data: clientRow, error: checkErr } = await supabaseAdmin
-          .from("clients")
-          .select("id")
-          .eq("id", clientId)
-          .eq("business_id", ctx.businessId)
-          .maybeSingle();
-
-        if (checkErr) return serverError(checkErr.message);
-        if (!clientRow) return notFound("Client not found in this business");
-
-        isOwnerRequest = true;
-      } else {
-        // Client self-deletion — derive client_id from JWT
-        const user = await verifyAuth(req).catch((e: unknown) => {
-          if (e instanceof Response) throw e;
-          throw e;
-        });
-
-        // Find ALL client records for this user (across businesses)
-        // Use provided client_id if given, otherwise delete all their records
-        let lookupQuery = supabaseAdmin
-          .from("clients")
-          .select("id")
-          .eq("user_id", user.id);
-
-        if (body.client_id) {
-          lookupQuery = lookupQuery.eq("id", body.client_id as string);
-        }
-
-        const { data: clientRows, error: lookupErr } = await lookupQuery;
-        if (lookupErr) return serverError(lookupErr.message);
-        if (!clientRows || clientRows.length === 0) {
-          return notFound("No client record found for this account");
-        }
-
-        // Anonymise all their records
-        const idsToAnonymise = clientRows.map((c: Record<string, unknown>) => c.id as string);
-        const now = new Date().toISOString();
-
-        for (const id of idsToAnonymise) {
-          const { error: anonErr } = await supabaseAdmin
-            .from("clients")
-            .update({
-              first_name: "[DELETED]",
-              last_name: "[DELETED]",
-              email: `deleted+${id}@gdpr.kazione.com`,
-              phone: null,
-              gdpr_consent: false,
-              gdpr_consent_at: null,
-              marketing_opt_in: false,
-            })
-            .eq("id", id);
-
-          if (anonErr) return serverError(anonErr.message);
-        }
-
-        return json({ success: true, anonymisedAt: now });
+      if (body.confirm !== true) {
+        return badRequest("Request body must include { confirm: true } to proceed with account deletion");
       }
 
-      // Owner-initiated anonymisation for a single client_id
-      if (isOwnerRequest && clientId) {
-        const now = new Date().toISOString();
+      // Find all client records for this user
+      const { data: clientRows, error: lookupErr } = await supabaseAdmin
+        .from("clients")
+        .select("id")
+        .eq("user_id", user.id);
 
-        const { error: anonErr } = await supabaseAdmin
-          .from("clients")
-          .update({
-            first_name: "[DELETED]",
-            last_name: "[DELETED]",
-            email: `deleted+${clientId}@gdpr.kazione.com`,
-            phone: null,
-            gdpr_consent: false,
-            gdpr_consent_at: null,
-            marketing_opt_in: false,
-          })
-          .eq("id", clientId);
-
-        if (anonErr) return serverError(anonErr.message);
-
-        return json({ success: true, anonymisedAt: now });
+      if (lookupErr) return serverError(lookupErr.message);
+      if (!clientRows || clientRows.length === 0) {
+        return notFound("No client record found for this account");
       }
 
-      return badRequest("Unable to process deletion request");
+      const clientIds = clientRows.map((c: Record<string, unknown>) => c.id as string);
+
+      // Fetch appointment IDs before deletion (needed for status log cleanup)
+      const { data: apptRows, error: apptLookupErr } = await supabaseAdmin
+        .from("appointments")
+        .select("id")
+        .in("client_id", clientIds);
+
+      if (apptLookupErr) return serverError(apptLookupErr.message);
+      const appointmentIds = (apptRows ?? []).map((a: Record<string, unknown>) => a.id as string);
+
+      console.log(`[gdpr] DELETION initiated — user_id=${user.id} clients=${clientIds.length} appointments=${appointmentIds.length}`);
+
+      // Delete in dependency order
+      if (appointmentIds.length > 0) {
+        const { error: logErr } = await supabaseAdmin
+          .from("appointment_status_log")
+          .delete()
+          .in("appointment_id", appointmentIds);
+        if (logErr) return serverError(`Failed to delete status log: ${logErr.message}`);
+      }
+
+      if (clientIds.length > 0) {
+        const { error: apptErr } = await supabaseAdmin
+          .from("appointments")
+          .delete()
+          .in("client_id", clientIds);
+        if (apptErr) return serverError(`Failed to delete appointments: ${apptErr.message}`);
+
+        const { error: clientErr } = await supabaseAdmin
+          .from("clients")
+          .delete()
+          .in("id", clientIds);
+        if (clientErr) return serverError(`Failed to delete client records: ${clientErr.message}`);
+      }
+
+      // Delete the auth account last — after this, the JWT is invalidated
+      const { error: authErr } = await supabaseAdmin.auth.admin.deleteUser(user.id);
+      if (authErr) return serverError(`Failed to delete auth account: ${authErr.message}`);
+
+      console.log(`[gdpr] DELETION complete — user_id=${user.id}`);
+
+      return json({
+        deleted: true,
+        message: "Your account and all associated data have been permanently deleted.",
+      });
     }
 
-    return badRequest(`Method ${req.method} with action=${action} is not supported`);
+    // ── DELETE /gdpr?action=delete — owner-initiated anonymisation ──────────
+    if (req.method === "DELETE" && action === "delete") {
+      const body = await req.json().catch(() => ({})) as Record<string, unknown>;
+      const businessId = body.business_id as string | undefined;
+
+      if (!businessId) {
+        return badRequest("business_id is required for owner-initiated deletion");
+      }
+
+      const ctx = await requireOwnerOrManagerCtx(req, businessId);
+      if (ctx instanceof Response) return ctx;
+
+      const clientId = body.client_id as string | undefined;
+      if (!clientId) return badRequest("client_id is required when business_id is provided");
+
+      const { data: clientRow, error: checkErr } = await supabaseAdmin
+        .from("clients")
+        .select("id")
+        .eq("id", clientId)
+        .eq("business_id", ctx.businessId)
+        .maybeSingle();
+
+      if (checkErr) return serverError(checkErr.message);
+      if (!clientRow) return notFound("Client not found in this business");
+
+      const now = new Date().toISOString();
+
+      const { error: anonErr } = await supabaseAdmin
+        .from("clients")
+        .update({
+          first_name: "[DELETED]",
+          last_name: "[DELETED]",
+          email: `deleted+${clientId}@gdpr.kazione.com`,
+          phone: null,
+          gdpr_consent: false,
+          gdpr_consent_at: null,
+          marketing_opt_in: false,
+        })
+        .eq("id", clientId);
+
+      if (anonErr) return serverError(anonErr.message);
+
+      return json({ success: true, anonymised_at: now });
+    }
+
+    return badRequest(`Method ${req.method}${action ? ` with action=${action}` : ""} is not supported`);
   } catch (err) {
     if (err instanceof Response) return err;
     console.error("[gdpr] Unhandled error:", err);

@@ -12,19 +12,25 @@ function json(data: unknown, status = 200): Response {
 }
 
 /**
- * GET /me
- * Returns the authenticated user's profile and primary tenant (business membership).
+ * GET /me — Returns authenticated user's profile + all business memberships.
+ * PATCH /me — Updates first_name, last_name, phone.
  *
- * Response shape:
+ * GET response:
  *   { profile: { id, first_name, last_name, email, phone, avatar_url } | null,
- *     tenant: { businessId, businessName, role } | null }
+ *     tenant: { businessId, businessName, slug, role } | null,
+ *     businesses: { businessId, businessName, slug, role }[] }
  */
 Deno.serve(withLogging("me", async (req: Request) => {
   const corsResp = handleCors(req);
   if (corsResp) return corsResp;
 
   if (req.method !== "GET" && req.method !== "PATCH") {
-    return json({ error: { code: "METHOD_NOT_ALLOWED", message: "Only GET and PATCH are allowed" } }, 405);
+    return json({
+      error: {
+        code: "METHOD_NOT_ALLOWED",
+        message: "Only GET and PATCH are allowed",
+      },
+    }, 405);
   }
 
   try {
@@ -79,7 +85,7 @@ Deno.serve(withLogging("me", async (req: Request) => {
       return json({ profile: updatedProfile ?? null });
     }
 
-    const [profileResult, membershipResult] = await Promise.all([
+    const [profileResult, membershipsResult] = await Promise.all([
       supabaseAdmin
         .from("users")
         .select("id, first_name, last_name, email, phone, avatar_url")
@@ -87,27 +93,29 @@ Deno.serve(withLogging("me", async (req: Request) => {
         .maybeSingle(),
       supabaseAdmin
         .from("business_members")
-        .select("business_id, role, businesses(name)")
+        .select("business_id, role, businesses(name, slug)")
         .eq("user_id", user.id)
         .eq("is_active", true)
-        .limit(1)
-        .maybeSingle(),
+        .order("created_at", { ascending: true }),
     ]);
 
     const profile = profileResult.data ?? null;
-    const membership = membershipResult.data ?? null;
+    const memberships = (membershipsResult.data ?? []) as unknown as Array<{
+      business_id: string;
+      role: string;
+      businesses: { name: string; slug: string } | null;
+    }>;
 
-    let tenant = null;
-    if (membership) {
-      const biz = membership.businesses as unknown as { name: string } | null;
-      tenant = {
-        businessId: membership.business_id as string,
-        businessName: biz?.name ?? "",
-        role: membership.role as string,
-      };
-    }
+    const businesses = memberships.map((m) => ({
+      businessId: m.business_id,
+      businessName: m.businesses?.name ?? "",
+      slug: m.businesses?.slug ?? "",
+      role: m.role,
+    }));
 
-    return json({ profile, tenant });
+    const tenant = businesses.length > 0 ? businesses[0] : null;
+
+    return json({ profile, tenant, businesses });
   } catch (e) {
     if (e instanceof Response) return e;
     console.error("me error:", e);

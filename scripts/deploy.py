@@ -19,8 +19,29 @@ PROJECT_REF = "hwvqbsqlvwvedyhfuiwt"
 PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FUNCTIONS_DIR = os.path.join(PROJECT_DIR, "supabase", "functions")
 IMPORT_MAP = "supabase/functions/deno.json"
+CONFIG_TOML = os.path.join(PROJECT_DIR, "supabase", "config.toml")
 
 BARE_SPECIFIER_PATTERN = re.compile(r'import .+ from "[a-zA-Z]')
+
+
+def no_jwt_functions() -> set:
+    """Parse config.toml and return slugs that have verify_jwt = false."""
+    slugs = set()
+    current = None
+    try:
+        with open(CONFIG_TOML) as f:
+            for line in f:
+                m = re.match(r'^\[functions\.([^\]]+)\]', line.strip())
+                if m:
+                    current = m.group(1)
+                elif current and re.match(r'^verify_jwt\s*=\s*false', line.strip()):
+                    slugs.add(current)
+    except FileNotFoundError:
+        pass
+    return slugs
+
+
+NO_JWT = no_jwt_functions()
 
 
 def needs_import_map(slug: str) -> bool:
@@ -53,6 +74,8 @@ def deploy(slug: str) -> bool:
     ]
     if needs_import_map(slug):
         cmd += ["--import-map", IMPORT_MAP]
+    if slug in NO_JWT:
+        cmd += ["--no-verify-jwt"]
 
     master, slave = pty.openpty()
     proc = subprocess.Popen(

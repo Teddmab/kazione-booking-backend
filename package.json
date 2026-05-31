@@ -11,7 +11,7 @@
     "db:push": "npx supabase db push",
     "db:reset": "npx supabase db reset",
     "lint": "deno lint supabase/functions",
-    "test:backend": "deno test supabase/functions/ --allow-env --allow-net --allow-read"
+    "test:backend": "deno test supabase/functions/ --allow-env --allow-net --allow-read --config supabase/functions/deno.json"
   },
   "devDependencies": {
     "typescript": "^5.4.5"

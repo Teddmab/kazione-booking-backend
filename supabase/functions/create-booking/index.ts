@@ -427,29 +427,46 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
     const endsDate = new Date(startsDate.getTime() + durationMinutes * 60_000);
     const endsAt = endsDate.toISOString();
 
-    // STEP 6: INSERT appointment
-    const { data: appointment, error: apptErr } = await supabaseAdmin
-      .from("appointments")
-      .insert({
-        business_id,
-        client_id: clientId,
-        staff_profile_id: selectedStaffId,
-        service_id,
-        status: "pending",
-        starts_at: startsAt,
-        ends_at: endsAt,
-        duration_minutes: durationMinutes,
-        price: totalAmount,
-        deposit_amount: depositAmount,
-        booking_source: "online",
-        booking_reference: bookingReference,
-        notes: client.notes ?? null,
-      })
-      .select("id")
-      .single();
+    // STEP 6: Atomically insert appointment with advisory lock.
+    // create_booking_atomic acquires pg_advisory_xact_lock on
+    // (business_id, staff_id, slot) before re-checking availability and
+    // inserting — preventing double-booking under concurrent requests.
+    const { data: atomicId, error: apptErr } = await supabaseAdmin.rpc(
+      "create_booking_atomic",
+      {
+        p_business_id: business_id,
+        p_service_id: service_id,
+        p_staff_id: selectedStaffId,
+        p_starts_at: startsAt,
+        p_ends_at: endsAt,
+        p_client_id: clientId,
+        p_booking_reference: bookingReference,
+        p_price: totalAmount,
+        p_deposit_amount: depositAmount,
+        p_booking_source: "online",
+        p_is_walk_in: false,
+        p_notes: client.notes ?? null,
+        p_payment_method: payment_method,
+        p_payment_status: "pending",
+      },
+    );
 
-    if (apptErr) throw apptErr;
-    const appointmentId = appointment.id;
+    if (apptErr) {
+      // The advisory lock in create_booking_atomic raises P0001 (PostgreSQL
+      // user-raised exception) when the slot is taken. Match all error fields
+      // because the exact format varies between Supabase client / PostgREST
+      // versions (message, code, details, hint may all carry the text).
+      const errStr = JSON.stringify(apptErr).toUpperCase();
+      const isSlotTaken =
+        apptErr.code === "P0001" ||
+        errStr.includes("SLOT_TAKEN");
+      if (isSlotTaken) {
+        return conflict("SLOT_TAKEN", "This time slot was just booked by another client");
+      }
+      console.error("create_booking_atomic unexpected error:", JSON.stringify(apptErr));
+      throw apptErr;
+    }
+    const appointmentId = atomicId as string;
     const cancelToken = await issueCancelToken(appointmentId, bookingReference);
 
     // STEP 7: INSERT appointment_services

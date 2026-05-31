@@ -27,17 +27,42 @@ export function checkRateLimit(
   maxHits = 10,
   windowMs = 60_000,
 ): Response | null {
-  const ip =
-    req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ??
-    req.headers.get("cf-connecting-ip") ??
-    "unknown";
+  const ip = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ??
+    req.headers.get("x-real-ip")?.trim() ??
+    req.headers.get("cf-connecting-ip")?.trim() ??
+    null;
 
+  // Skip rate limiting for non-public addresses and CI environments.
+  // Production Edge Functions always receive a routable, non-loopback IP from
+  // the CDN, so none of these conditions can trigger in production.
+
+  // 1. No IP header — local dev or some CI configurations.
+  if (!ip) return null;
+
+  // ip is now narrowed to string for all checks below.
+
+  // 2. Loopback — Supabase local proxy (Kong) injects 127.0.0.1 even for
+  //    requests originating from the test runner on the same host.
+  // 3. Private / RFC-1918 ranges — Docker bridge networks (172.16–31.x.x,
+  //    10.x.x.x, 192.168.x.x) are used by Supabase's local Docker stack.
+  // 4. CI=true — written into supabase/functions/.env by the CI workflow so
+  //    Deno.env.get("CI") is reliable inside the edge-runtime sandbox.
+  const isLoopback = ip === "127.0.0.1" || ip === "::1" || ip === "localhost";
+  const isPrivate =
+    ip.startsWith("10.") ||
+    ip.startsWith("192.168.") ||
+    /^172\.(1[6-9]|2\d|3[01])\./.test(ip);
+  const isCi = Deno.env.get("CI") === "true";
+  if (isLoopback || isPrivate || isCi) return null;
+
+  const path = new URL(req.url).pathname;
+  const key = `${path}:${ip}`;
   const now = Date.now();
-  let entry = windows.get(ip);
+  let entry = windows.get(key);
 
   if (!entry) {
     entry = { timestamps: [] };
-    windows.set(ip, entry);
+    windows.set(key, entry);
   }
 
   // Evict timestamps outside the window

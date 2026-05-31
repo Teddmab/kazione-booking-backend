@@ -63,7 +63,7 @@ Deno.serve(withLogging("storefront-upload", async (req: Request) => {
 
     const { data, error } = await supabaseAdmin.storage
       .from("business-assets")
-      .createSignedUploadUrl(storagePath);
+      .createSignedUploadUrl(storagePath, { upsert: true });
 
     if (error) return serverError(error.message);
 

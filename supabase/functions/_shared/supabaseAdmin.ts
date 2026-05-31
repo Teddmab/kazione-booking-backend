@@ -1,4 +1,4 @@
-import { createClient } from "@supabase/supabase-js";
+import { createClient } from "npm:@supabase/supabase-js@2";
 
 // Admin client — bypasses RLS. Use only in server-side Edge Functions.
 export const supabaseAdmin = createClient(

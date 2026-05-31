@@ -32,15 +32,24 @@ export function checkRateLimit(
     req.headers.get("cf-connecting-ip")?.trim() ??
     null;
 
-  // Skip rate limiting for:
-  // 1. No IP header (local dev, some CI setups)
-  // 2. Loopback / Docker-bridge IPs — Supabase local proxy injects 127.0.0.1
-  //    or the Docker host address, which would exhaust a 10-hit window in the
-  //    test suite and return 429 before legitimate test assertions can run.
-  // 3. GitHub Actions CI (always sets CI=true) as a belt-and-suspenders guard.
+  // Skip rate limiting for non-public addresses and CI environments.
+  // Production Edge Functions always receive a routable, non-loopback IP from
+  // the CDN, so none of these conditions can trigger in production.
+  //
+  // 1. No IP header — local dev or some CI configurations.
+  // 2. Loopback — Supabase local proxy (Kong) injects 127.0.0.1 even for
+  //    requests originating from the test runner on the same host.
+  // 3. Private / RFC-1918 ranges — Docker bridge networks (172.16–31.x.x,
+  //    10.x.x.x, 192.168.x.x) are used by Supabase's local Docker stack.
+  // 4. CI=true — written into supabase/functions/.env by the CI workflow so
+  //    Deno.env.get("CI") is reliable inside the edge-runtime sandbox.
   const isLoopback = ip === "127.0.0.1" || ip === "::1" || ip === "localhost";
+  const isPrivate =
+    ip.startsWith("10.") ||
+    ip.startsWith("192.168.") ||
+    /^172\.(1[6-9]|2\d|3[01])\./.test(ip);
   const isCi = Deno.env.get("CI") === "true";
-  if (!ip || isLoopback || isCi) return null;
+  if (!ip || isLoopback || isPrivate || isCi) return null;
 
   const path = new URL(req.url).pathname;
   const key = `${path}:${ip}`;

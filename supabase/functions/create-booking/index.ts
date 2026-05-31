@@ -5,10 +5,7 @@ import { verifyAuth } from "../_shared/auth.ts";
 import { createPaymentIntent } from "../_shared/stripe.ts";
 import { withLogging } from "../_shared/logger.ts";
 import { checkRateLimit } from "../_shared/rateLimit.ts";
-import {
-  sendEmail,
-  bookingConfirmationEmail,
-} from "../_shared/resend.ts";
+import { bookingConfirmationEmail, sendEmail } from "../_shared/resend.ts";
 import { issueCancelToken } from "../_shared/bookingCancelToken.ts";
 
 // ---------------------------------------------------------------------------
@@ -130,7 +127,7 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
 
       const publishableKey =
         Deno.env.get("VITE_STRIPE_PUBLISHABLE_KEY")?.trim() ??
-        Deno.env.get("STRIPE_PUBLISHABLE_KEY")?.trim();
+          Deno.env.get("STRIPE_PUBLISHABLE_KEY")?.trim();
 
       // If both keys are present in this runtime, compare hints and fail fast
       // with a friendly message before the client reaches the pay step.
@@ -232,7 +229,9 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
     // ── Fetch service info ────────────────────────────────────────────────
     const { data: service, error: svcErr } = await supabaseAdmin
       .from("services")
-      .select("id, name, duration_minutes, price, currency_code, deposit_amount")
+      .select(
+        "id, name, duration_minutes, price, currency_code, deposit_amount",
+      )
       .eq("id", service_id)
       .eq("business_id", business_id)
       .single();
@@ -258,7 +257,8 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
     if (businessResult.error) throw businessResult.error;
     const settings = settingsResult.data;
     const business = businessResult.data;
-    const currencyCode = service.currency_code ?? business.currency_code ?? "EUR";
+    const currencyCode = service.currency_code ?? business.currency_code ??
+      "EUR";
 
     // ── STEP 4: Calculate pricing ─────────────────────────────────────────
     const basePrice = +(selectedSlot.custom_price ?? service.price);
@@ -279,8 +279,8 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
       // Find best applicable promotion
       for (const promo of promos) {
         const appliesTo = promo.applies_to as string[] | null;
-        const applies =
-          !appliesTo || appliesTo.length === 0 || appliesTo.includes(service_id);
+        const applies = !appliesTo || appliesTo.length === 0 ||
+          appliesTo.includes(service_id);
         if (!applies) continue;
 
         let disc = 0;
@@ -303,13 +303,14 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
 
     // Deposit
     const depositPct = +(settings?.deposit_percentage ?? 0);
-    const serviceDeposit = service.deposit_amount != null ? +service.deposit_amount : null;
+    const serviceDeposit = service.deposit_amount != null
+      ? +service.deposit_amount
+      : null;
     let depositAmount = 0;
     if (payment_method === "deposit") {
-      depositAmount =
-        serviceDeposit != null
-          ? serviceDeposit
-          : +(totalAmount * (depositPct / 100)).toFixed(2);
+      depositAmount = serviceDeposit != null
+        ? serviceDeposit
+        : +(totalAmount * (depositPct / 100)).toFixed(2);
     } else if (payment_method === "full") {
       depositAmount = totalAmount;
     }
@@ -362,7 +363,9 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
             .from("clients")
             .update({
               user_id: userId,
-              ...(gdpr_consent ? { gdpr_consent: true, gdpr_consent_at: gdprConsentAt } : {}),
+              ...(gdpr_consent
+                ? { gdpr_consent: true, gdpr_consent_at: gdprConsentAt }
+                : {}),
             })
             .eq("id", byEmail.id);
           clientId = byEmail.id;
@@ -485,13 +488,18 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
       // because the exact format varies between Supabase client / PostgREST
       // versions (message, code, details, hint may all carry the text).
       const errStr = JSON.stringify(apptErr).toUpperCase();
-      const isSlotTaken =
-        apptErr.code === "P0001" ||
+      const isSlotTaken = apptErr.code === "P0001" ||
         errStr.includes("SLOT_TAKEN");
       if (isSlotTaken) {
-        return conflict("SLOT_TAKEN", "This time slot was just booked by another client");
+        return conflict(
+          "SLOT_TAKEN",
+          "This time slot was just booked by another client",
+        );
       }
-      console.error("create_booking_atomic unexpected error:", JSON.stringify(apptErr));
+      console.error(
+        "create_booking_atomic unexpected error:",
+        JSON.stringify(apptErr),
+      );
       throw apptErr;
     }
     const appointmentId = atomicId as string;
@@ -517,7 +525,9 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
     }
 
     // STEP 8: INSERT payment
-    const paymentAmount = payment_method === "later" ? totalAmount : chargeAmount;
+    const paymentAmount = payment_method === "later"
+      ? totalAmount
+      : chargeAmount;
     const { data: payment, error: payErr } = await supabaseAdmin
       .from("payments")
       .insert({
@@ -586,8 +596,12 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
           date,
           time,
           reference: bookingReference,
-          price: `${currencyCode === "EUR" ? "€" : currencyCode} ${totalAmount.toFixed(2)}`,
-          manageUrl: `${appUrl}/booking/${bookingReference}?token=${encodeURIComponent(cancelToken)}`,
+          price: `${currencyCode === "EUR" ? "€" : currencyCode} ${
+            totalAmount.toFixed(2)
+          }`,
+          manageUrl: `${appUrl}/booking/${bookingReference}?token=${
+            encodeURIComponent(cancelToken)
+          }`,
         },
         locale,
       );

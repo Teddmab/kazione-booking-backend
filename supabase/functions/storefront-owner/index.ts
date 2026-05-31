@@ -111,13 +111,38 @@ Deno.serve(withLogging("storefront-owner", async (req: Request) => {
       const { data: existingStorefront, error: existingStorefrontErr } =
         await supabaseAdmin
           .from("storefronts")
-          .select("id")
+          .select("id, sections")
           .eq("business_id", ctx.businessId)
           .maybeSingle();
 
       if (existingStorefrontErr) return serverError(existingStorefrontErr.message);
 
-      if (!existingStorefront) {
+      // Merge sections JSONB instead of replacing it, so a partial update
+      // (e.g. { sections: { reviews: true } }) preserves all other section keys.
+      if (
+        updates.sections !== undefined &&
+        typeof updates.sections === "object" && updates.sections !== null
+      ) {
+        const baseSections =
+          (existingStorefront?.sections as Record<string, boolean>) ?? {};
+        updates.sections = {
+          ...baseSections,
+          ...(updates.sections as Record<string, boolean>),
+        };
+      }
+
+      let data, error;
+
+      if (existingStorefront) {
+        // Row exists — plain UPDATE, no slug/title required.
+        ({ data, error } = await supabaseAdmin
+          .from("storefronts")
+          .update({ ...updates, updated_at: new Date().toISOString() })
+          .eq("business_id", ctx.businessId)
+          .select("*")
+          .single());
+      } else {
+        // Row missing — INSERT needs slug + title defaults from the business.
         const { data: business, error: bizErr } = await supabaseAdmin
           .from("businesses")
           .select("name, slug")
@@ -128,42 +153,18 @@ Deno.serve(withLogging("storefront-owner", async (req: Request) => {
           return serverError("Failed to load business defaults");
         }
 
-        if (updates.slug === undefined) updates.slug = business.slug;
+        if (updates.slug === undefined) {
+          updates.slug = business.slug ??
+            business.name.toLowerCase().replace(/\s+/g, "-");
+        }
         if (updates.title === undefined) updates.title = business.name;
-      }
 
-      // Merge sections JSONB instead of replacing it, so a partial update
-      // (e.g. { sections: { reviews: true } }) preserves all other section keys.
-      if (
-        updates.sections !== undefined &&
-        typeof updates.sections === "object" && updates.sections !== null
-      ) {
-        const { data: existing } = await supabaseAdmin
+        ({ data, error } = await supabaseAdmin
           .from("storefronts")
-          .select("sections")
-          .eq("business_id", ctx.businessId)
-          .maybeSingle();
-
-        const baseSections = (existing?.sections as Record<string, boolean>) ??
-          {};
-        updates.sections = {
-          ...baseSections,
-          ...(updates.sections as Record<string, boolean>),
-        };
+          .insert({ business_id: ctx.businessId, ...updates, updated_at: new Date().toISOString() })
+          .select("*")
+          .single());
       }
-
-      const { data, error } = await supabaseAdmin
-        .from("storefronts")
-        .upsert(
-          {
-            business_id: ctx.businessId,
-            ...updates,
-            updated_at: new Date().toISOString(),
-          },
-          { onConflict: "business_id" },
-        )
-        .select("*")
-        .single();
 
       if (error) return serverError(error.message);
       return json(data);

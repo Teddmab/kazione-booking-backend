@@ -443,8 +443,13 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
     if (refErr) throw refErr;
     const bookingReference = refData as string;
 
-    // Build timestamps
-    const startsAt = `${date}T${time}:00`;
+    // Build timestamps.
+    // Append "Z" so the literal is parsed as UTC everywhere — slot times from
+    // get_available_slots are already in UTC (the edge-runtime is UTC-only) and
+    // the frontend sends the date in local components to avoid the toISOString()
+    // UTC-shift bug. Storing as explicit UTC prevents any ambiguity in
+    // new Date() across runtimes.
+    const startsAt = `${date}T${time}:00Z`;
     const durationMinutes = service.duration_minutes;
     const startsDate = new Date(startsAt);
     const endsDate = new Date(startsDate.getTime() + durationMinutes * 60_000);

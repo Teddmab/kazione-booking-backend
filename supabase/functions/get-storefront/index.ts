@@ -189,6 +189,7 @@ Deno.serve(withLogging("get-storefront", async (req: Request) => {
     // 5. Parallel fetches
     const [
       businessResult,
+      settingsResult,
       servicesResult,
       staffResult,
       promotionsResult,
@@ -202,6 +203,13 @@ Deno.serve(withLogging("get-storefront", async (req: Request) => {
         .select("name, currency_code")
         .eq("id", businessId)
         .single(),
+
+      // Business settings (tax + deposit) — exposed so the booking form shows the real total
+      supabaseAdmin
+        .from("business_settings")
+        .select("tax_enabled, tax_rate, deposit_percentage")
+        .eq("business_id", businessId)
+        .maybeSingle(),
 
       // Services (active + public) with translations for locale
       supabaseAdmin
@@ -263,6 +271,7 @@ Deno.serve(withLogging("get-storefront", async (req: Request) => {
 
     if (businessResult.error) throw businessResult.error;
     if (servicesResult.error) throw servicesResult.error;
+    const settings = settingsResult.data ?? null;
     if (staffResult.error) throw staffResult.error;
     if (promotionsResult.error) throw promotionsResult.error;
     if (reviewsResult.error) throw reviewsResult.error;
@@ -450,6 +459,9 @@ Deno.serve(withLogging("get-storefront", async (req: Request) => {
       // Aggregates
       rating,
       reviewCount,
+      taxEnabled: settings?.tax_enabled ?? false,
+      taxRate: +(settings?.tax_rate ?? 0),
+      depositPercent: +(settings?.deposit_percentage ?? 25),
 
       // Nested
       contact: {

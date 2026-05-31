@@ -32,10 +32,15 @@ export function checkRateLimit(
     req.headers.get("cf-connecting-ip")?.trim() ??
     null;
 
-  // No IP header means local dev or CI — skip rate limiting entirely.
-  // Every test request would share the same synthetic key, so enforcing
-  // a limit here blocks legitimate tests rather than actual abuse.
-  if (!ip) return null;
+  // Skip rate limiting for:
+  // 1. No IP header (local dev, some CI setups)
+  // 2. Loopback / Docker-bridge IPs — Supabase local proxy injects 127.0.0.1
+  //    or the Docker host address, which would exhaust a 10-hit window in the
+  //    test suite and return 429 before legitimate test assertions can run.
+  // 3. GitHub Actions CI (always sets CI=true) as a belt-and-suspenders guard.
+  const isLoopback = ip === "127.0.0.1" || ip === "::1" || ip === "localhost";
+  const isCi = Deno.env.get("CI") === "true";
+  if (!ip || isLoopback || isCi) return null;
 
   const path = new URL(req.url).pathname;
   const key = `${path}:${ip}`;

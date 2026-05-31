@@ -27,23 +27,27 @@ export function checkRateLimit(
   maxHits = 10,
   windowMs = 60_000,
 ): Response | null {
-  const ip =
-    req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ??
-    req.headers.get("cf-connecting-ip") ??
-    "unknown";
+  const ip = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ??
+    req.headers.get("x-real-ip")?.trim() ??
+    req.headers.get("cf-connecting-ip")?.trim() ??
+    null;
 
+  const isUnknownIp = !ip;
+  const key = ip ?? "unknown";
   const now = Date.now();
-  let entry = windows.get(ip);
+  let entry = windows.get(key);
 
   if (!entry) {
     entry = { timestamps: [] };
-    windows.set(ip, entry);
+    windows.set(key, entry);
   }
 
   // Evict timestamps outside the window
   entry.timestamps = entry.timestamps.filter((t) => now - t < windowMs);
 
-  if (entry.timestamps.length >= maxHits) {
+  const effectiveMaxHits = isUnknownIp ? Math.max(maxHits, 100) : maxHits;
+
+  if (entry.timestamps.length >= effectiveMaxHits) {
     const retryAfter = Math.ceil(
       (entry.timestamps[0] + windowMs - now) / 1000,
     );

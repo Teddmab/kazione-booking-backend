@@ -55,10 +55,14 @@ jobs:
 
       - name: Write dev-only edge function secrets
         run: |
-          # These values are already public in test files as hardcoded fallbacks.
-          # They exist only for local dev / CI — never used in production.
+          # These values are public in test files and CI — never used in production.
+          # Written to both locations: supabase/.env (Docker Compose env) and
+          # supabase/functions/.env (edge-runtime per-function env via supabase start).
           echo "INTERNAL_FUNCTION_KEY=725b2c7d67955c0eb77589714c9b80879ebf6b157b2d880fa568c0fdeea56fe0" >> supabase/.env
           echo "CRON_SECRET=270d13cee3e549b6a57996077c1185a137f5b4f2b955dc9c504d9ec017186944" >> supabase/.env
+          mkdir -p supabase/functions
+          echo "INTERNAL_FUNCTION_KEY=725b2c7d67955c0eb77589714c9b80879ebf6b157b2d880fa568c0fdeea56fe0" >> supabase/functions/.env
+          echo "CRON_SECRET=270d13cee3e549b6a57996077c1185a137f5b4f2b955dc9c504d9ec017186944" >> supabase/functions/.env
 
       - name: Start local Supabase stack
         run: supabase start

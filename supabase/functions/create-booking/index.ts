@@ -452,7 +452,13 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
     );
 
     if (apptErr) {
-      if (apptErr.message?.includes("SLOT_TAKEN")) {
+      // P0001 = PostgreSQL user-raised exception (RAISE EXCEPTION).
+      // create_booking_atomic only raises P0001 for SLOT_TAKEN, so this
+      // is safe. Also match message string for belt-and-suspenders.
+      const isSlotTaken =
+        apptErr.code === "P0001" ||
+        apptErr.message?.includes("SLOT_TAKEN");
+      if (isSlotTaken) {
         return conflict("SLOT_TAKEN", "This time slot was just booked by another client");
       }
       throw apptErr;

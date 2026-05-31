@@ -124,11 +124,14 @@ Deno.test("create-booking: concurrent double booking (advisory lock)", async () 
     callFn({ ...base, client: { name: "Concurrent B", email: `concurrent_b_${Date.now()}@example.com`, phone: "555-0002" } }),
   ]);
 
-  const statuses = [res1.status, res2.status].sort();
   const body1 = await res1.json();
   const body2 = await res2.json();
+  const statuses = [res1.status, res2.status].sort();
 
   // Exactly one 201 and one 409
+  if (statuses[0] !== 201 || statuses[1] !== 409) {
+    console.error("Concurrent test unexpected statuses:", statuses, "bodies:", JSON.stringify(body1), JSON.stringify(body2));
+  }
   assertEquals(statuses[0], 201, `Expected one 201, got statuses ${JSON.stringify(statuses)}`);
   assertEquals(statuses[1], 409, `Expected one 409, got statuses ${JSON.stringify(statuses)}`);
 

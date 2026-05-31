@@ -41,16 +41,16 @@ export async function sendEmail(
 // ---------------------------------------------------------------------------
 
 const B = {
-  bg: "#F5F3EF",         // warm off-white — email outer background
+  bg: "#FDF3F0",         // warm off-white — email outer background
   card: "#FFFFFF",
-  border: "#EDE9E4",
-  rowBg: "#FAF9F7",
-  orange: "#C9873E",     // primary
-  orangeDark: "#B5762D",
-  textDark: "#1C1916",
-  textMid: "#6B6560",
-  textDim: "#9CA3AF",
-  textLight: "#C4C0BB",
+  border: "#F0DDD8",
+  rowBg: "#FDF3F0",
+  orange: "#E84E26",     // brand primary (#E84E26 from BRAND_ANALYSIS.md)
+  orangeDark: "#C43D1A",
+  textDark: "#1A0F0A",
+  textMid: "#6B4C42",
+  textDim: "#9B7B72",
+  textLight: "#C4B5B0",
 };
 
 // ---------------------------------------------------------------------------
@@ -75,7 +75,7 @@ function renderEmail({ salonLogoUrl, salonName, subject, body }: LayoutOptions):
     ? `<img src="${salonLogoUrl}" alt="${salonName}" width="auto" height="56"
          style="max-height:56px;max-width:200px;object-fit:contain;display:block;margin:0 auto;" />`
     : `<div style="display:inline-block;padding:8px 20px;background:${B.rowBg};border-radius:8px;border:1px solid ${B.border};">
-         <span style="font-family:'Inter',Helvetica,Arial,sans-serif;font-size:18px;font-weight:700;color:${B.textDark};letter-spacing:-0.3px;">${salonName}</span>
+         <span style="font-family:'Plus Jakarta Sans',Helvetica,Arial,sans-serif;font-size:18px;font-weight:700;color:${B.textDark};letter-spacing:-0.3px;">${salonName}</span>
        </div>`;
 
   return `<!DOCTYPE html>
@@ -85,7 +85,7 @@ function renderEmail({ salonLogoUrl, salonName, subject, body }: LayoutOptions):
   <meta name="viewport" content="width=device-width,initial-scale=1.0" />
   <meta http-equiv="X-UA-Compatible" content="IE=edge" />
   <title>${subject}</title>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
   <!--[if mso]>
   <noscript><xml><o:OfficeDocumentSettings><o:PixelsPerInch>96</o:PixelsPerInch></o:OfficeDocumentSettings></xml></noscript>
   <![endif]-->
@@ -143,20 +143,22 @@ function renderEmail({ salonLogoUrl, salonName, subject, body }: LayoutOptions):
             <!-- KaziOne mark -->
             <table align="center" border="0" cellpadding="0" cellspacing="0" role="presentation">
               <tr>
-                <td width="20" height="20" align="center" valign="middle"
-                  style="width:20px;height:20px;background-color:${B.orange};border-radius:5px;">
-                  <span style="font-family:Arial,sans-serif;font-size:11px;font-weight:700;color:#ffffff;line-height:20px;">K</span>
+                <td width="24" height="24" align="center" valign="middle"
+                  style="width:24px;height:24px;">
+                  <img src="https://kazione.app/logo.png" alt="KaziOne"
+                    width="24" height="24"
+                    style="display:block;width:24px;height:24px;" />
                 </td>
-                <td width="6" style="width:6px;">&nbsp;</td>
+                <td width="7" style="width:7px;">&nbsp;</td>
                 <td valign="middle">
-                  <span style="font-family:'Inter',Helvetica,Arial,sans-serif;font-size:12px;color:${B.textDim};font-weight:500;">
+                  <span style="font-family:'Plus Jakarta Sans',Helvetica,Arial,sans-serif;font-size:12px;color:${B.textDim};font-weight:600;letter-spacing:-0.1px;">
                     KaziOne Booking
                   </span>
                 </td>
               </tr>
             </table>
 
-            <p style="margin:10px 0 0;font-family:'Inter',Helvetica,Arial,sans-serif;font-size:11px;color:${B.textLight};line-height:1.5;">
+            <p style="margin:10px 0 0;font-family:'Plus Jakarta Sans',Helvetica,Arial,sans-serif;font-size:11px;color:${B.textLight};line-height:1.5;">
               &copy; ${year} KaziOne Booking. All rights reserved.
             </p>
           </td>
@@ -178,20 +180,20 @@ function renderEmail({ salonLogoUrl, salonName, subject, body }: LayoutOptions):
 // ---------------------------------------------------------------------------
 
 function heading(text: string): string {
-  return `<h1 style="margin:0 0 8px;font-family:'Inter',Helvetica,Arial,sans-serif;font-size:22px;font-weight:700;color:${B.textDark};letter-spacing:-0.4px;line-height:1.3;">${text}</h1>`;
+  return `<h1 style="margin:0 0 8px;font-family:'Plus Jakarta Sans',Helvetica,Arial,sans-serif;font-size:22px;font-weight:700;color:${B.textDark};letter-spacing:-0.4px;line-height:1.3;">${text}</h1>`;
 }
 
 function paragraph(text: string, style = ""): string {
-  return `<p style="margin:0 0 16px;font-family:'Inter',Helvetica,Arial,sans-serif;font-size:15px;color:${B.textMid};line-height:1.65;${style}">${text}</p>`;
+  return `<p style="margin:0 0 16px;font-family:'Plus Jakarta Sans',Helvetica,Arial,sans-serif;font-size:15px;color:${B.textMid};line-height:1.65;${style}">${text}</p>`;
 }
 
 function detailTable(rows: [string, string][]): string {
   const rowsHtml = rows.map(([label, value]) => `
     <tr class="detail-row">
-      <td style="padding:9px 16px 9px 0;font-family:'Inter',Helvetica,Arial,sans-serif;font-size:12px;color:${B.textDim};font-weight:500;white-space:nowrap;vertical-align:top;text-transform:uppercase;letter-spacing:0.5px;">
+      <td style="padding:9px 16px 9px 0;font-family:'Plus Jakarta Sans',Helvetica,Arial,sans-serif;font-size:12px;color:${B.textDim};font-weight:500;white-space:nowrap;vertical-align:top;text-transform:uppercase;letter-spacing:0.5px;">
         ${label}
       </td>
-      <td style="padding:9px 0;font-family:'Inter',Helvetica,Arial,sans-serif;font-size:14px;color:${B.textDark};font-weight:500;vertical-align:top;">
+      <td style="padding:9px 0;font-family:'Plus Jakarta Sans',Helvetica,Arial,sans-serif;font-size:14px;color:${B.textDark};font-weight:500;vertical-align:top;">
         ${value}
       </td>
     </tr>`).join("");
@@ -215,7 +217,7 @@ function ctaButton(label: string, url: string): string {
       <tr>
         <td align="center" style="border-radius:8px;background-color:${B.orange};">
           <a href="${url}" target="_blank"
-            style="display:inline-block;padding:13px 28px;font-family:'Inter',Helvetica,Arial,sans-serif;font-size:15px;font-weight:600;color:#ffffff;text-decoration:none;border-radius:8px;letter-spacing:-0.1px;mso-padding-alt:0;">
+            style="display:inline-block;padding:13px 28px;font-family:'Plus Jakarta Sans',Helvetica,Arial,sans-serif;font-size:15px;font-weight:600;color:#ffffff;text-decoration:none;border-radius:8px;letter-spacing:-0.1px;mso-padding-alt:0;">
             ${label}
           </a>
         </td>
@@ -224,7 +226,7 @@ function ctaButton(label: string, url: string): string {
 }
 
 function referenceChip(ref: string): string {
-  return `<span style="display:inline-block;padding:3px 10px;background-color:${B.rowBg};border:1px solid ${B.border};border-radius:5px;font-family:'Inter',Helvetica,Arial,sans-serif;font-size:12px;color:${B.textMid};font-weight:600;letter-spacing:0.5px;">${ref}</span>`;
+  return `<span style="display:inline-block;padding:3px 10px;background-color:${B.rowBg};border:1px solid ${B.border};border-radius:5px;font-family:'Plus Jakarta Sans',Helvetica,Arial,sans-serif;font-size:12px;color:${B.textMid};font-weight:600;letter-spacing:0.5px;">${ref}</span>`;
 }
 
 // ---------------------------------------------------------------------------

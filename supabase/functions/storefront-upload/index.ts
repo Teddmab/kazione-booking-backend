@@ -36,13 +36,17 @@ Deno.serve(withLogging("storefront-upload", async (req: Request) => {
 
   try {
     const body = await req.json() as Record<string, unknown>;
-    const businessId = body.business_id as string;
+    const businessId = body.business_id as string | undefined;
     const assetType = body.asset_type as string;
 
+    if (!businessId) return badRequest("business_id is required");
     if (!assetType || !["logo", "cover", "gallery"].includes(assetType)) {
       return badRequest("asset_type must be logo, cover, or gallery");
     }
 
+    // Auth: verify JWT and confirm caller owns/manages this business.
+    // ctx.businessId is the DB-verified value — use it for storage paths,
+    // never the raw body value.
     const ctx = await requireOwnerOrManagerCtx(req, businessId);
     if (ctx instanceof Response) return ctx;
 

@@ -86,8 +86,7 @@ Deno.test("create-booking: valid guest booking", async () => {
   if (!body.appointment_id || !body.booking_reference) throw new Error("Missing appointment_id or booking_reference");
 });
 
-Deno.test("create-booking: double booking same slot", async () => {
-  // Find a slot different from the one used in the previous test
+Deno.test("create-booking: double booking same slot (sequential)", async () => {
   const slotData = await findAvailableSlot();
   if (!slotData) {
     console.warn("No available slots for double-booking test — reset DB with: supabase db reset");
@@ -96,10 +95,46 @@ Deno.test("create-booking: double booking same slot", async () => {
   const slot = { business_id: BUSINESS_ID, service_id: SERVICE_ID, staff_profile_id: slotData.staffId, date: slotData.date, time: slotData.time, client: { name: "Test Guest", email: `guest${Date.now()}@example.com`, phone: "555-0000" }, payment_method: "later" };
   const res1 = await callFn(slot);
   await res1.body?.cancel()
-  // Try to book the same slot again (different client email, same time/staff)
   const res2 = await callFn({ ...slot, client: { ...slot.client, email: `guest${Date.now()}b@example.com` } });
   assertEquals(res2.status, 409);
   await res2.body?.cancel()
+});
+
+Deno.test("create-booking: concurrent double booking (advisory lock)", async () => {
+  // This test proves the pg_advisory_xact_lock prevents double-booking under
+  // true concurrency. Both requests fire simultaneously via Promise.all.
+  // The advisory lock inside create_booking_atomic serialises them — exactly
+  // ONE must succeed (201) and the other must be rejected (409 SLOT_TAKEN).
+  const slotData = await findAvailableSlot();
+  if (!slotData) {
+    console.warn("No available slots for concurrent test — reset DB with: supabase db reset");
+    return;
+  }
+  const base = {
+    business_id: BUSINESS_ID,
+    service_id: SERVICE_ID,
+    staff_profile_id: slotData.staffId,
+    date: slotData.date,
+    time: slotData.time,
+    payment_method: "later",
+  };
+
+  const [res1, res2] = await Promise.all([
+    callFn({ ...base, client: { name: "Concurrent A", email: `concurrent_a_${Date.now()}@example.com`, phone: "555-0001" } }),
+    callFn({ ...base, client: { name: "Concurrent B", email: `concurrent_b_${Date.now()}@example.com`, phone: "555-0002" } }),
+  ]);
+
+  const statuses = [res1.status, res2.status].sort();
+  const body1 = await res1.json();
+  const body2 = await res2.json();
+
+  // Exactly one 201 and one 409
+  assertEquals(statuses[0], 201, `Expected one 201, got statuses ${JSON.stringify(statuses)}`);
+  assertEquals(statuses[1], 409, `Expected one 409, got statuses ${JSON.stringify(statuses)}`);
+
+  // Confirm exactly ONE appointment was created (not two)
+  const successBody = res1.status === 201 ? body1 : body2;
+  if (!successBody.appointment_id) throw new Error("Winner response missing appointment_id");
 });
 
 Deno.test("create-booking: starts_at in the past", async () => {

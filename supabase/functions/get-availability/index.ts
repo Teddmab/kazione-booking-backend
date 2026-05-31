@@ -269,17 +269,19 @@ Deno.serve(withLogging("get-availability", async (req: Request) => {
         );
       }
 
+      // reserved_slots = times that have a PENDING booking (someone is mid-booking but hasn't paid).
+      // Confirmed/paid slots are already absent from the available slots grid (staff is blocked).
+      // This lets the UI show "in demand" indicators on truly bookable times so clients
+      // know to pre-pay to secure the slot — the first to complete payment wins.
       reservedSlots = [...new Set((appointmentRows ?? [])
         .filter((row: { id: string; status: string }) => {
           const payment = paymentMap.get(row.id) ?? null;
-          const method = payment?.method ?? null;
           const payStatus = payment?.status ?? null;
-
-          if (method === "cash") {
-            return true;
-          }
-
-          return payStatus === "paid" || payStatus === "succeeded" || row.status === "confirmed";
+          return (
+            row.status === "pending" ||
+            row.status === "pending_payment" ||
+            payStatus === "pending"
+          );
         })
         .map((row: { starts_at: string }) => row.starts_at.slice(11, 16)))].sort((a, b) => a.localeCompare(b));
     } catch (reservedErr) {

@@ -40,15 +40,22 @@ Deno.test("get-availability: invalid date format", async () => {
 
 
 Deno.test("get-availability: working day", async () => {
-  // Compute a future Tuesday within the 60-day booking window
-  const d = new Date();
-  d.setUTCDate(d.getUTCDate() + 14);
-  while (d.getUTCDay() !== 2) d.setUTCDate(d.getUTCDate() + 1); // advance to next Tuesday
-  const workingDay = d.toISOString().slice(0, 10);
-  const res = await callFn({ business_id: BUSINESS_ID, service_id: SERVICE_ID, date: workingDay });
-  assertEquals(res.status, 200);
-  const body = await res.json();
-  if (!Array.isArray(body.slots) || body.slots.length === 0) throw new Error("Expected non-empty slots array");
+  // Try multiple Mon-Sat dates 7-30 days out. Accept as soon as one returns slots.
+  // Seed: staff work Mon-Sat (day_of_week 1-6), 10:00-19:00 UTC.
+  const base = new Date();
+  base.setUTCDate(base.getUTCDate() + 7);
+  for (let offset = 0; offset < 30; offset++) {
+    const d = new Date(base);
+    d.setUTCDate(base.getUTCDate() + offset);
+    const dow = d.getUTCDay(); // 0=Sun, 1-6=Mon-Sat
+    if (dow === 0) continue; // skip Sunday (non-working)
+    const dateStr = d.toISOString().slice(0, 10);
+    const res = await callFn({ business_id: BUSINESS_ID, service_id: SERVICE_ID, date: dateStr });
+    assertEquals(res.status, 200);
+    const body = await res.json();
+    if (Array.isArray(body.slots) && body.slots.length > 0) return; // success
+  }
+  throw new Error("No working-day slots found in any Mon-Sat date over the next 37 days");
 });
 
 Deno.test("get-availability: non-working day", async () => {

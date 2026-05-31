@@ -63,7 +63,7 @@ Deno.serve(withLogging("storefront-upload", async (req: Request) => {
 
     const { data, error } = await supabaseAdmin.storage
       .from("business-assets")
-      .createSignedUploadUrl(storagePath);
+      .createSignedUploadUrl(storagePath, { upsert: true });
 
     if (error) return serverError(error.message);
 
@@ -71,9 +71,22 @@ Deno.serve(withLogging("storefront-upload", async (req: Request) => {
       .from("business-assets")
       .getPublicUrl(storagePath);
 
+    // In local dev Supabase returns internal Docker hostnames (kong:8000).
+    // Detect this and rewrite to the externally reachable address so the
+    // browser can PUT the file directly. In production the URL is already
+    // public and the replace is a no-op.
+    const internalUrl = Deno.env.get("SUPABASE_URL") ?? "";
+    const isLocalDocker = internalUrl.includes("kong") ||
+      internalUrl.includes("supabase_");
+    const publicBase = isLocalDocker
+      ? "http://127.0.0.1:54321"
+      : internalUrl.replace(/\/$/, "");
+    const rewrite = (u: string) =>
+      u.replace(/^https?:\/\/[^/]+(?=\/storage\/)/, publicBase);
+
     return json({
-      upload_url: data.signedUrl,
-      public_url: urlData.publicUrl,
+      upload_url: rewrite(data.signedUrl),
+      public_url: rewrite(urlData.publicUrl),
       path: storagePath,
     });
   } catch (err) {

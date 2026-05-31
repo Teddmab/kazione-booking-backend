@@ -35,9 +35,10 @@ Deno.serve(withLogging("storefront-upload", async (req: Request) => {
   }
 
   try {
-    const body = await req.json() as Record<string, unknown>;
-    const businessId = body.business_id as string | undefined;
-    const assetType = body.asset_type as string;
+    // Parameters come as query-string params (no JSON body).
+    const url = new URL(req.url);
+    const businessId = url.searchParams.get("business_id") ?? undefined;
+    const assetType = url.searchParams.get("asset_type") ?? "";
 
     if (!businessId) return badRequest("business_id is required");
     if (!assetType || !["logo", "cover", "gallery"].includes(assetType)) {

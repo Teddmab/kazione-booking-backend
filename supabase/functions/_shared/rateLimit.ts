@@ -35,8 +35,12 @@ export function checkRateLimit(
   // Skip rate limiting for non-public addresses and CI environments.
   // Production Edge Functions always receive a routable, non-loopback IP from
   // the CDN, so none of these conditions can trigger in production.
-  //
+
   // 1. No IP header — local dev or some CI configurations.
+  if (!ip) return null;
+
+  // ip is now narrowed to string for all checks below.
+
   // 2. Loopback — Supabase local proxy (Kong) injects 127.0.0.1 even for
   //    requests originating from the test runner on the same host.
   // 3. Private / RFC-1918 ranges — Docker bridge networks (172.16–31.x.x,
@@ -49,7 +53,7 @@ export function checkRateLimit(
     ip.startsWith("192.168.") ||
     /^172\.(1[6-9]|2\d|3[01])\./.test(ip);
   const isCi = Deno.env.get("CI") === "true";
-  if (!ip || isLoopback || isPrivate || isCi) return null;
+  if (isLoopback || isPrivate || isCi) return null;
 
   const path = new URL(req.url).pathname;
   const key = `${path}:${ip}`;

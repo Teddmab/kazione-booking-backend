@@ -19,6 +19,8 @@ interface StorefrontService {
   currency: string;
   popular: boolean;
   imageUrl: string | null;
+  imageUrl2: string | null;
+  imageUrl3: string | null;
   displayOrder: number;
 }
 
@@ -117,6 +119,9 @@ interface StorefrontData {
   // Aggregates
   rating: number;
   reviewCount: number;
+  taxEnabled: boolean;
+  taxRate: number;
+  depositPercent: number;
 
   // Nested
   contact: StorefrontContact;
@@ -189,6 +194,7 @@ Deno.serve(withLogging("get-storefront", async (req: Request) => {
     // 5. Parallel fetches
     const [
       businessResult,
+      settingsResult,
       servicesResult,
       staffResult,
       promotionsResult,
@@ -203,12 +209,19 @@ Deno.serve(withLogging("get-storefront", async (req: Request) => {
         .eq("id", businessId)
         .single(),
 
+      // Business settings (tax + deposit) — exposed so the booking form shows the real total
+      supabaseAdmin
+        .from("business_settings")
+        .select("tax_enabled, tax_rate, deposit_percentage")
+        .eq("business_id", businessId)
+        .maybeSingle(),
+
       // Services (active + public) with translations for locale
       supabaseAdmin
         .from("services")
         .select(`
           id, name, description, duration_minutes, price, currency_code,
-          is_active, is_public, image_url, display_order,
+          is_active, is_public, image_url, image_url_2, image_url_3, display_order,
           category_id,
           service_categories ( name ),
           service_translations ( locale, field, value )
@@ -234,7 +247,10 @@ Deno.serve(withLogging("get-storefront", async (req: Request) => {
         .select("*")
         .eq("business_id", businessId)
         .eq("is_active", true)
-        .or("valid_until.is.null,valid_until.gte." + new Date().toISOString().slice(0, 10)),
+        .or(
+          "valid_until.is.null,valid_until.gte." +
+            new Date().toISOString().slice(0, 10),
+        ),
 
       // Reviews (public, newest 10) with client info
       supabaseAdmin
@@ -263,6 +279,7 @@ Deno.serve(withLogging("get-storefront", async (req: Request) => {
 
     if (businessResult.error) throw businessResult.error;
     if (servicesResult.error) throw servicesResult.error;
+    const settings = settingsResult.data ?? null;
     if (staffResult.error) throw staffResult.error;
     if (promotionsResult.error) throw promotionsResult.error;
     if (reviewsResult.error) throw reviewsResult.error;
@@ -283,12 +300,18 @@ Deno.serve(withLogging("get-storefront", async (req: Request) => {
       if (aggRows && aggRows.length > 0) {
         reviewCount = aggRows.length;
         rating = +(
-          aggRows.reduce((sum: number, r: { rating: number }) => sum + r.rating, 0) /
+          aggRows.reduce(
+            (sum: number, r: { rating: number }) => sum + r.rating,
+            0,
+          ) /
           reviewCount
         ).toFixed(1);
       }
     } else {
-      const agg = reviewAggResult.data as { avg_rating?: number; review_count?: number };
+      const agg = reviewAggResult.data as {
+        avg_rating?: number;
+        review_count?: number;
+      };
       rating = +(agg.avg_rating ?? 0);
       reviewCount = +(agg.review_count ?? 0);
     }
@@ -327,6 +350,8 @@ Deno.serve(withLogging("get-storefront", async (req: Request) => {
           currency: (svc.currency_code as string) ?? business.currency_code,
           popular: (svc.display_order as number) === 0,
           imageUrl: (svc.image_url as string) ?? null,
+          imageUrl2: (svc.image_url_2 as string) ?? null,
+          imageUrl3: (svc.image_url_3 as string) ?? null,
           displayOrder: svc.display_order as number,
         };
       },
@@ -450,6 +475,9 @@ Deno.serve(withLogging("get-storefront", async (req: Request) => {
       // Aggregates
       rating,
       reviewCount,
+      taxEnabled: settings?.tax_enabled ?? false,
+      taxRate: +(settings?.tax_rate ?? 0),
+      depositPercent: +(settings?.deposit_percentage ?? 25),
 
       // Nested
       contact: {

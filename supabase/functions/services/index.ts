@@ -92,6 +92,8 @@ Deno.serve(withLogging("services", async (req: Request) => {
           is_active,
           is_public,
           image_url,
+          image_url_2,
+          image_url_3,
           display_order,
           created_at,
           updated_at,
@@ -105,7 +107,9 @@ Deno.serve(withLogging("services", async (req: Request) => {
       if (error) return serverError(error.message);
 
       const rows = (data ?? []).map((row) => {
-        const category = (row as Record<string, unknown>).category as { name?: string } | null;
+        const category = (row as Record<string, unknown>).category as {
+          name?: string;
+        } | null;
         return {
           ...(row as Record<string, unknown>),
           category_name: category?.name ?? null,
@@ -158,9 +162,15 @@ Deno.serve(withLogging("services", async (req: Request) => {
           price,
           currency_code: (body.currency_code as string | undefined) ?? "EUR",
           deposit_amount: depositAmount,
-          is_active: body.is_active !== undefined ? Boolean(body.is_active) : true,
-          is_public: body.is_public !== undefined ? Boolean(body.is_public) : true,
+          is_active: body.is_active !== undefined
+            ? Boolean(body.is_active)
+            : true,
+          is_public: body.is_public !== undefined
+            ? Boolean(body.is_public)
+            : true,
           image_url: (body.image_url as string | undefined) ?? null,
+          image_url_2: (body.image_url_2 as string | undefined) ?? null,
+          image_url_3: (body.image_url_3 as string | undefined) ?? null,
           display_order: Number(body.display_order ?? 0),
         })
         .select(`
@@ -176,6 +186,8 @@ Deno.serve(withLogging("services", async (req: Request) => {
           is_active,
           is_public,
           image_url,
+          image_url_2,
+          image_url_3,
           display_order,
           created_at,
           updated_at,
@@ -185,7 +197,9 @@ Deno.serve(withLogging("services", async (req: Request) => {
 
       if (error) return serverError(error.message);
 
-      const category = (data as Record<string, unknown>).category as { name?: string } | null;
+      const category = (data as Record<string, unknown>).category as {
+        name?: string;
+      } | null;
       return json({
         ...(data as Record<string, unknown>),
         category_name: category?.name ?? null,
@@ -205,7 +219,10 @@ Deno.serve(withLogging("services", async (req: Request) => {
       if (existingErr) return serverError(existingErr.message);
       if (!existing) return notFound("Service not found");
 
-      const ctx = await requireOwnerOrManagerCtx(req, (existing as { business_id: string }).business_id);
+      const ctx = await requireOwnerOrManagerCtx(
+        req,
+        (existing as { business_id: string }).business_id,
+      );
       if (ctx instanceof Response) return ctx;
 
       const updatePayload: Record<string, unknown> = {};
@@ -217,7 +234,8 @@ Deno.serve(withLogging("services", async (req: Request) => {
       }
 
       if (body.description !== undefined) {
-        updatePayload.description = String(body.description ?? "").trim() || null;
+        updatePayload.description = String(body.description ?? "").trim() ||
+          null;
       }
 
       if (body.duration_minutes !== undefined) {
@@ -230,7 +248,9 @@ Deno.serve(withLogging("services", async (req: Request) => {
 
       if (body.price !== undefined) {
         const price = parseMoney(body.price);
-        if (price === null || price <= 0) return badRequest("price must be a positive number");
+        if (price === null || price <= 0) {
+          return badRequest("price must be a positive number");
+        }
         updatePayload.price = price;
       }
 
@@ -242,13 +262,27 @@ Deno.serve(withLogging("services", async (req: Request) => {
         updatePayload.deposit_amount = depositAmount;
       }
 
-      if (body.is_active !== undefined) updatePayload.is_active = Boolean(body.is_active);
-      if (body.is_public !== undefined) updatePayload.is_public = Boolean(body.is_public);
+      if (body.is_active !== undefined) {
+        updatePayload.is_active = Boolean(body.is_active);
+      }
+      if (body.is_public !== undefined) {
+        updatePayload.is_public = Boolean(body.is_public);
+      }
       if (body.image_url !== undefined) {
         const imageUrl = String(body.image_url ?? "").trim();
         updatePayload.image_url = imageUrl || null;
       }
-      if (body.display_order !== undefined) updatePayload.display_order = Number(body.display_order);
+      if (body.image_url_2 !== undefined) {
+        const imageUrl2 = String(body.image_url_2 ?? "").trim();
+        updatePayload.image_url_2 = imageUrl2 || null;
+      }
+      if (body.image_url_3 !== undefined) {
+        const imageUrl3 = String(body.image_url_3 ?? "").trim();
+        updatePayload.image_url_3 = imageUrl3 || null;
+      }
+      if (body.display_order !== undefined) {
+        updatePayload.display_order = Number(body.display_order);
+      }
 
       if (body.category_id !== undefined || body.category_name !== undefined) {
         updatePayload.category_id = await resolveCategoryId(
@@ -280,6 +314,8 @@ Deno.serve(withLogging("services", async (req: Request) => {
           is_active,
           is_public,
           image_url,
+          image_url_2,
+          image_url_3,
           display_order,
           created_at,
           updated_at,
@@ -289,7 +325,9 @@ Deno.serve(withLogging("services", async (req: Request) => {
 
       if (error) return serverError(error.message);
 
-      const category = (data as Record<string, unknown>).category as { name?: string } | null;
+      const category = (data as Record<string, unknown>).category as {
+        name?: string;
+      } | null;
       return json({
         ...(data as Record<string, unknown>),
         category_name: category?.name ?? null,

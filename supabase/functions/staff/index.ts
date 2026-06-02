@@ -540,6 +540,16 @@ Deno.serve(withLogging("staff", async (req: Request) => {
           .eq("business_id", ctx.businessId);
       }
 
+      // Sync is_active to business_members — needed for manual owner activation
+      // from the dashboard (staff_profiles.is_active alone is not enough to grant login access)
+      const newIsActive = profileUpdate.is_active as boolean | undefined;
+      if (newIsActive !== undefined && memberId) {
+        await supabaseAdmin
+          .from("business_members")
+          .update({ is_active: newIsActive })
+          .eq("id", memberId);
+      }
+
       // Return updated row
       const { data: updated, error: fetchErr } = await supabaseAdmin
         .from("staff_profiles")

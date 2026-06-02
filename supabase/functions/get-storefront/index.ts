@@ -95,6 +95,8 @@ interface StorefrontData {
   logoUrl: string | null;
   coverImageUrl: string | null;
   accentColor: string;
+  theme: string;
+  businessType: string | null;
   verified: boolean;
   currencyCode: string;
   countryCode: string | null;
@@ -205,7 +207,7 @@ Deno.serve(withLogging("get-storefront", async (req: Request) => {
       // Business
       supabaseAdmin
         .from("businesses")
-        .select("name, currency_code")
+        .select("name, currency_code, business_type")
         .eq("id", businessId)
         .single(),
 
@@ -451,6 +453,8 @@ Deno.serve(withLogging("get-storefront", async (req: Request) => {
       logoUrl: storefront.logo_url ?? null,
       coverImageUrl: storefront.cover_image_url ?? null,
       accentColor: storefront.accent_color ?? "#C9873E",
+      theme: (storefront.theme as string | null) ?? "default",
+      businessType: (business as Record<string, unknown>).business_type as string | null ?? null,
       verified: storefront.marketplace_featured ?? false,
       currencyCode: business.currency_code ?? "EUR",
       countryCode: storefront.country_code ?? null,

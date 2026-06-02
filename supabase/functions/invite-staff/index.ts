@@ -91,9 +91,8 @@ Deno.serve(withLogging("invite-staff", async (req: Request) => {
     let memberId: string | null = null;
 
     if (!existingUser) {
-      // No user account yet — create a pending member without user_id
-      // The member will be linked when they accept the invite and sign up
-      // For now, we store the invite and create the staff profile
+      // No user account yet — business_members row is created by accept-staff-invite
+      // once the user signs up and accepts. staff_profile is enough to track the invite.
     } else {
       const { data: member, error: memberErr } = await supabaseAdmin
         .from("business_members")
@@ -131,20 +130,25 @@ Deno.serve(withLogging("invite-staff", async (req: Request) => {
     if (staffErr) throw staffErr;
 
     // ── Generate magic link for invitation ────────────────────────────────
+    // Include staff_profile_id in redirectTo so AuthCallbackPage can call
+    // accept-staff-invite immediately after the session is established.
+    const APP_URL = Deno.env.get("APP_URL") ?? "https://kazione.app";
+    const redirectTo =
+      `${APP_URL}/auth/callback?type=staff-invite&staff_profile_id=${staffProfile.id}`;
+
     const { data: linkData, error: linkErr } = await supabaseAdmin.auth.admin
       .generateLink({
         type: "magiclink",
         email: body.email,
+        options: { redirectTo },
       });
 
     if (linkErr) {
       console.error("Failed to generate magic link:", linkErr);
-      // Don't block — we'll still send an email with a fallback URL
     }
 
-    const APP_URL = Deno.env.get("APP_URL") ?? "https://kazionebooking.com";
     const acceptUrl = linkData?.properties?.action_link ??
-      `${APP_URL}/invite?business=${businessId}&staff=${staffProfile.id}`;
+      `${APP_URL}/auth/callback?type=staff-invite&staff_profile_id=${staffProfile.id}`;
 
     // ── Fetch inviter name & business name ────────────────────────────────
     const [inviterResult, businessResult] = await Promise.all([

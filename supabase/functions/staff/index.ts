@@ -430,14 +430,17 @@ Deno.serve(withLogging("staff", async (req: Request) => {
       const salonName = businessResult.data?.name ?? "the salon";
       const locale = businessResult.data?.locale ?? "en";
 
-      // Generate a fresh magic link
-      const APP_URL = Deno.env.get("APP_URL") ?? "https://kazionebooking.com";
+      // Generate a fresh magic link with redirectTo so the callback can activate the member
+      const APP_URL = Deno.env.get("APP_URL") ?? "https://kazione.app";
+      const redirectTo =
+        `${APP_URL}/auth/callback?type=staff-invite&staff_profile_id=${staffId}`;
       const { data: linkData } = await supabaseAdmin.auth.admin.generateLink({
         type: "magiclink",
         email: toEmail,
+        options: { redirectTo },
       });
       const acceptUrl = linkData?.properties?.action_link ??
-        `${APP_URL}/invite?business=${sp.business_id}&staff=${staffId}`;
+        `${APP_URL}/auth/callback?type=staff-invite&staff_profile_id=${staffId}`;
 
       // Send the email via the shared helper
       const emailData = staffInviteEmail({ salonName, inviterName, acceptUrl }, locale);

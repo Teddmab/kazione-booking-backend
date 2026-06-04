@@ -233,7 +233,7 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
     const { data: service, error: svcErr } = await supabaseAdmin
       .from("services")
       .select(
-        "id, name, duration_minutes, price, currency_code, deposit_amount",
+        "id, name, duration_minutes, buffer_minutes, price, currency_code, deposit_amount",
       )
       .eq("id", service_id)
       .eq("business_id", business_id)
@@ -486,6 +486,7 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
         p_staff_id: selectedStaffId,
         p_starts_at: startsAt,
         p_ends_at: endsAt,
+        p_buffer_minutes: service.buffer_minutes ?? 0,
         p_client_id: clientId,
         p_booking_reference: bookingReference,
         p_price: totalAmount,

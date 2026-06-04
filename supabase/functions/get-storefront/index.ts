@@ -15,6 +15,7 @@ interface StorefrontService {
   description: string;
   duration: string;
   durationMin: number;
+  bufferMin: number;
   price: number;
   currency: string;
   popular: boolean;
@@ -247,7 +248,7 @@ Deno.serve(withLogging("get-storefront", async (req: Request) => {
       supabaseAdmin
         .from("services")
         .select(`
-          id, name, description, duration_minutes, price, currency_code,
+          id, name, description, duration_minutes, buffer_minutes, price, currency_code,
           is_active, is_public, image_url, image_url_2, image_url_3, display_order,
           category_id,
           service_categories ( name ),
@@ -373,6 +374,7 @@ Deno.serve(withLogging("get-storefront", async (req: Request) => {
           description,
           duration: formatDuration(durationMin),
           durationMin,
+          bufferMin: +(svc.buffer_minutes as number ?? 0),
           price: +(svc.price as number),
           currency: (svc.currency_code as string) ?? business.currency_code,
           popular: (svc.display_order as number) === 0,

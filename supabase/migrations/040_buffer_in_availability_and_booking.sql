@@ -12,7 +12,7 @@
 --     and (slot_start + duration + buffer) for the new slot's end
 --
 -- create_booking_atomic:
---   * New parameter p_buffer_minutes (DEFAULT 0) — the queried service's buffer
+--   * New parameter p_buffer_minutes (no default; caller always passes it) — the queried service's buffer
 --   * Overlap check: extends both sides (new slot's end, existing appt's end)
 --     by their respective buffer minutes
 --   * Stored ends_at remains starts_at + duration (no buffer) — the customer
@@ -198,7 +198,7 @@ CREATE OR REPLACE FUNCTION create_booking_atomic(
   p_staff_id          uuid,
   p_starts_at         timestamptz,
   p_ends_at           timestamptz,   -- starts_at + duration (no buffer; stored as-is)
-  p_buffer_minutes    int DEFAULT 0, -- service buffer; extends the conflict window
+  p_buffer_minutes    int,           -- service buffer; extends the conflict window (caller passes 0 when none)
   p_client_id         uuid,
   p_booking_reference text,
   p_price             numeric,

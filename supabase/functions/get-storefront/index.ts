@@ -162,6 +162,11 @@ function formatDuration(minutes: number): string {
 /** Default staff role label based on business type shown on the public storefront. */
 function businessTypeToStaffRole(businessType: string | null): string {
   switch (businessType) {
+    case "hair_salon":
+    case "barbershop":
+    case "beauty_salon":
+    case "nail_salon":
+      return "Stylist";
     case "spa":
     case "wellness":
     case "massage_studio":
@@ -179,7 +184,8 @@ function businessTypeToStaffRole(businessType: string | null): string {
     case "professional_services":
       return "Consultant";
     default:
-      return "Stylist";
+      // "other", null, or any unrecognized type → generic label
+      return "Specialist";
   }
 }
 

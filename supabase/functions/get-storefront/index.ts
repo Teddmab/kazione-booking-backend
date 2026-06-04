@@ -124,6 +124,7 @@ interface StorefrontData {
   taxEnabled: boolean;
   taxRate: number;
   depositPercent: number;
+  enabledPaymentMethods: string[];
 
   // Nested
   contact: StorefrontContact;
@@ -238,7 +239,7 @@ Deno.serve(withLogging("get-storefront", async (req: Request) => {
       // Business settings (tax + deposit) — exposed so the booking form shows the real total
       supabaseAdmin
         .from("business_settings")
-        .select("tax_enabled, tax_rate, deposit_percentage")
+        .select("tax_enabled, tax_rate, deposit_percentage, enabled_payment_methods")
         .eq("business_id", businessId)
         .maybeSingle(),
 
@@ -506,6 +507,7 @@ Deno.serve(withLogging("get-storefront", async (req: Request) => {
       taxEnabled: settings?.tax_enabled ?? false,
       taxRate: +(settings?.tax_rate ?? 0),
       depositPercent: +(settings?.deposit_percentage ?? 25),
+      enabledPaymentMethods: (settings?.enabled_payment_methods as string[] | null) ?? ["deposit", "full", "later"],
 
       // Nested
       contact: {

@@ -1,4 +1,4 @@
--- 040_buffer_in_availability_and_booking.sql
+-- 042_buffer_in_availability_and_booking.sql
 --
 -- Wires services.buffer_minutes into the two functions that control scheduling:
 --

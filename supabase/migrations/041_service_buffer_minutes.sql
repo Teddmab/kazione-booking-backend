@@ -1,4 +1,4 @@
--- 039_service_buffer_minutes.sql
+-- 041_service_buffer_minutes.sql
 -- Adds per-service buffer time: a cleanup/preparation window appended after
 -- the appointment end that blocks the staff member for the next slot.
 -- Buffer is stored on the service (not the appointment) so it can be changed

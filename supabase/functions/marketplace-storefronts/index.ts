@@ -38,7 +38,8 @@ Deno.serve(withLogging("marketplace-storefronts", async (req: Request) => {
       .from("storefronts")
       .select(
         `id, business_id, slug, title, tagline, logo_url, cover_image_url,
-         city, marketplace_categories, marketplace_tags, marketplace_headline`,
+         city, marketplace_categories, marketplace_tags, marketplace_headline,
+         businesses!inner(business_type)`,
         { count: "exact" },
       )
       .eq("is_published", true)
@@ -106,6 +107,7 @@ Deno.serve(withLogging("marketplace-storefronts", async (req: Request) => {
         marketplace_categories: sf.marketplace_categories ?? [],
         marketplace_tags: sf.marketplace_tags ?? [],
         marketplace_headline: sf.marketplace_headline,
+        business_type: (sf.businesses as { business_type: string | null } | null)?.business_type ?? null,
         avg_rating: ra ? Math.round((ra.sum / ra.count) * 10) / 10 : 0,
         review_count: ra?.count ?? 0,
         services_preview: servicesMap.get(sf.business_id as string) ?? [],

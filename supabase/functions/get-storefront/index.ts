@@ -157,6 +157,30 @@ function formatDuration(minutes: number): string {
   return `${hrs.toFixed(1)} hrs`;
 }
 
+/** Default staff role label based on business type shown on the public storefront. */
+function businessTypeToStaffRole(businessType: string | null): string {
+  switch (businessType) {
+    case "spa":
+    case "wellness":
+    case "massage_studio":
+    case "massage":
+      return "Therapist";
+    case "fitness":
+    case "gym":
+    case "yoga_studio":
+    case "yoga":
+    case "pilates":
+      return "Trainer";
+    case "cleaning_service":
+    case "home_services":
+      return "Specialist";
+    case "professional_services":
+      return "Consultant";
+    default:
+      return "Stylist";
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Handler
 // ---------------------------------------------------------------------------
@@ -368,7 +392,7 @@ Deno.serve(withLogging("get-storefront", async (req: Request) => {
         return {
           id: s.id as string,
           name: s.display_name as string,
-          role: "Stylist",
+          role: businessTypeToStaffRole((business as Record<string, unknown>).business_type as string | null),
           bio: (s.bio ?? "") as string,
           avatar: (s.avatar_url as string) ?? null,
           specialties: (s.specialties ?? []) as string[],

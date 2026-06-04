@@ -86,6 +86,7 @@ Deno.serve(withLogging("services", async (req: Request) => {
           name,
           description,
           duration_minutes,
+          buffer_minutes,
           price,
           currency_code,
           deposit_amount,
@@ -159,6 +160,7 @@ Deno.serve(withLogging("services", async (req: Request) => {
           name,
           description: (body.description as string | undefined)?.trim() || null,
           duration_minutes: durationMinutes,
+          buffer_minutes: Math.max(0, Math.min(120, Number(body.buffer_minutes ?? 0))),
           price,
           currency_code: (body.currency_code as string | undefined) ?? "EUR",
           deposit_amount: depositAmount,
@@ -180,6 +182,7 @@ Deno.serve(withLogging("services", async (req: Request) => {
           name,
           description,
           duration_minutes,
+          buffer_minutes,
           price,
           currency_code,
           deposit_amount,
@@ -246,6 +249,14 @@ Deno.serve(withLogging("services", async (req: Request) => {
         updatePayload.duration_minutes = duration;
       }
 
+      if (body.buffer_minutes !== undefined) {
+        const buffer = Math.round(Number(body.buffer_minutes ?? 0));
+        if (!Number.isFinite(buffer) || buffer < 0 || buffer > 120) {
+          return badRequest("buffer_minutes must be between 0 and 120");
+        }
+        updatePayload.buffer_minutes = buffer;
+      }
+
       if (body.price !== undefined) {
         const price = parseMoney(body.price);
         if (price === null || price <= 0) {
@@ -308,6 +319,7 @@ Deno.serve(withLogging("services", async (req: Request) => {
           name,
           description,
           duration_minutes,
+          buffer_minutes,
           price,
           currency_code,
           deposit_amount,

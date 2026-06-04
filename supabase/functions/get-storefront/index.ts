@@ -233,7 +233,7 @@ Deno.serve(withLogging("get-storefront", async (req: Request) => {
       // Business
       supabaseAdmin
         .from("businesses")
-        .select("name, currency_code, business_type")
+        .select("name, currency_code, business_type, country")
         .eq("id", businessId)
         .single(),
 
@@ -484,7 +484,7 @@ Deno.serve(withLogging("get-storefront", async (req: Request) => {
       businessType: (business as Record<string, unknown>).business_type as string | null ?? null,
       verified: storefront.marketplace_featured ?? false,
       currencyCode: business.currency_code ?? "EUR",
-      countryCode: storefront.country_code ?? null,
+      countryCode: storefront.country_code ?? (business as Record<string, unknown>).country as string ?? null,
 
       // Marketplace
       headline: storefront.marketplace_headline ?? null,
@@ -515,7 +515,7 @@ Deno.serve(withLogging("get-storefront", async (req: Request) => {
       contact: {
         address: storefront.address ?? null,
         city: storefront.city ?? null,
-        countryCode: storefront.country_code ?? null,
+        countryCode: storefront.country_code ?? (business as Record<string, unknown>).country as string ?? null,
         phone: storefront.phone ?? null,
         email: storefront.email ?? null,
         website: storefront.website ?? null,

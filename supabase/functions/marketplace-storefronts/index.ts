@@ -30,6 +30,7 @@ Deno.serve(withLogging("marketplace-storefronts", async (req: Request) => {
     const search = url.searchParams.get("search");
     const categories = url.searchParams.getAll("categories");
     const city = url.searchParams.get("city");
+    const country = url.searchParams.get("country");
     const page = parseInt(url.searchParams.get("page") ?? "1", 10);
     const limit = parseInt(url.searchParams.get("limit") ?? "20", 10);
 
@@ -38,7 +39,7 @@ Deno.serve(withLogging("marketplace-storefronts", async (req: Request) => {
       .from("storefronts")
       .select(
         `id, business_id, slug, title, tagline, logo_url, cover_image_url,
-         city, marketplace_categories, marketplace_tags, marketplace_headline,
+         city, country_code, marketplace_categories, marketplace_tags, marketplace_headline,
          businesses!inner(business_type)`,
         { count: "exact" },
       )
@@ -57,6 +58,9 @@ Deno.serve(withLogging("marketplace-storefronts", async (req: Request) => {
     }
     if (city) {
       query = query.ilike("city", `%${city}%`);
+    }
+    if (country) {
+      query = query.eq("country_code", country.toUpperCase());
     }
 
     const from = (page - 1) * limit;
@@ -104,6 +108,7 @@ Deno.serve(withLogging("marketplace-storefronts", async (req: Request) => {
         logo_url: sf.logo_url,
         cover_image_url: sf.cover_image_url,
         city: sf.city,
+        country_code: sf.country_code ?? null,
         marketplace_categories: sf.marketplace_categories ?? [],
         marketplace_tags: sf.marketplace_tags ?? [],
         marketplace_headline: sf.marketplace_headline,

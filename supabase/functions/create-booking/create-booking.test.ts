@@ -96,12 +96,16 @@ async function findAvailableSlot(
   skipDate?: string,
 ): Promise<{ date: string; time: string; staffId: string } | null> {
   const dates = [
-    "2026-05-26",
-    "2026-06-16",
-    "2026-06-23",
-    "2026-05-19",
-    "2026-05-12",
-    "2026-05-05",
+    "2026-06-10",
+    "2026-06-17",
+    "2026-06-24",
+    "2026-07-01",
+    "2026-07-08",
+    "2026-07-15",
+    "2026-07-22",
+    "2026-07-29",
+    "2026-08-05",
+    "2026-08-12",
   ];
   const ANON =
     "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9.CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0";

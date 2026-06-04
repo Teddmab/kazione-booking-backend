@@ -504,7 +504,7 @@ Deno.serve(withLogging("get-storefront", async (req: Request) => {
       headers: {
         ...corsHeaders,
         "Content-Type": "application/json",
-        "Cache-Control": "no-cache",
+        "Cache-Control": "no-store",
       },
     });
   } catch (err) {

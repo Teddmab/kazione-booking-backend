@@ -246,7 +246,7 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
       supabaseAdmin
         .from("business_settings")
         .select(
-          "deposit_percentage, tax_enabled, tax_rate, stripe_account_id",
+          "deposit_percentage, tax_enabled, tax_rate, stripe_account_id, enabled_payment_methods",
         )
         .eq("business_id", business_id)
         .maybeSingle(),
@@ -262,6 +262,19 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
     const business = businessResult.data;
     const currencyCode = service.currency_code ?? business.currency_code ??
       "EUR";
+
+    // ── Validate payment method against business's enabled list ───────────
+    const enabledMethods: string[] =
+      (settings?.enabled_payment_methods as string[] | null) ??
+      ["deposit", "full", "later"];
+    // Empty list = no online payment step; only "later" is allowed server-side
+    const effectiveEnabled = enabledMethods.length > 0 ? enabledMethods : ["later"];
+    if (!effectiveEnabled.includes(payment_method)) {
+      return badRequest(
+        `payment_method '${payment_method}' is not enabled for this business. ` +
+          `Allowed: ${effectiveEnabled.join(", ")}.`,
+      );
+    }
 
     // ── STEP 4: Calculate pricing ─────────────────────────────────────────
     const basePrice = +(selectedSlot.custom_price ?? service.price);

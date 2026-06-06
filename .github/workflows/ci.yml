@@ -93,3 +93,27 @@ jobs:
       - name: Stop Supabase stack
         if: always()
         run: supabase stop
+
+  admin-unit-tests:
+    name: Admin Shared Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Run admin shared unit tests
+        # Mock env vars so supabaseAdmin.ts can initialise without a real DB.
+        # These tests only exercise pure logic (header parsing, type shapes,
+        # fire-and-forget resilience) — no actual DB calls succeed.
+        run: |
+          cd supabase/functions
+          SUPABASE_URL=http://127.0.0.1:54321 \
+          SUPABASE_SERVICE_ROLE_KEY=test-service-role-key \
+          SUPABASE_ANON_KEY=test-anon-key \
+          deno test _shared/adminAuth.test.ts _shared/adminAudit.test.ts \
+            --allow-env --allow-net --allow-read \
+            --config deno.json \
+            --reporter=pretty

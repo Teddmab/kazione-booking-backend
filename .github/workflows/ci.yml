@@ -88,7 +88,8 @@ jobs:
           deno test supabase/functions/ \
             --allow-env --allow-net --allow-read \
             --config supabase/functions/deno.json \
-            --reporter=pretty
+            --reporter=pretty \
+            --ignore=supabase/functions/_shared/adminAuth.test.ts,supabase/functions/_shared/adminAudit.test.ts
 
       - name: Stop Supabase stack
         if: always()

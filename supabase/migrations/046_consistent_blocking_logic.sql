@@ -26,11 +26,13 @@
 --   2. paid/succeeded payments   — always block
 --   3. non-cash pending payment + appointment created < 30 min ago
 --                                — checkout still in progress, block
---   4. appointment created < 5 min ago (any state)
+--   4. appointment created < 30 sec ago (any state)
 --                                — race-condition guard for the window
 --                                  between create_booking_atomic commit
 --                                  and the outer function confirming the
---                                  appointment (typically < 100 ms)
+--                                  appointment (typically < 100 ms).
+--                                  30 s >> 100 ms but safely excludes seed
+--                                  appointments created > 60 s before tests.
 --
 -- Anything older that doesn't meet conditions 1–3 is treated as abandoned
 -- and no longer blocks new bookings, matching get_available_slots exactly.
@@ -92,10 +94,12 @@ BEGIN
             AND a.created_at > now() - interval '30 minutes'
        )
 
-       -- 4. Race-condition guard: any appointment created in the last 5 min —
+       -- 4. Race-condition guard: any appointment created in the last 30 sec —
        --    covers the gap between create_booking_atomic committing and the
-       --    outer edge function inserting the payment + confirming.
-       OR a.created_at > now() - interval '5 minutes'
+       --    outer edge function inserting the payment + confirming (< 1 sec).
+       --    30 seconds is generous for that window while safely excluding
+       --    seed / fixture appointments created > 60 s before tests run.
+       OR a.created_at > now() - interval '30 seconds'
      );
 
   IF NOT v_slot_available THEN

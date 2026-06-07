@@ -1,5 +1,5 @@
 import { supabaseAdmin } from "./supabaseAdmin.ts";
-import { unauthorized, forbidden } from "./errors.ts";
+import { adminErrors } from "./adminCors.ts";
 
 export interface AdminContext {
   adminId: string;
@@ -22,7 +22,7 @@ export async function requirePlatformAdmin(
 ): Promise<AdminContext | Response> {
   const authHeader = req.headers.get("Authorization");
   if (!authHeader?.startsWith("Bearer ")) {
-    return unauthorized("Missing or invalid Authorization header");
+    return adminErrors.unauthorized("Missing or invalid Authorization header");
   }
 
   const token = authHeader.replace("Bearer ", "");
@@ -34,7 +34,7 @@ export async function requirePlatformAdmin(
   } = await supabaseAdmin.auth.getUser(token);
 
   if (authError || !user) {
-    return unauthorized("Invalid or expired token");
+    return adminErrors.unauthorized("Invalid or expired token");
   }
 
   // Check is_platform_admin flag — service role bypasses RLS so this is authoritative
@@ -46,11 +46,11 @@ export async function requirePlatformAdmin(
 
   if (profileError) {
     console.error("[adminAuth] Profile lookup error:", profileError.message);
-    return unauthorized("Could not verify admin status");
+    return adminErrors.unauthorized("Could not verify admin status");
   }
 
   if (!profile?.is_platform_admin) {
-    return forbidden("Platform admin access required");
+    return adminErrors.forbidden("Platform admin access required");
   }
 
   return {

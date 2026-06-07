@@ -163,10 +163,12 @@ function formatDuration(minutes: number): string {
 function businessTypeToStaffRole(businessType: string | null): string {
   switch (businessType) {
     case "hair_salon":
-    case "barbershop":
     case "beauty_salon":
     case "nail_salon":
       return "Stylist";
+    case "barber":
+    case "barbershop":
+      return "Barber";
     case "spa":
     case "wellness":
     case "massage_studio":

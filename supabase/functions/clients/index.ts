@@ -11,10 +11,51 @@ function json(data: unknown, status = 200): Response {
   });
 }
 
+type ClientSegment = "new" | "active" | "vip" | "at_risk" | "inactive";
+
+function getClientSegment(appointmentCount: number, lastVisit: string | null): ClientSegment {
+  if (appointmentCount <= 1) return "new";
+  if (appointmentCount >= 10) return "vip";
+  if (lastVisit) {
+    const daysSince = Math.floor((Date.now() - new Date(lastVisit).getTime()) / (1000 * 60 * 60 * 24));
+    if (daysSince > 90) return "inactive";
+    if (daysSince > 30) return "at_risk";
+  }
+  return "active";
+}
+
+function mapClientRow(row: Record<string, unknown>) {
+  const appts = (row.appointments as { id: string; starts_at: string; status: string; price: number }[]) ?? [];
+  const completed = appts.filter((a) => a.status === "completed");
+  const { appointments: _, ...fields } = row;
+  return {
+    ...fields,
+    appointment_count: appts.length,
+    last_visit: completed.length > 0
+      ? completed.sort((a, b) => new Date(b.starts_at).getTime() - new Date(a.starts_at).getTime())[0].starts_at
+      : null,
+    total_spent: completed.reduce((sum, a) => sum + a.price, 0),
+  };
+}
+
+function computeClientStats(rows: Record<string, unknown>[], total: number) {
+  const stats = { total, new: 0, active: 0, vip: 0, at_risk: 0, inactive: 0 };
+  for (const row of rows) {
+    const appts = (row.appointments as { starts_at: string; status: string }[]) ?? [];
+    const completed = appts.filter((a) => a.status === "completed");
+    const lastVisit = completed.length > 0
+      ? completed.sort((a, b) => new Date(b.starts_at).getTime() - new Date(a.starts_at).getTime())[0].starts_at
+      : null;
+    stats[getClientSegment(appts.length, lastVisit)]++;
+  }
+  return stats;
+}
+
 /**
  * /clients — clients CRUD + bulk import
  *
  * GET  ?business_id=&[page=&limit=&search=&tags=]   → paginated list with stats
+ * GET  ?action=stats&business_id=                    → aggregated KPI counts (all clients)
  * GET  ?id=                                          → single client with recent appointments
  * POST                                               → create client (body: business_id + fields)
  * POST ?action=import                                → bulk import (body: business_id, rows:[])
@@ -82,6 +123,17 @@ Deno.serve(withLogging("clients", async (req: Request) => {
         throw e;
       }
 
+      if (action === "stats") {
+        const { data, error, count } = await supabaseAdmin
+          .from("clients")
+          .select("id, appointments(id, starts_at, status)", { count: "exact" })
+          .eq("business_id", businessId);
+
+        if (error) return serverError(error.message);
+
+        return json(computeClientStats(data ?? [], count ?? 0));
+      }
+
       const page = parseInt(url.searchParams.get("page") ?? "1", 10);
       const limit = parseInt(url.searchParams.get("limit") ?? "25", 10);
       const search = url.searchParams.get("search");
@@ -109,19 +161,7 @@ Deno.serve(withLogging("clients", async (req: Request) => {
       const { data, error, count } = await query;
       if (error) return serverError(error.message);
 
-      const clients = (data ?? []).map((row: Record<string, unknown>) => {
-        const appts = (row.appointments as { id: string; starts_at: string; status: string; price: number }[]) ?? [];
-        const completed = appts.filter((a) => a.status === "completed");
-        const { appointments: _, ...fields } = row;
-        return {
-          ...fields,
-          appointment_count: appts.length,
-          last_visit: completed.length > 0
-            ? completed.sort((a, b) => new Date(b.starts_at).getTime() - new Date(a.starts_at).getTime())[0].starts_at
-            : null,
-          total_spent: completed.reduce((sum, a) => sum + a.price, 0),
-        };
-      });
+      const clients = (data ?? []).map((row: Record<string, unknown>) => mapClientRow(row));
 
       return json({ clients, total: count ?? 0 });
     }

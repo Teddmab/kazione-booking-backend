@@ -78,7 +78,7 @@ Deno.serve(withLogging("admin-businesses", async (req: Request) => {
       action: "BUSINESS_PAYMENT_SETTINGS_UPDATED",
       targetType: "business",
       targetId: id,
-      details: paymentUpdate,
+      targetMeta: paymentUpdate,
       ipAddress: getCallerIp(req),
     });
 

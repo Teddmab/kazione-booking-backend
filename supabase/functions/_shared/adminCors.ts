@@ -38,3 +38,18 @@ export function adminJson(data: unknown, status = 200): Response {
     headers: { ...corsHeaders(_origin), "Content-Type": "application/json" },
   });
 }
+
+// Admin-aware error helpers — use these in admin shared code (adminAuth, etc.)
+// so error responses carry the correct CORS origin instead of the main app origin.
+function adminError(status: number, code: string, message: string): Response {
+  return new Response(JSON.stringify({ error: { code, message } }), {
+    status,
+    headers: { ...corsHeaders(_origin), "Content-Type": "application/json" },
+  });
+}
+
+export const adminErrors = {
+  unauthorized: (message = "Unauthorized") => adminError(401, "UNAUTHORIZED", message),
+  forbidden: (message = "Forbidden") => adminError(403, "FORBIDDEN", message),
+  serverError: (message = "Internal server error") => adminError(500, "INTERNAL_ERROR", message),
+};

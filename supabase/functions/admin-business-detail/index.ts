@@ -40,6 +40,7 @@ Deno.serve(withLogging("admin-business-detail", async (req: Request) => {
       { data: revenueData },
       { data: recentAppts },
       { data: paymentSettings },
+      { data: members },
     ] = await Promise.all([
       supabaseAdmin.from("business_members").select("*", { count: "exact", head: true }).eq("business_id", id).eq("is_active", true),
       supabaseAdmin.from("appointments").select("*", { count: "exact", head: true }).eq("business_id", id),
@@ -54,6 +55,11 @@ Deno.serve(withLogging("admin-business-detail", async (req: Request) => {
         .select("stripe_enabled, pawapay_enabled, accept_cash, payment_required_online, stripe_account_id")
         .eq("business_id", id)
         .maybeSingle(),
+      supabaseAdmin.from("business_members")
+        .select("id, role, created_at, user:users(id, email, first_name, last_name, is_platform_admin)")
+        .eq("business_id", id)
+        .eq("is_active", true)
+        .order("created_at", { ascending: true }),
     ]);
 
     const totalRevenue = (revenueData ?? []).reduce(
@@ -72,6 +78,7 @@ Deno.serve(withLogging("admin-business-detail", async (req: Request) => {
 
     return adminJson({
       business,
+      members: members ?? [],
       stats: {
         member_count: memberCount ?? 0,
         total_appointments: totalAppts ?? 0,

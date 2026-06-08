@@ -15,7 +15,9 @@ export type AdminAction =
   | "USER_PROMOTED_ADMIN"
   | "USER_DEMOTED_ADMIN"
   | "PAYMENTS_LISTED"
-  | "AUDIT_LOG_VIEWED";
+  | "AUDIT_LOG_VIEWED"
+  | "REGION_ENABLED"
+  | "REGION_DISABLED";
 
 export interface AuditEntry {
   adminId: string;

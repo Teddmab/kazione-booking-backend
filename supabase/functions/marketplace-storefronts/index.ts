@@ -34,6 +34,12 @@ Deno.serve(withLogging("marketplace-storefronts", async (req: Request) => {
     const page = parseInt(url.searchParams.get("page") ?? "1", 10);
     const limit = parseInt(url.searchParams.get("limit") ?? "20", 10);
 
+    // Fetch locked countries in parallel with the main query (no auth required — public info)
+    const lockedRegionsPromise = supabaseAdmin
+      .from("platform_regions")
+      .select("country_code")
+      .eq("is_enabled", false);
+
     // deno-lint-ignore no-explicit-any
     let query: any = supabaseAdmin
       .from("storefronts")
@@ -66,8 +72,13 @@ Deno.serve(withLogging("marketplace-storefronts", async (req: Request) => {
     const from = (page - 1) * limit;
     query = query.range(from, from + limit - 1);
 
-    const { data: storefrontsData, error, count } = await query;
+    const [{ data: storefrontsData, error, count }, { data: lockedRegionsData }] =
+      await Promise.all([query, lockedRegionsPromise]);
     if (error) return serverError(error.message);
+
+    const locked_countries = (lockedRegionsData ?? []).map(
+      (r: Record<string, unknown>) => r.country_code as string,
+    );
 
     const businessIds = (storefrontsData ?? []).map((s: Record<string, unknown>) => s.business_id as string);
 
@@ -119,7 +130,7 @@ Deno.serve(withLogging("marketplace-storefronts", async (req: Request) => {
       };
     });
 
-    return new Response(JSON.stringify({ storefronts, total: count ?? 0 }), {
+    return new Response(JSON.stringify({ storefronts, total: count ?? 0, locked_countries }), {
       status: 200,
       headers: {
         ...corsHeaders,

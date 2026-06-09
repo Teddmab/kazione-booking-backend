@@ -28,6 +28,10 @@ pop3_port = 54326
 enabled = true
 file_size_limit = "50MiB"
 
+# Analytics (Logflare) often blocks local health checks on slower machines.
+[analytics]
+enabled = false
+
 [auth]
 enabled = true
 site_url = "http://localhost:8080"

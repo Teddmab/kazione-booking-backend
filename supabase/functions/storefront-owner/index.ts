@@ -39,6 +39,36 @@ Deno.serve(withLogging("storefront-owner", async (req: Request) => {
       const ctx = await requireOwnerOrManagerCtx(req, businessId);
       if (ctx instanceof Response) return ctx;
 
+      if (action === "promotions") {
+        const { data, error } = await supabaseAdmin
+          .from("promotions")
+          .select("id, business_id, title, description, valid_until, is_active")
+          .eq("business_id", ctx.businessId)
+          .order("created_at", { ascending: false });
+
+        if (error) return serverError(error.message);
+        return json(data ?? []);
+      }
+
+      if (action === "gallery") {
+        const { data: storefront } = await supabaseAdmin
+          .from("storefronts")
+          .select("id")
+          .eq("business_id", ctx.businessId)
+          .maybeSingle();
+
+        if (!storefront) return json([]);
+
+        const { data, error } = await supabaseAdmin
+          .from("storefront_gallery")
+          .select("*")
+          .eq("storefront_id", (storefront as Record<string, unknown>).id as string)
+          .order("display_order", { ascending: true });
+
+        if (error) return serverError(error.message);
+        return json(data ?? []);
+      }
+
       const { data, error } = await supabaseAdmin
         .from("storefronts")
         .select("*")
@@ -120,6 +150,26 @@ Deno.serve(withLogging("storefront-owner", async (req: Request) => {
         return json({ ok: true });
       }
 
+      if (action === "promotion") {
+        const body = await req.json() as Record<string, unknown>;
+        const { data, error } = await supabaseAdmin
+          .from("promotions")
+          .insert({
+            business_id: ctx.businessId,
+            title: body.title as string,
+            description: (body.description as string) ?? null,
+            valid_until: (body.valid_until as string) ?? null,
+            discount_type: "percentage",
+            discount_value: 0,
+            is_active: true,
+          })
+          .select("id, business_id, title, description, valid_until, is_active")
+          .single();
+
+        if (error) return serverError(error.message);
+        return json(data, 201);
+      }
+
       // Insert gallery image record (after client uploaded via presigned URL)
       if (action === "gallery-record") {
         const body = await req.json() as Record<string, unknown>;
@@ -141,6 +191,25 @@ Deno.serve(withLogging("storefront-owner", async (req: Request) => {
     }
 
     // ── DELETE ─────────────────────────────────────────────────────────────
+    if (method === "DELETE" && action === "promotion") {
+      const promoId = url.searchParams.get("id");
+      const businessId = url.searchParams.get("business_id");
+      if (!promoId) return badRequest("id is required");
+      if (!businessId) return badRequest("business_id is required");
+
+      const ctx = await requireOwnerOrManagerCtx(req, businessId);
+      if (ctx instanceof Response) return ctx;
+
+      const { error } = await supabaseAdmin
+        .from("promotions")
+        .delete()
+        .eq("id", promoId)
+        .eq("business_id", ctx.businessId);
+
+      if (error) return serverError(error.message);
+      return json({ ok: true });
+    }
+
     if (method === "DELETE" && action === "gallery") {
       const galleryId = url.searchParams.get("id");
       const imageUrl = url.searchParams.get("image_url");

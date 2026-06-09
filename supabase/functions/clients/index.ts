@@ -11,9 +11,26 @@ function json(data: unknown, status = 200): Response {
   });
 }
 
+type ClientStatus = "VIP" | "Active" | "New" | "At risk" | "Inactive";
+
+function statusFromLastVisit(lastVisit: string | null): ClientStatus | null {
+  if (!lastVisit) return null;
+  const daysSince = Math.floor((Date.now() - new Date(lastVisit).getTime()) / (1000 * 60 * 60 * 24));
+  if (daysSince > 90) return "Inactive";
+  if (daysSince > 30) return "At risk";
+  return null;
+}
+
+function getClientStatus(appointmentCount: number, lastVisit: string | null): ClientStatus {
+  if (appointmentCount <= 1) return "New";
+  if (appointmentCount >= 10) return "VIP";
+  return statusFromLastVisit(lastVisit) ?? "Active";
+}
+
 /**
  * /clients — clients CRUD + bulk import
  *
+ * GET  ?business_id=&action=stats                    → aggregated status counts
  * GET  ?business_id=&[page=&limit=&search=&tags=]   → paginated list with stats
  * GET  ?id=                                          → single client with recent appointments
  * POST                                               → create client (body: business_id + fields)
@@ -80,6 +97,50 @@ Deno.serve(withLogging("clients", async (req: Request) => {
       } catch (e) {
         if (e instanceof Response) return e;
         throw e;
+      }
+
+      if (action === "stats") {
+        const { data, error } = await supabaseAdmin
+          .from("clients")
+          .select("id, appointments(id, starts_at, status, price)")
+          .eq("business_id", businessId);
+
+        if (error) return serverError(error.message);
+
+        let newCount = 0;
+        let active = 0;
+        let vip = 0;
+        let atRisk = 0;
+        let inactive = 0;
+
+        for (const row of data ?? []) {
+          const appts = (row as Record<string, unknown>).appointments as {
+            id: string;
+            starts_at: string;
+            status: string;
+            price: number;
+          }[] ?? [];
+          const completed = appts.filter((a) => a.status === "completed");
+          const lastVisit = completed.length > 0
+            ? completed.sort((a, b) => new Date(b.starts_at).getTime() - new Date(a.starts_at).getTime())[0].starts_at
+            : null;
+          const status = getClientStatus(appts.length, lastVisit);
+
+          if (status === "VIP") vip++;
+          else if (status === "Active") active++;
+          else if (status === "New") newCount++;
+          else if (status === "At risk") atRisk++;
+          else if (status === "Inactive") inactive++;
+        }
+
+        return json({
+          total: data?.length ?? 0,
+          new: newCount,
+          active,
+          vip,
+          at_risk: atRisk,
+          inactive,
+        });
       }
 
       const page = parseInt(url.searchParams.get("page") ?? "1", 10);

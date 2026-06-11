@@ -22,19 +22,20 @@ CREATE TABLE IF NOT EXISTS admin_audit_log (
 );
 
 -- ── Indexes ──────────────────────────────────────────────────────────────────
-CREATE INDEX idx_admin_audit_admin_time
+CREATE INDEX IF NOT EXISTS idx_admin_audit_admin_time
   ON admin_audit_log (admin_id, created_at DESC);
 
-CREATE INDEX idx_admin_audit_target
+CREATE INDEX IF NOT EXISTS idx_admin_audit_target
   ON admin_audit_log (target_type, target_id);
 
-CREATE INDEX idx_admin_audit_action_time
+CREATE INDEX IF NOT EXISTS idx_admin_audit_action_time
   ON admin_audit_log (action, created_at DESC);
 
 -- ── RLS ───────────────────────────────────────────────────────────────────────
 ALTER TABLE admin_audit_log ENABLE ROW LEVEL SECURITY;
 
 -- Only platform admins can read their own audit trail
+DROP POLICY IF EXISTS "admin_read_audit_log" ON admin_audit_log;
 CREATE POLICY "admin_read_audit_log"
   ON admin_audit_log FOR SELECT
   USING (is_platform_admin());

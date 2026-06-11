@@ -21,10 +21,12 @@ COMMENT ON TABLE platform_regions IS
 ALTER TABLE platform_regions ENABLE ROW LEVEL SECURITY;
 
 -- Platform admins can read and update; service role (edge functions) bypasses RLS.
+DROP POLICY IF EXISTS "admin_read_platform_regions" ON platform_regions;
 CREATE POLICY "admin_read_platform_regions"
   ON platform_regions FOR SELECT
   USING (is_platform_admin());
 
+DROP POLICY IF EXISTS "admin_update_platform_regions" ON platform_regions;
 CREATE POLICY "admin_update_platform_regions"
   ON platform_regions FOR UPDATE
   USING (is_platform_admin())

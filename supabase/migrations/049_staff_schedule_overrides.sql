@@ -16,8 +16,8 @@
 
 -- ── 1. staff_schedule_overrides table ─────────────────────────────────────────
 
-CREATE TABLE staff_schedule_overrides (
-  id               uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
+CREATE TABLE IF NOT EXISTS staff_schedule_overrides (
+  id               uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   staff_profile_id uuid NOT NULL REFERENCES staff_profiles(id) ON DELETE CASCADE,
   business_id      uuid NOT NULL REFERENCES businesses(id)      ON DELETE CASCADE,
   override_date    date NOT NULL,
@@ -35,7 +35,7 @@ CREATE TABLE staff_schedule_overrides (
   UNIQUE (staff_profile_id, override_date)
 );
 
-CREATE INDEX idx_schedule_overrides_staff_date
+CREATE INDEX IF NOT EXISTS idx_schedule_overrides_staff_date
   ON staff_schedule_overrides (staff_profile_id, override_date);
 
 COMMENT ON TABLE staff_schedule_overrides IS

@@ -16,9 +16,22 @@ interface InsightItem {
   priority: "high" | "medium" | "low";
 }
 
+interface ServiceInsight {
+  service_name: string;
+  severity: "ok" | "warning" | "error";
+  issues: string[];
+}
+
+interface ServiceAnalysisResponse {
+  analysis: ServiceInsight[];
+  summary: string;
+  cached: boolean;
+}
+
 interface RequestBody {
   business_id: string;
-  period_days: 7 | 14 | 30 | 90;
+  period_days?: 7 | 14 | 30 | 90;
+  action?: string;
   question?: string;
 }
 
@@ -245,6 +258,82 @@ async function callAnthropic(
 }
 
 // ---------------------------------------------------------------------------
+// Service catalog analysis
+// ---------------------------------------------------------------------------
+
+async function gatherServices(businessId: string) {
+  const { data, error } = await supabaseAdmin
+    .from("services")
+    .select("id, name, description, price, duration_minutes, is_active, category_id, service_categories(name)")
+    .eq("business_id", businessId)
+    .eq("is_active", true)
+    .order("display_order", { ascending: true });
+  if (error) throw error;
+
+  return (data ?? []).map((svc: Record<string, unknown>) => {
+    const cat = svc.service_categories as { name: string } | null;
+    return {
+      name: svc.name as string,
+      description: (svc.description ?? "") as string,
+      price: +(svc.price as number),
+      duration_minutes: svc.duration_minutes as number,
+      category: cat?.name ?? null,
+    };
+  });
+}
+
+async function callAnthropicServices(
+  services: Array<{ name: string; description: string; price: number; duration_minutes: number; category: string | null }>,
+): Promise<ServiceAnalysisResponse> {
+  const apiKey = Deno.env.get("ANTHROPIC_API_KEY");
+  if (!apiKey) throw new Error("ANTHROPIC_API_KEY not configured");
+
+  const res = await fetch(ANTHROPIC_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+    },
+    body: JSON.stringify({
+      model: "claude-sonnet-4-20250514",
+      max_tokens: 1500,
+      system:
+        "You are KaziOne AI, a business analyst for beauty and wellness businesses. " +
+        "Analyze this service catalog and identify potential issues. " +
+        "Check each service for: (1) missing or very short description (<10 words), (2) price anomalies (unusually high/low compared to others, or 0 price), (3) missing category, (4) suspiciously long or short duration relative to the service name. " +
+        "Be practical — flag real issues, not minor style preferences. " +
+        'Respond with a JSON object: { "analysis": [{ "service_name": string, "severity": "ok"|"warning"|"error", "issues": string[] }], "summary": string }. ' +
+        "severity=error means the issue will likely confuse clients (e.g. no description, zero price). severity=warning means it should be reviewed (e.g. vague description). severity=ok means the service looks good. " +
+        "Do not include any text outside the JSON object.",
+      messages: [
+        {
+          role: "user",
+          content: `Analyze this service catalog:\n${JSON.stringify(services, null, 2)}`,
+        },
+      ],
+    }),
+  });
+
+  if (!res.ok) {
+    const errBody = await res.text();
+    throw new Error(`Anthropic API error ${res.status}: ${errBody}`);
+  }
+
+  const data = await res.json();
+  const text = data.content?.[0]?.text ?? "";
+  const jsonMatch = text.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) throw new Error("No valid JSON in AI response");
+
+  const parsed = JSON.parse(jsonMatch[0]);
+  return {
+    analysis: (parsed.analysis ?? []) as ServiceInsight[],
+    summary: (parsed.summary ?? "") as string,
+    cached: false,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Handler
 // ---------------------------------------------------------------------------
 
@@ -258,17 +347,37 @@ Deno.serve(withLogging("ai-insights", async (req: Request) => {
     }
 
     const body = (await req.json()) as RequestBody;
-    const { business_id, period_days, question } = body;
+    const { business_id, period_days, action, question } = body;
 
-    if (!business_id || !VALID_PERIODS.includes(period_days)) {
-      return badRequest("business_id and valid period_days (7|14|30|90) required");
+    if (!business_id) {
+      return badRequest("business_id is required");
     }
 
     // 1. Auth: verify JWT + owner/manager membership in one call
-    // business_id is verified against the DB — not blindly trusted from body
     const ctx = await requireOwnerOrManagerCtx(req, business_id);
     if (ctx instanceof Response) return ctx;
     const { userId, businessId } = ctx;
+
+    // ── Service catalog analysis ─────────────────────────────────────────
+    if (action === "services") {
+      const services = await gatherServices(businessId);
+      if (services.length === 0) {
+        return new Response(
+          JSON.stringify({ analysis: [], summary: "No active services found.", cached: false }),
+          { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+        );
+      }
+      const result = await callAnthropicServices(services);
+      return new Response(JSON.stringify(result), {
+        status: 200,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
+    // ── Business insights (default) ──────────────────────────────────────
+    if (!period_days || !VALID_PERIODS.includes(period_days)) {
+      return badRequest("valid period_days (7|14|30|90) required for business insights");
+    }
 
     // 2. Check cache — ai_insight notification from last 6 hours with same period
     const cacheThreshold = new Date(
@@ -288,7 +397,7 @@ Deno.serve(withLogging("ai-insights", async (req: Request) => {
     if (
       cached?.metadata &&
       (cached.metadata as Record<string, unknown>).period_days === period_days &&
-      !question // Only use cache for default insights, not custom questions
+      !question
     ) {
       return new Response(
         JSON.stringify({

@@ -178,7 +178,7 @@ Deno.serve(withLogging("staff", async (req: Request) => {
     // Creates a staff_profile directly. If the email matches an existing user
     // they are also linked via business_members. Staff is active immediately
     // because the owner is adding them explicitly from the dashboard.
-    if (method === "POST") {
+    if (method === "POST" && !action) {
       const body = await req.json() as Record<string, unknown>;
 
       const qBusinessId = body.business_id as string | undefined;

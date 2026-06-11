@@ -3,6 +3,7 @@ import { corsHeaders, handleCors } from "../_shared/cors.ts";
 import { badRequest, notFound, serverError } from "../_shared/errors.ts";
 import { withLogging } from "../_shared/logger.ts";
 import { requireOwnerOrManagerCtx, verifyAuth, verifyBusinessMember } from "../_shared/auth.ts";
+import { bookingRescheduleEmail, sendEmail } from "../_shared/resend.ts";
 
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
@@ -344,6 +345,113 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
       });
 
       return json({ ...appointment, payment: null }, 201);
+    }
+
+    // ── PATCH ?action=reschedule ────────────────────────────────────────────
+    if (method === "PATCH" && action === "reschedule") {
+      if (!id) return badRequest("id is required");
+      const body = await req.json() as Record<string, unknown>;
+      const newStartsAt = body.starts_at as string | undefined;
+      if (!newStartsAt) return badRequest("starts_at is required");
+
+      // Fetch existing appointment with client + staff + business details
+      const { data: existing, error: fetchErr } = await supabaseAdmin
+        .from("appointments")
+        .select(`
+          business_id, duration_minutes, status, booking_reference, price,
+          client:clients!inner(first_name, last_name, email),
+          staff:staff_profiles(display_name, business_member_id),
+          service:services!inner(name)
+        `)
+        .eq("id", id)
+        .single();
+
+      if (fetchErr || !existing) return notFound("Appointment not found");
+
+      const ctx = await requireOwnerOrManagerCtx(req, (existing as Record<string, unknown>).business_id as string);
+      if (ctx instanceof Response) return ctx;
+
+      const ex = existing as Record<string, unknown>;
+      const durationMs = (ex.duration_minutes as number) * 60_000;
+      const startsAt = new Date(newStartsAt);
+      if (isNaN(startsAt.getTime())) return badRequest("starts_at is not a valid ISO date");
+      const endsAt = new Date(startsAt.getTime() + durationMs);
+
+      const { data: updated, error: updateErr } = await supabaseAdmin
+        .from("appointments")
+        .update({ starts_at: startsAt.toISOString(), ends_at: endsAt.toISOString(), status: "confirmed" })
+        .eq("id", id)
+        .select(APPT_SELECT)
+        .single();
+
+      if (updateErr) return serverError(updateErr.message);
+
+      await supabaseAdmin.from("appointment_status_log").insert({
+        appointment_id: id,
+        old_status: ex.status,
+        new_status: "confirmed",
+        changed_by: ctx.userId,
+        reason: (body.reason as string | undefined) ?? "rescheduled",
+      });
+
+      // ── Email notifications ─────────────────────────────────────────────
+      try {
+        // Fetch business name + owner email
+        const { data: bizRow } = await supabaseAdmin
+          .from("businesses")
+          .select("name, owner:users!businesses_owner_id_fkey(email)")
+          .eq("id", ex.business_id as string)
+          .single();
+
+        // Fetch staff member's email via business_members → users
+        let staffEmail: string | null = null;
+        const staffProfileId = (ex.staff as Record<string, unknown> | null)?.business_member_id as string | null;
+        if (staffProfileId) {
+          const { data: memberRow } = await supabaseAdmin
+            .from("business_members")
+            .select("user:users(email)")
+            .eq("id", staffProfileId)
+            .single();
+          staffEmail = (memberRow as Record<string, unknown>)?.user
+            ? ((memberRow as Record<string, unknown>).user as Record<string, unknown>).email as string
+            : null;
+        }
+
+        const client = ex.client as Record<string, string>;
+        const service = ex.service as Record<string, string>;
+        const biz = bizRow as Record<string, unknown> | null;
+        const ownerEmail = biz?.owner
+          ? ((biz.owner as Record<string, unknown>).email as string | null)
+          : null;
+
+        const emailData = {
+          clientName: `${client.first_name} ${client.last_name}`,
+          salonName: (biz?.name as string) ?? "KaziOne",
+          serviceName: service.name,
+          staffName: (ex.staff as Record<string, string> | null)?.display_name ?? "your stylist",
+          date: startsAt.toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long", year: "numeric", timeZone: "UTC" }),
+          time: startsAt.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: "UTC" }),
+          reference: ex.booking_reference as string,
+          price: `€${(ex.price as number).toFixed(2)}`,
+          manageUrl: `${Deno.env.get("STOREFRONT_BASE_URL") ?? "https://kazione.app"}/client/bookings`,
+        };
+
+        const recipients: string[] = [];
+        if (client.email) recipients.push(client.email);
+        if (staffEmail) recipients.push(staffEmail);
+        if (ownerEmail && ownerEmail !== client.email) recipients.push(ownerEmail);
+
+        const { subject, html } = bookingRescheduleEmail(emailData);
+        for (const to of recipients) {
+          await sendEmail(to, subject, html).catch((e) =>
+            console.warn(`reschedule email to ${to} failed:`, e),
+          );
+        }
+      } catch (emailErr) {
+        console.warn("reschedule email notification failed:", emailErr);
+      }
+
+      return json(normalizePayment(updated));
     }
 
     // ── PATCH ──────────────────────────────────────────────────────────────

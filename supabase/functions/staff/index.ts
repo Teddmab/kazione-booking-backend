@@ -652,45 +652,6 @@ Deno.serve(withLogging("staff", async (req: Request) => {
       });
     }
 
-    // ── DELETE /staff?id= (soft deactivate — NEVER hard delete) ───────────────
-    if (method === "DELETE") {
-      if (!staffId) return badRequest("id query param is required");
-
-      const { data: existing, error: existingErr } = await supabaseAdmin
-        .from("staff_profiles")
-        .select("id, business_id, business_member_id")
-        .eq("id", staffId)
-        .maybeSingle();
-
-      if (existingErr) return serverError(existingErr.message);
-      if (!existing) return notFound("Staff member not found");
-
-      const ctx = await requireOwnerOrManagerCtx(
-        req,
-        (existing as Record<string, unknown>).business_id as string,
-      );
-      if (ctx instanceof Response) return ctx;
-
-      const { error: deactivateErr } = await supabaseAdmin
-        .from("staff_profiles")
-        .update({ is_active: false })
-        .eq("id", staffId)
-        .eq("business_id", ctx.businessId);
-      if (deactivateErr) return serverError(deactivateErr.message);
-
-      // Also deactivate the business membership so they lose dashboard access
-      const memberId = (existing as Record<string, unknown>)
-        .business_member_id as string | null;
-      if (memberId) {
-        await supabaseAdmin
-          .from("business_members")
-          .update({ is_active: false })
-          .eq("id", memberId);
-      }
-
-      return json({ success: true });
-    }
-
     // ── GET /staff?action=overrides&id= ──────────────────────────────────────
     // Returns schedule overrides for a staff member within a date range.
     // Query params: from (YYYY-MM-DD), to (YYYY-MM-DD)
@@ -819,7 +780,7 @@ Deno.serve(withLogging("staff", async (req: Request) => {
     }
 
     // ── DELETE /staff?id= (soft deactivate — NEVER hard delete) ───────────────
-    if (method === "DELETE") {
+    if (method === "DELETE" && !action) {
       if (!staffId) return badRequest("id query param is required");
 
       const { data: existing, error: existingErr } = await supabaseAdmin

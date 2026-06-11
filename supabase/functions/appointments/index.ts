@@ -354,15 +354,10 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
       const newStartsAt = body.starts_at as string | undefined;
       if (!newStartsAt) return badRequest("starts_at is required");
 
-      // Fetch existing appointment with client + staff + business details
+      // Fetch existing appointment — simple select, no embedded joins
       const { data: existing, error: fetchErr } = await supabaseAdmin
         .from("appointments")
-        .select(`
-          business_id, duration_minutes, status, booking_reference, price,
-          client:clients!inner(first_name, last_name, email),
-          staff:staff_profiles(display_name, business_member_id),
-          service:services!inner(name)
-        `)
+        .select("business_id, staff_profile_id, duration_minutes, status, booking_reference, price")
         .eq("id", id)
         .single();
 
@@ -377,14 +372,21 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
       if (isNaN(startsAt.getTime())) return badRequest("starts_at is not a valid ISO date");
       const endsAt = new Date(startsAt.getTime() + durationMs);
 
-      const { data: updated, error: updateErr } = await supabaseAdmin
+      const { error: updateErr } = await supabaseAdmin
         .from("appointments")
         .update({ starts_at: startsAt.toISOString(), ends_at: endsAt.toISOString(), status: "confirmed" })
-        .eq("id", id)
-        .select(APPT_SELECT)
-        .single();
+        .eq("id", id);
 
       if (updateErr) return serverError(updateErr.message);
+
+      // Fetch the updated appointment separately — avoids UPDATE+JOIN issues
+      const { data: updated, error: fetchUpdatedErr } = await supabaseAdmin
+        .from("appointments")
+        .select(APPT_SELECT)
+        .eq("id", id)
+        .single();
+
+      if (fetchUpdatedErr || !updated) return serverError("Failed to fetch updated appointment");
 
       await supabaseAdmin.from("appointment_status_log").insert({
         appointment_id: id,
@@ -396,39 +398,59 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
 
       // ── Email notifications ─────────────────────────────────────────────
       try {
-        // Fetch business name + owner email
+        // Fetch business name
         const { data: bizRow } = await supabaseAdmin
           .from("businesses")
-          .select("name, owner:users!businesses_owner_id_fkey(email)")
+          .select("name")
           .eq("id", ex.business_id as string)
           .single();
 
-        // Fetch staff member's email via business_members → users
-        let staffEmail: string | null = null;
-        const staffProfileId = (ex.staff as Record<string, unknown> | null)?.business_member_id as string | null;
-        if (staffProfileId) {
-          const { data: memberRow } = await supabaseAdmin
-            .from("business_members")
-            .select("user:users(email)")
-            .eq("id", staffProfileId)
-            .single();
-          staffEmail = (memberRow as Record<string, unknown>)?.user
-            ? ((memberRow as Record<string, unknown>).user as Record<string, unknown>).email as string
-            : null;
-        }
-
-        const client = ex.client as Record<string, string>;
-        const service = ex.service as Record<string, string>;
-        const biz = bizRow as Record<string, unknown> | null;
-        const ownerEmail = biz?.owner
-          ? ((biz.owner as Record<string, unknown>).email as string | null)
+        // Fetch owner email via business_members (role = owner)
+        const { data: ownerMember } = await supabaseAdmin
+          .from("business_members")
+          .select("user:users(email)")
+          .eq("business_id", ex.business_id as string)
+          .eq("role", "owner")
+          .eq("is_active", true)
+          .maybeSingle();
+        const ownerEmail = (ownerMember as Record<string, unknown> | null)?.user
+          ? ((ownerMember as Record<string, unknown>).user as Record<string, unknown>).email as string | null
           : null;
 
+        // Fetch staff member's email via staff_profiles → business_members → users
+        let staffEmail: string | null = null;
+        if (ex.staff_profile_id) {
+          const { data: staffRow } = await supabaseAdmin
+            .from("staff_profiles")
+            .select("business_member_id")
+            .eq("id", ex.staff_profile_id as string)
+            .maybeSingle();
+          const memberId = (staffRow as Record<string, unknown> | null)?.business_member_id as string | null;
+          if (memberId) {
+            const { data: memberRow } = await supabaseAdmin
+              .from("business_members")
+              .select("user:users(email)")
+              .eq("id", memberId)
+              .maybeSingle();
+            staffEmail = (memberRow as Record<string, unknown>)?.user
+              ? ((memberRow as Record<string, unknown>).user as Record<string, unknown>).email as string | null
+              : null;
+          }
+        }
+
+        const biz = bizRow as Record<string, unknown> | null;
+        // Get client/service/staff from the freshly-fetched updated appointment
+        const updatedRecord = updated as Record<string, unknown>;
+        const client = updatedRecord.client as Record<string, string>;
+        const service = updatedRecord.service as Record<string, string>;
+        const staffDisplayName = (updatedRecord.staff as Record<string, string> | null)?.display_name ?? "your stylist";
+        const clientEmail = client?.email ?? null;
+
         const emailData = {
-          clientName: `${client.first_name} ${client.last_name}`,
+          clientName: client ? `${client.first_name} ${client.last_name}` : "Client",
           salonName: (biz?.name as string) ?? "KaziOne",
-          serviceName: service.name,
-          staffName: (ex.staff as Record<string, string> | null)?.display_name ?? "your stylist",
+          serviceName: service?.name ?? "Service",
+          staffName: staffDisplayName,
           date: startsAt.toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long", year: "numeric", timeZone: "UTC" }),
           time: startsAt.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: "UTC" }),
           reference: ex.booking_reference as string,
@@ -437,9 +459,9 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
         };
 
         const recipients: string[] = [];
-        if (client.email) recipients.push(client.email);
+        if (clientEmail) recipients.push(clientEmail);
         if (staffEmail) recipients.push(staffEmail);
-        if (ownerEmail && ownerEmail !== client.email) recipients.push(ownerEmail);
+        if (ownerEmail && ownerEmail !== clientEmail) recipients.push(ownerEmail);
 
         const { subject, html } = bookingRescheduleEmail(emailData);
         for (const to of recipients) {

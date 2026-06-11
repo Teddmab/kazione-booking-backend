@@ -319,17 +319,20 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
           is_walk_in: body.is_walk_in ?? false,
           notes: body.notes ?? null,
           internal_notes: body.internal_notes ?? null,
-          status: "confirmed",
+          status: body.staff_profile_id ? "confirmed" : "pending",
         })
         .select(`*, client:clients!inner(id, first_name, last_name, email, phone, avatar_url), service:services!inner(id, name, duration_minutes, price), staff:staff_profiles(id, display_name, avatar_url)`)
         .single();
 
       if (error) return serverError(error.message);
 
+      const apptId = (appointment as Record<string, unknown>).id as string;
+      const initialStatus = body.staff_profile_id ? "confirmed" : "pending";
+
       if ((body.price as number) > 0) {
         await supabaseAdmin.from("payments").insert({
           business_id: ctx.businessId,
-          appointment_id: (appointment as Record<string, unknown>).id,
+          appointment_id: apptId,
           client_id: body.client_id,
           amount: body.price,
           status: "pending",
@@ -338,13 +341,52 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
       }
 
       await supabaseAdmin.from("appointment_status_log").insert({
-        appointment_id: (appointment as Record<string, unknown>).id,
+        appointment_id: apptId,
         old_status: null,
-        new_status: "confirmed",
-        reason: "Manual booking created",
+        new_status: initialStatus,
+        reason: body.staff_profile_id ? "Manual booking created" : "Booking created — awaiting staff assignment",
       });
 
       return json({ ...appointment, payment: null }, 201);
+    }
+
+    // ── PATCH ?action=assign-staff ──────────────────────────────────────────
+    if (method === "PATCH" && action === "assign-staff") {
+      if (!id) return badRequest("id is required");
+      const body = await req.json() as Record<string, unknown>;
+      const staffProfileId = body.staff_profile_id as string | undefined;
+      if (!staffProfileId) return badRequest("staff_profile_id is required");
+
+      const { data: existing, error: fetchErr } = await supabaseAdmin
+        .from("appointments")
+        .select("business_id, status")
+        .eq("id", id)
+        .single();
+
+      if (fetchErr || !existing) return notFound("Appointment not found");
+
+      const ctx = await requireOwnerOrManagerCtx(req, (existing as Record<string, unknown>).business_id as string);
+      if (ctx instanceof Response) return ctx;
+
+      const oldStatus = (existing as Record<string, unknown>).status as string;
+
+      const { data: updated, error: updateErr } = await supabaseAdmin
+        .from("appointments")
+        .update({ staff_profile_id: staffProfileId, status: "confirmed" })
+        .eq("id", id)
+        .select(`*, client:clients!inner(id, first_name, last_name, email, phone, avatar_url), service:services!inner(id, name, duration_minutes, price), staff:staff_profiles(id, display_name, avatar_url), payment:payments(status, amount, method, paid_at)`)
+        .single();
+
+      if (updateErr) return serverError(updateErr.message);
+
+      await supabaseAdmin.from("appointment_status_log").insert({
+        appointment_id: id,
+        old_status: oldStatus,
+        new_status: "confirmed",
+        reason: "Staff assigned",
+      });
+
+      return json(updated);
     }
 
     // ── PATCH ?action=reschedule ────────────────────────────────────────────

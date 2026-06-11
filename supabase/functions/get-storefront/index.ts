@@ -100,6 +100,7 @@ interface StorefrontData {
   businessType: string | null;
   verified: boolean;
   currencyCode: string;
+  storefrontLocale: string;
   countryCode: string | null;
 
   // Marketplace
@@ -210,8 +211,7 @@ Deno.serve(withLogging("get-storefront", async (req: Request) => {
     const slug = url.searchParams.get("slug");
     if (!slug) return badRequest("Missing required query parameter: slug");
 
-    // 2. Parse locale
-    const locale = parseLocale(req);
+    // 2. Locale will be resolved after fetching business_settings below
 
     // 3. Fetch storefront
     const { data: storefront, error: sfErr } = await supabaseAdmin
@@ -245,10 +245,10 @@ Deno.serve(withLogging("get-storefront", async (req: Request) => {
         .eq("id", businessId)
         .single(),
 
-      // Business settings (tax + deposit) — exposed so the booking form shows the real total
+      // Business settings (tax + deposit + locale) — exposed so the booking form shows the real total
       supabaseAdmin
         .from("business_settings")
-        .select("tax_enabled, tax_rate, deposit_percentage, enabled_payment_methods")
+        .select("tax_enabled, tax_rate, deposit_percentage, enabled_payment_methods, storefront_locale")
         .eq("business_id", businessId)
         .maybeSingle(),
 
@@ -317,6 +317,12 @@ Deno.serve(withLogging("get-storefront", async (req: Request) => {
     if (servicesResult.error) throw servicesResult.error;
     const settings = settingsResult.data ?? null;
     if (staffResult.error) throw staffResult.error;
+
+    // Resolve locale: use owner's configured storefront_locale unless it's "auto" or unset
+    const configuredLocale = settings?.storefront_locale as string | null | undefined;
+    const locale = (!configuredLocale || configuredLocale === "auto")
+      ? parseLocale(req)
+      : configuredLocale;
     if (promotionsResult.error) throw promotionsResult.error;
     if (reviewsResult.error) throw reviewsResult.error;
     if (galleryResult.error) throw galleryResult.error;
@@ -492,6 +498,7 @@ Deno.serve(withLogging("get-storefront", async (req: Request) => {
       businessType: (business as Record<string, unknown>).business_type as string | null ?? null,
       verified: storefront.marketplace_featured ?? false,
       currencyCode: business.currency_code ?? "EUR",
+      storefrontLocale: locale,
       countryCode: storefront.country_code ?? (business as Record<string, unknown>).country as string ?? null,
 
       // Marketplace

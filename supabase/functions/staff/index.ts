@@ -691,6 +691,172 @@ Deno.serve(withLogging("staff", async (req: Request) => {
       return json({ success: true });
     }
 
+    // ── GET /staff?action=overrides&id= ──────────────────────────────────────
+    // Returns schedule overrides for a staff member within a date range.
+    // Query params: from (YYYY-MM-DD), to (YYYY-MM-DD)
+    if (method === "GET" && action === "overrides") {
+      if (!staffId) return badRequest("id query param is required");
+
+      const { data: existing, error: existingErr } = await supabaseAdmin
+        .from("staff_profiles")
+        .select("id, business_id")
+        .eq("id", staffId)
+        .maybeSingle();
+      if (existingErr) return serverError(existingErr.message);
+      if (!existing) return notFound("Staff member not found");
+
+      const ctx = await requireOwnerOrManagerCtx(
+        req,
+        (existing as Record<string, unknown>).business_id as string,
+      );
+      if (ctx instanceof Response) return ctx;
+
+      const fromDate = url.searchParams.get("from");
+      const toDate = url.searchParams.get("to");
+
+      let query = supabaseAdmin
+        .from("staff_schedule_overrides")
+        .select("id, override_date, is_working, start_time, end_time, reason, created_at")
+        .eq("staff_profile_id", staffId)
+        .order("override_date", { ascending: true });
+
+      if (fromDate) query = query.gte("override_date", fromDate);
+      if (toDate) query = query.lte("override_date", toDate);
+
+      const { data: overrides, error: overridesErr } = await query;
+      if (overridesErr) return serverError(overridesErr.message);
+      return json(overrides ?? []);
+    }
+
+    // ── POST /staff?action=override&id= ──────────────────────────────────────
+    // Upserts a schedule override for a specific date.
+    // Body: { date: "YYYY-MM-DD", is_working: bool, start_time?: "HH:MM", end_time?: "HH:MM", reason?: string }
+    if (method === "POST" && action === "override") {
+      if (!staffId) return badRequest("id query param is required");
+
+      const { data: existing, error: existingErr } = await supabaseAdmin
+        .from("staff_profiles")
+        .select("id, business_id")
+        .eq("id", staffId)
+        .maybeSingle();
+      if (existingErr) return serverError(existingErr.message);
+      if (!existing) return notFound("Staff member not found");
+
+      const ctx = await requireOwnerOrManagerCtx(
+        req,
+        (existing as Record<string, unknown>).business_id as string,
+      );
+      if (ctx instanceof Response) return ctx;
+
+      const body = await req.json() as Record<string, unknown>;
+      const overrideDate = String(body.date ?? "").trim();
+      const isWorking = Boolean(body.is_working ?? true);
+      const startTime = body.start_time ? String(body.start_time).trim() : null;
+      const endTime = body.end_time ? String(body.end_time).trim() : null;
+      const reason = body.reason ? String(body.reason).trim() : null;
+
+      if (!overrideDate || !/^\d{4}-\d{2}-\d{2}$/.test(overrideDate)) {
+        return badRequest("date must be YYYY-MM-DD");
+      }
+      if (isWorking && (!startTime || !endTime)) {
+        return badRequest("start_time and end_time required when is_working = true");
+      }
+      if (isWorking && startTime! >= endTime!) {
+        return badRequest("start_time must be before end_time");
+      }
+
+      const { data: upserted, error: upsertErr } = await supabaseAdmin
+        .from("staff_schedule_overrides")
+        .upsert(
+          {
+            staff_profile_id: staffId,
+            business_id: ctx.businessId,
+            override_date: overrideDate,
+            is_working: isWorking,
+            start_time: isWorking ? startTime : null,
+            end_time: isWorking ? endTime : null,
+            reason,
+          },
+          { onConflict: "staff_profile_id,override_date" },
+        )
+        .select("id, override_date, is_working, start_time, end_time, reason")
+        .single();
+
+      if (upsertErr) return serverError(upsertErr.message);
+      return json(upserted, 201);
+    }
+
+    // ── DELETE /staff?action=override&id=&date= ───────────────────────────────
+    // Removes a schedule override for a specific date.
+    if (method === "DELETE" && action === "override") {
+      if (!staffId) return badRequest("id query param is required");
+      const overrideDate = url.searchParams.get("date");
+      if (!overrideDate) return badRequest("date query param is required");
+
+      const { data: existing, error: existingErr } = await supabaseAdmin
+        .from("staff_profiles")
+        .select("id, business_id")
+        .eq("id", staffId)
+        .maybeSingle();
+      if (existingErr) return serverError(existingErr.message);
+      if (!existing) return notFound("Staff member not found");
+
+      const ctx = await requireOwnerOrManagerCtx(
+        req,
+        (existing as Record<string, unknown>).business_id as string,
+      );
+      if (ctx instanceof Response) return ctx;
+
+      const { error: delErr } = await supabaseAdmin
+        .from("staff_schedule_overrides")
+        .delete()
+        .eq("staff_profile_id", staffId)
+        .eq("business_id", ctx.businessId)
+        .eq("override_date", overrideDate);
+
+      if (delErr) return serverError(delErr.message);
+      return json({ success: true });
+    }
+
+    // ── DELETE /staff?id= (soft deactivate — NEVER hard delete) ───────────────
+    if (method === "DELETE") {
+      if (!staffId) return badRequest("id query param is required");
+
+      const { data: existing, error: existingErr } = await supabaseAdmin
+        .from("staff_profiles")
+        .select("id, business_id, business_member_id")
+        .eq("id", staffId)
+        .maybeSingle();
+
+      if (existingErr) return serverError(existingErr.message);
+      if (!existing) return notFound("Staff member not found");
+
+      const ctx = await requireOwnerOrManagerCtx(
+        req,
+        (existing as Record<string, unknown>).business_id as string,
+      );
+      if (ctx instanceof Response) return ctx;
+
+      const { error: deactivateErr } = await supabaseAdmin
+        .from("staff_profiles")
+        .update({ is_active: false })
+        .eq("id", staffId)
+        .eq("business_id", ctx.businessId);
+      if (deactivateErr) return serverError(deactivateErr.message);
+
+      // Also deactivate the business membership so they lose dashboard access
+      const memberId = (existing as Record<string, unknown>)
+        .business_member_id as string | null;
+      if (memberId) {
+        await supabaseAdmin
+          .from("business_members")
+          .update({ is_active: false })
+          .eq("id", memberId);
+      }
+
+      return json({ success: true });
+    }
+
     return badRequest(`Method ${method} is not supported`);
   } catch (err) {
     if (err instanceof Response) return err;

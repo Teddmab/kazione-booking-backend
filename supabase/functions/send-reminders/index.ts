@@ -1,6 +1,7 @@
 import { supabaseAdmin } from "../_shared/supabaseAdmin.ts";
 import { corsHeaders, handleCors } from "../_shared/cors.ts";
 import { badRequest, unauthorized, serverError } from "../_shared/errors.ts";
+import { requireOwnerOrManagerCtx } from "../_shared/auth.ts";
 import { withLogging } from "../_shared/logger.ts";
 import { issueCancelToken } from "../_shared/bookingCancelToken.ts";
 
@@ -58,17 +59,17 @@ async function sendEmailInternal(
 
 // ---------------------------------------------------------------------------
 // TASK A — Send 24h appointment reminders
+// Optional businessId scopes to a single business (owner manual trigger).
+// When null, runs across all businesses (cron path).
 // ---------------------------------------------------------------------------
 
-async function sendReminders(): Promise<{ sent: number; errors: number }> {
-  // Fetch all confirmed, un-reminded appointments in a generous 48h look-ahead
-  // window. We then filter down per-business using reminder_hours_before from
-  // business_settings (no direct FK between appointments and business_settings,
-  // so we do the join in application code).
+async function sendReminders(
+  businessId?: string,
+): Promise<{ sent: number; errors: number }> {
   const now = new Date();
   const maxLookahead = new Date(now.getTime() + 49 * 60 * 60 * 1000).toISOString();
 
-  const { data: appointments, error } = await supabaseAdmin
+  let query = supabaseAdmin
     .from("appointments")
     .select(`
       id, starts_at, booking_reference, price, business_id,
@@ -81,6 +82,10 @@ async function sendReminders(): Promise<{ sent: number; errors: number }> {
     .is("reminder_sent_at", null)
     .gte("starts_at", now.toISOString())
     .lte("starts_at", maxLookahead);
+
+  if (businessId) query = query.eq("business_id", businessId);
+
+  const { data: appointments, error } = await query;
 
   if (error) {
     console.error("Failed to query reminder appointments:", error.message);
@@ -108,14 +113,17 @@ async function sendReminders(): Promise<{ sent: number; errors: number }> {
     ]),
   );
 
-  // Filter appointments whose window matches their business's reminder_hours_before
-  const filteredAppointments = (appointments ?? []).filter((appt) => {
-    const hours = settingsMap.get(appt.business_id as string) ?? 24;
-    const windowStart = new Date(now.getTime() + (hours - 1) * 60 * 60 * 1000);
-    const windowEnd = new Date(now.getTime() + (hours + 1) * 60 * 60 * 1000);
-    const startsAt = new Date(appt.starts_at);
-    return startsAt >= windowStart && startsAt <= windowEnd;
-  });
+  // When triggered manually by an owner, skip the timing window check —
+  // they want to send now regardless of the configured reminder_hours_before.
+  const filteredAppointments = businessId
+    ? (appointments ?? [])
+    : (appointments ?? []).filter((appt) => {
+        const hours = settingsMap.get(appt.business_id as string) ?? 24;
+        const windowStart = new Date(now.getTime() + (hours - 1) * 60 * 60 * 1000);
+        const windowEnd = new Date(now.getTime() + (hours + 1) * 60 * 60 * 1000);
+        const startsAt = new Date(appt.starts_at);
+        return startsAt >= windowStart && startsAt <= windowEnd;
+      });
 
   let sent = 0;
   let errors = 0;
@@ -171,7 +179,6 @@ async function sendReminders(): Promise<{ sent: number; errors: number }> {
         salonAddress,
       });
 
-      // Mark reminder as sent
       await supabaseAdmin
         .from("appointments")
         .update({ reminder_sent_at: new Date().toISOString() })
@@ -189,35 +196,49 @@ async function sendReminders(): Promise<{ sent: number; errors: number }> {
 
 // ---------------------------------------------------------------------------
 // TASK B — Mark no-shows (confirmed appointments 30+ min past start)
+// Optional businessId scopes to a single business (owner manual trigger).
 // ---------------------------------------------------------------------------
 
-async function markNoShows(): Promise<{ marked: number; errors: number }> {
+async function markNoShows(
+  businessId?: string,
+): Promise<{ marked: number; errors: number }> {
   const cutoff = new Date(Date.now() - 30 * 60 * 1000).toISOString();
 
-  const { data: appointments, error } = await supabaseAdmin
+  let query = supabaseAdmin
     .from("appointments")
-    .select(`
-      id, business_id,
-      business:businesses!inner(
-        owner_members:business_members!inner(user_id)
-      )
-    `)
+    .select("id, business_id")
     .eq("status", "confirmed")
-    .lt("starts_at", cutoff)
-    .eq("business:businesses.owner_members.role", "owner")
-    .eq("business:businesses.owner_members.is_active", true);
+    .lt("starts_at", cutoff);
+
+  if (businessId) query = query.eq("business_id", businessId);
+
+  const { data: appointments, error } = await query;
 
   if (error) {
     console.error("Failed to query no-show appointments:", error.message);
     return { marked: 0, errors: 1 };
   }
 
+  if (!appointments || appointments.length === 0) return { marked: 0, errors: 0 };
+
+  // Fetch owner user_ids for all distinct businesses in one query
+  const businessIds = [...new Set(appointments.map((a) => a.business_id as string))];
+  const { data: ownerMembers } = await supabaseAdmin
+    .from("business_members")
+    .select("business_id, user_id")
+    .in("business_id", businessIds)
+    .eq("role", "owner")
+    .eq("is_active", true);
+
+  const ownerMap = new Map<string, string>(
+    (ownerMembers ?? []).map((m) => [m.business_id as string, m.user_id as string]),
+  );
+
   let marked = 0;
   let errors = 0;
 
-  for (const appt of appointments ?? []) {
+  for (const appt of appointments) {
     try {
-      // Update status to no_show
       const { error: updateErr } = await supabaseAdmin
         .from("appointments")
         .update({
@@ -229,7 +250,6 @@ async function markNoShows(): Promise<{ marked: number; errors: number }> {
 
       if (updateErr) throw updateErr;
 
-      // Insert status log
       const { error: logErr } = await supabaseAdmin.from("appointment_status_log").insert({
         appointment_id: appt.id,
         old_status: "confirmed",
@@ -238,14 +258,9 @@ async function markNoShows(): Promise<{ marked: number; errors: number }> {
       });
       if (logErr) throw logErr;
 
-      // Notify business owner
-      const business = appt.business as unknown as {
-        owner_members: { user_id: string }[];
-      };
-      const ownerUserId = business.owner_members?.[0]?.user_id;
-
+      const ownerUserId = ownerMap.get(appt.business_id as string);
       if (ownerUserId) {
-        const { error: notifErr } = await supabaseAdmin.from("notifications").insert({
+        await supabaseAdmin.from("notifications").insert({
           business_id: appt.business_id,
           user_id: ownerUserId,
           type: "no_show",
@@ -253,7 +268,6 @@ async function markNoShows(): Promise<{ marked: number; errors: number }> {
           body: `Appointment ${appt.id} was marked as no-show (30+ minutes past start time).`,
           metadata: { appointment_id: appt.id },
         });
-        if (notifErr) throw notifErr;
       }
 
       marked++;
@@ -278,42 +292,59 @@ Deno.serve(withLogging("send-reminders", async (req: Request) => {
     return badRequest("Only POST is allowed");
   }
 
-  if (!CRON_SECRET) {
-    console.error("[send-reminders] CRON_SECRET env var is not set — refusing to run");
-    return new Response(
-      JSON.stringify({ error: { code: "MISCONFIGURED", message: "CRON_SECRET is not configured" } }),
-      { status: 500, headers: { "Content-Type": "application/json" } },
-    );
+  // ── Path 1: CRON_SECRET — runs across all businesses ──────────────────
+  if (verifyCronAuth(req)) {
+    try {
+      const [reminders, noShows] = await Promise.all([
+        sendReminders(),
+        markNoShows(),
+      ]);
+      const result = { ok: true, timestamp: new Date().toISOString(), reminders, no_shows: noShows };
+      console.log("send-reminders (cron) completed:", JSON.stringify(result));
+      return new Response(JSON.stringify(result), {
+        status: 200,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    } catch (err) {
+      console.error("send-reminders fatal error:", err);
+      return serverError(err instanceof Error ? err.message : "Internal server error");
+    }
   }
 
-  if (!verifyCronAuth(req)) {
+  // ── Path 2: owner JWT — runs scoped to their business ─────────────────
+  let body: { business_id?: string } = {};
+  try {
+    body = await req.json();
+  } catch {
+    // empty body is fine
+  }
+
+  if (!body.business_id) {
     return unauthorized("Invalid or missing CRON_SECRET");
   }
 
-  try {
-    // Run both tasks in parallel
-    const [reminders, noShows] = await Promise.all([
-      sendReminders(),
-      markNoShows(),
-    ]);
+  const ctx = await requireOwnerOrManagerCtx(req, body.business_id);
+  if (ctx instanceof Response) return ctx;
 
+  try {
+    const [reminders, noShows] = await Promise.all([
+      sendReminders(ctx.businessId),
+      markNoShows(ctx.businessId),
+    ]);
     const result = {
       ok: true,
       timestamp: new Date().toISOString(),
       reminders,
       no_shows: noShows,
+      triggered_by: ctx.userId,
     };
-
-    console.log("send-reminders completed:", JSON.stringify(result));
-
+    console.log("send-reminders (manual) completed:", JSON.stringify(result));
     return new Response(JSON.stringify(result), {
       status: 200,
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
   } catch (err) {
     console.error("send-reminders fatal error:", err);
-    return serverError(
-      err instanceof Error ? err.message : "Internal server error",
-    );
+    return serverError(err instanceof Error ? err.message : "Internal server error");
   }
 }));

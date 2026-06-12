@@ -143,6 +143,7 @@ Deno.serve(withLogging("send-email", async (req: Request) => {
             reference: body.data.reference ?? "",
             price: body.data.price ?? "",
             manageUrl: body.data.manageUrl ?? "",
+            daysUntil: body.data.daysUntil,
           },
           locale,
         );

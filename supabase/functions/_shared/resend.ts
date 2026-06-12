@@ -246,6 +246,7 @@ interface BookingEmailData {
   reference: string;
   price: string;
   manageUrl: string;
+  daysUntil?: string; // "0" = today, "1" = tomorrow, "7" = in 7 days etc.
 }
 
 interface StaffInviteData {
@@ -357,7 +358,10 @@ const bookingReminderTemplates: Record<
   (d: BookingEmailData) => { subject: string; html: string }
 > = {
   en: (d) => {
-    const subject = `Reminder: Your appointment tomorrow — ${d.reference}`;
+    const days = d.daysUntil !== undefined ? parseInt(d.daysUntil) : 1;
+    const when = days === 0 ? "today" : days === 1 ? "tomorrow" : `on ${d.date}`;
+    const heading_ = days === 0 ? "See you today!" : days === 1 ? "See you tomorrow!" : `See you on ${d.date}!`;
+    const subject = `Reminder: Your appointment ${when} — ${d.reference}`;
     return {
       subject,
       html: renderEmail({
@@ -365,8 +369,8 @@ const bookingReminderTemplates: Record<
         salonName: d.salonName,
         subject,
         body: `
-          ${heading("See you tomorrow!")}
-          ${paragraph(`Hi <strong style="color:${B.textDark};">${d.clientName}</strong>, just a friendly reminder about your appointment tomorrow.`)}
+          ${heading(heading_)}
+          ${paragraph(`Hi <strong style="color:${B.textDark};">${d.clientName}</strong>, just a friendly reminder about your appointment ${when}.`)}
           ${detailTable([
             ["Service", `<strong>${d.serviceName}</strong>`],
             ["Stylist", d.staffName],
@@ -381,7 +385,10 @@ const bookingReminderTemplates: Record<
     };
   },
   et: (d) => {
-    const subject = `Meeldetuletus: Teie kohtumine homme — ${d.reference}`;
+    const days = d.daysUntil !== undefined ? parseInt(d.daysUntil) : 1;
+    const when = days === 0 ? "täna" : days === 1 ? "homme" : `${d.date}`;
+    const heading_ = days === 0 ? "Kohtumiseni täna!" : days === 1 ? "Kohtumiseni homme!" : `Kohtumiseni ${d.date}!`;
+    const subject = `Meeldetuletus: Teie kohtumine ${when} — ${d.reference}`;
     return {
       subject,
       html: renderEmail({
@@ -389,8 +396,8 @@ const bookingReminderTemplates: Record<
         salonName: d.salonName,
         subject,
         body: `
-          ${heading("Kohtumiseni homme!")}
-          ${paragraph(`Tere <strong style="color:${B.textDark};">${d.clientName}</strong>, tuletame meelde Teie kohtumist homme.`)}
+          ${heading(heading_)}
+          ${paragraph(`Tere <strong style="color:${B.textDark};">${d.clientName}</strong>, tuletame meelde Teie kohtumist ${when}.`)}
           ${detailTable([
             ["Teenus", `<strong>${d.serviceName}</strong>`],
             ["Stilist", d.staffName],
@@ -405,7 +412,10 @@ const bookingReminderTemplates: Record<
     };
   },
   fr: (d) => {
-    const subject = `Rappel : Votre rendez-vous demain — ${d.reference}`;
+    const days = d.daysUntil !== undefined ? parseInt(d.daysUntil) : 1;
+    const when = days === 0 ? "aujourd'hui" : days === 1 ? "demain" : `le ${d.date}`;
+    const heading_ = days === 0 ? "À tout à l'heure !" : days === 1 ? "À demain !" : `À ${when} !`;
+    const subject = `Rappel : Votre rendez-vous ${when} — ${d.reference}`;
     return {
       subject,
       html: renderEmail({
@@ -413,8 +423,8 @@ const bookingReminderTemplates: Record<
         salonName: d.salonName,
         subject,
         body: `
-          ${heading("À demain !")}
-          ${paragraph(`Bonjour <strong style="color:${B.textDark};">${d.clientName}</strong>, un rappel pour votre rendez-vous de demain.`)}
+          ${heading(heading_)}
+          ${paragraph(`Bonjour <strong style="color:${B.textDark};">${d.clientName}</strong>, un rappel pour votre rendez-vous ${when}.`)}
           ${detailTable([
             ["Service", `<strong>${d.serviceName}</strong>`],
             ["Styliste", d.staffName],

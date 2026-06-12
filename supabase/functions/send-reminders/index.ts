@@ -174,6 +174,11 @@ async function sendReminders(
         minute: "2-digit",
       });
 
+      // Integer calendar-day difference (midnight UTC comparison)
+      const todayUTC = new Date(now.toISOString().slice(0, 10));
+      const apptDayUTC = new Date(appt.starts_at.slice(0, 10));
+      const daysUntil = Math.round((apptDayUTC.getTime() - todayUTC.getTime()) / 86_400_000);
+
       const storefront = business.storefronts?.[0];
       const salonAddress = [storefront?.address, storefront?.city]
         .filter(Boolean)
@@ -194,6 +199,7 @@ async function sendReminders(
         price: `€${Number(appt.price).toFixed(2)}`,
         manageUrl,
         salonAddress,
+        daysUntil: String(daysUntil),
       });
 
       if (!delivered) {

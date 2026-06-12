@@ -58,13 +58,18 @@ async function sendEmailInternal(
 }
 
 // ---------------------------------------------------------------------------
-// TASK A — Send 24h appointment reminders
-// Optional businessId scopes to a single business (owner manual trigger).
-// When null, runs across all businesses (cron path).
+// TASK A — Send appointment reminders
+//
+// businessId only  → all un-reminded upcoming appointments for that business
+//                    (owner "send all now" — timing window skipped)
+// businessId + appointmentId → single appointment, ignores reminder_sent_at
+//                    so the owner can re-send at will
+// neither          → all businesses, timing window respected (cron path)
 // ---------------------------------------------------------------------------
 
 async function sendReminders(
   businessId?: string,
+  appointmentId?: string,
 ): Promise<{ sent: number; errors: number }> {
   const now = new Date();
   const maxLookahead = new Date(now.getTime() + 49 * 60 * 60 * 1000).toISOString();
@@ -79,11 +84,17 @@ async function sendReminders(
       business:businesses!inner(name, storefronts(address, city))
     `)
     .eq("status", "confirmed")
-    .is("reminder_sent_at", null)
     .gte("starts_at", now.toISOString())
     .lte("starts_at", maxLookahead);
 
-  if (businessId) query = query.eq("business_id", businessId);
+  if (appointmentId) {
+    // Single-appointment manual trigger — fetch regardless of reminder_sent_at
+    query = query.eq("id", appointmentId);
+  } else {
+    // Bulk path: only un-reminded appointments
+    query = query.is("reminder_sent_at", null);
+    if (businessId) query = query.eq("business_id", businessId);
+  }
 
   const { data: appointments, error } = await query;
 
@@ -94,36 +105,39 @@ async function sendReminders(
 
   if (!appointments || appointments.length === 0) return { sent: 0, errors: 0 };
 
-  // Fetch reminder_hours_before for each distinct business
-  const businessIds = [...new Set(appointments.map((a) => a.business_id as string))];
-  const { data: settingsRows, error: settingsErr } = await supabaseAdmin
-    .from("business_settings")
-    .select("business_id, reminder_hours_before")
-    .in("business_id", businessIds);
+  // Fetch reminder_hours_before for each distinct business (cron path only)
+  const needsWindowFilter = !businessId && !appointmentId;
+  let settingsMap = new Map<string, number>();
 
-  if (settingsErr) {
-    console.error("Failed to query business_settings:", settingsErr.message);
-    return { sent: 0, errors: 1 };
+  if (needsWindowFilter) {
+    const businessIds = [...new Set(appointments.map((a: { business_id: unknown }) => a.business_id as string))];
+    const { data: settingsRows, error: settingsErr } = await supabaseAdmin
+      .from("business_settings")
+      .select("business_id, reminder_hours_before")
+      .in("business_id", businessIds);
+
+    if (settingsErr) {
+      console.error("Failed to query business_settings:", settingsErr.message);
+      return { sent: 0, errors: 1 };
+    }
+
+    settingsMap = new Map<string, number>(
+      (settingsRows ?? []).map((s: { business_id: unknown; reminder_hours_before: unknown }) => [
+        s.business_id as string,
+        (s.reminder_hours_before as number) ?? 24,
+      ]),
+    );
   }
 
-  const settingsMap = new Map<string, number>(
-    (settingsRows ?? []).map((s) => [
-      s.business_id as string,
-      (s.reminder_hours_before as number) ?? 24,
-    ]),
-  );
-
-  // When triggered manually by an owner, skip the timing window check —
-  // they want to send now regardless of the configured reminder_hours_before.
-  const filteredAppointments = businessId
-    ? (appointments ?? [])
-    : (appointments ?? []).filter((appt) => {
+  // Apply timing window only for the cron path
+  const filteredAppointments = needsWindowFilter
+    ? (appointments ?? []).filter((appt) => {
         const hours = settingsMap.get(appt.business_id as string) ?? 24;
         const windowStart = new Date(now.getTime() + (hours - 1) * 60 * 60 * 1000);
         const windowEnd = new Date(now.getTime() + (hours + 1) * 60 * 60 * 1000);
-        const startsAt = new Date(appt.starts_at);
-        return startsAt >= windowStart && startsAt <= windowEnd;
-      });
+        return new Date(appt.starts_at) >= windowStart && new Date(appt.starts_at) <= windowEnd;
+      })
+    : (appointments ?? []);
 
   let sent = 0;
   let errors = 0;
@@ -312,7 +326,7 @@ Deno.serve(withLogging("send-reminders", async (req: Request) => {
   }
 
   // ── Path 2: owner JWT — runs scoped to their business ─────────────────
-  let body: { business_id?: string } = {};
+  let body: { business_id?: string; appointment_id?: string } = {};
   try {
     body = await req.json();
   } catch {
@@ -327,10 +341,11 @@ Deno.serve(withLogging("send-reminders", async (req: Request) => {
   if (ctx instanceof Response) return ctx;
 
   try {
-    const [reminders, noShows] = await Promise.all([
-      sendReminders(ctx.businessId),
-      markNoShows(ctx.businessId),
-    ]);
+    const reminders = await sendReminders(ctx.businessId, body.appointment_id);
+    // Skip no-show detection for single-appointment triggers
+    const noShows = body.appointment_id
+      ? { marked: 0, errors: 0 }
+      : await markNoShows(ctx.businessId);
     const result = {
       ok: true,
       timestamp: new Date().toISOString(),

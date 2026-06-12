@@ -16,10 +16,17 @@ interface InsightItem {
   priority: "high" | "medium" | "low";
 }
 
+interface ServiceSuggestion {
+  field: "name" | "description" | "price" | "duration_minutes";
+  suggested_value: string | null;
+  reason: string;
+}
+
 interface ServiceInsight {
   service_name: string;
   severity: "ok" | "warning" | "error";
   issues: string[];
+  suggestions: ServiceSuggestion[];
 }
 
 interface ServiceAnalysisResponse {
@@ -297,14 +304,16 @@ async function callAnthropicServices(
     },
     body: JSON.stringify({
       model: "claude-sonnet-4-6",
-      max_tokens: 1500,
+      max_tokens: 2500,
       system:
         "You are KaziOne AI, a business analyst for beauty and wellness businesses. " +
         "Analyze this service catalog and identify potential issues. " +
         "Check each service for: (1) missing or very short description (<10 words), (2) price anomalies (unusually high/low compared to others, or 0 price), (3) missing category, (4) suspiciously long or short duration relative to the service name. " +
         "Be practical — flag real issues, not minor style preferences. " +
-        'Respond with a JSON object: { "analysis": [{ "service_name": string, "severity": "ok"|"warning"|"error", "issues": string[] }], "summary": string }. ' +
+        'Respond with a JSON object: { "analysis": [{ "service_name": string, "severity": "ok"|"warning"|"error", "issues": string[], "suggestions": [{ "field": "name"|"description"|"price"|"duration_minutes", "suggested_value": string|null, "reason": string }] }], "summary": string }. ' +
         "severity=error means the issue will likely confuse clients (e.g. no description, zero price). severity=warning means it should be reviewed (e.g. vague description). severity=ok means the service looks good. " +
+        "For each issue, include a suggestion entry: for 'description' issues provide a 2-3 sentence professional description as suggested_value; for 'name' issues (capitalisation, typos) provide the corrected name; for 'price' and 'duration_minutes' issues set suggested_value to null since you cannot determine the correct value. " +
+        "Services with severity 'ok' should have an empty suggestions array. " +
         "Do not include any text outside the JSON object.",
       messages: [
         {

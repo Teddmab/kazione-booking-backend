@@ -10,10 +10,28 @@ on:
 jobs:
   remind:
     runs-on: ubuntu-latest
+    environment: production
     steps:
+      - name: Validate secrets
+        run: |
+          if [ -z "$CRON_SECRET" ]; then
+            echo "::error::CRON_SECRET secret is not set. Add it under Settings → Environments → production → Secrets."
+            exit 1
+          fi
+          if [ -z "$SUPABASE_PROJECT_ID" ]; then
+            echo "::error::SUPABASE_PROJECT_ID secret is not set."
+            exit 1
+          fi
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          SUPABASE_PROJECT_ID: ${{ secrets.SUPABASE_PROJECT_ID }}
+
       - name: Trigger send-reminders edge function
         run: |
           curl --fail-with-body -X POST \
-            https://hwvqbsqlvwvedyhfuiwt.supabase.co/functions/v1/send-reminders \
-            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            "https://${SUPABASE_PROJECT_ID}.supabase.co/functions/v1/send-reminders" \
+            -H "Authorization: Bearer ${CRON_SECRET}" \
             -H "Content-Type: application/json"
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          SUPABASE_PROJECT_ID: ${{ secrets.SUPABASE_PROJECT_ID }}

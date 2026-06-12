@@ -41,7 +41,7 @@ async function sendEmailInternal(
   to: string,
   template: string,
   data: Record<string, string>,
-): Promise<void> {
+): Promise<boolean> {
   const res = await fetch(`${FUNCTIONS_URL}/send-email`, {
     method: "POST",
     headers: {
@@ -54,7 +54,9 @@ async function sendEmailInternal(
   if (!res.ok) {
     const body = await res.text();
     console.error(`send-email failed for ${to}: ${res.status} ${body}`);
+    return false;
   }
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -83,16 +85,17 @@ async function sendReminders(
       staff:staff_profiles(display_name),
       business:businesses!inner(name, storefronts(address, city))
     `)
-    .eq("status", "confirmed")
-    .gte("starts_at", now.toISOString())
-    .lte("starts_at", maxLookahead);
+    .eq("status", "confirmed");
 
   if (appointmentId) {
-    // Single-appointment manual trigger — fetch regardless of reminder_sent_at
+    // Manual per-appointment trigger — no time window, allows re-send regardless of reminder_sent_at
     query = query.eq("id", appointmentId);
   } else {
-    // Bulk path: only un-reminded appointments
-    query = query.is("reminder_sent_at", null);
+    // Bulk path: only future un-reminded appointments within the lookahead window
+    query = query
+      .gte("starts_at", now.toISOString())
+      .lte("starts_at", maxLookahead)
+      .is("reminder_sent_at", null);
     if (businessId) query = query.eq("business_id", businessId);
   }
 
@@ -180,7 +183,7 @@ async function sendReminders(
       const cancelToken = await issueCancelToken(appt.id, appt.booking_reference);
       const manageUrl = `${siteUrl}/booking/${appt.booking_reference}?token=${encodeURIComponent(cancelToken)}`;
 
-      await sendEmailInternal(client.email, "booking_reminder", {
+      const delivered = await sendEmailInternal(client.email, "booking_reminder", {
         clientName: `${client.first_name} ${client.last_name}`,
         salonName: business.name,
         serviceName: service.name,
@@ -192,6 +195,11 @@ async function sendReminders(
         manageUrl,
         salonAddress,
       });
+
+      if (!delivered) {
+        errors++;
+        continue;
+      }
 
       await supabaseAdmin
         .from("appointments")

@@ -27,7 +27,11 @@ interface ScanResult {
   raw_total: number | null;
 }
 
-async function callClaudeVision(imageUrl: string): Promise<ScanResult> {
+type ImageSource =
+  | { type: "url"; url: string }
+  | { type: "base64"; media_type: string; data: string };
+
+async function callClaudeVision(imageSource: ImageSource): Promise<ScanResult> {
   const apiKey = Deno.env.get("ANTHROPIC_API_KEY");
   if (!apiKey) throw new Error("ANTHROPIC_API_KEY not configured");
 
@@ -58,6 +62,10 @@ Rules:
 - Do NOT include taxes/VAT as a separate line item
 - Respond ONLY with the JSON object, no other text`;
 
+  const claudeImageSource = imageSource.type === "url"
+    ? { type: "url", url: imageSource.url }
+    : { type: "base64", media_type: imageSource.media_type, data: imageSource.data };
+
   const res = await fetch(ANTHROPIC_URL, {
     method: "POST",
     headers: {
@@ -74,10 +82,7 @@ Rules:
           content: [
             {
               type: "image",
-              source: {
-                type: "url",
-                url: imageUrl,
-              },
+              source: claudeImageSource,
             },
             {
               type: "text",
@@ -130,16 +135,23 @@ Deno.serve(withLogging("scan-invoice", async (req: Request) => {
 
   try {
     const body = await req.json() as Record<string, unknown>;
-    const { business_id, image_url } = body;
+    const { business_id, image_url, image_base64, media_type } = body;
 
     if (!business_id || typeof business_id !== "string") return badRequest("business_id is required");
-    if (!image_url || typeof image_url !== "string") return badRequest("image_url is required");
+    if (!image_url && !image_base64) return badRequest("Either image_url or image_base64 is required");
 
     const ctx = await requireOwnerOrManagerCtx(req, business_id);
     if (ctx instanceof Response) return ctx;
 
     // Parse invoice with Claude vision
-    const scanned = await callClaudeVision(image_url);
+    const imageSource: ImageSource = image_base64
+      ? {
+          type: "base64",
+          media_type: typeof media_type === "string" ? media_type : "image/jpeg",
+          data: image_base64 as string,
+        }
+      : { type: "url", url: image_url as string };
+    const scanned = await callClaudeVision(imageSource);
 
     // Try to match supplier_hint against existing suppliers for this business
     let matchedSupplier: { id: string; name: string } | null = null;

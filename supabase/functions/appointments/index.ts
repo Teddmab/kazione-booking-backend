@@ -523,10 +523,10 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
       if (!id) return badRequest("id is required");
       const body = await req.json() as Record<string, unknown>;
 
-      // Fetch appointment to get business_id for auth
+      // Fetch appointment to get business_id for auth (+ service_id for stock-out)
       const { data: existing, error: fetchErr } = await supabaseAdmin
         .from("appointments")
-        .select("status, business_id")
+        .select("status, business_id, service_id")
         .eq("id", id)
         .single();
 
@@ -565,6 +565,54 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
         changed_by: changedBy ?? null,
         reason: reason ?? null,
       });
+
+      // Auto stock-out: when appointment completed, deduct product usage
+      if (status === "completed") {
+        const existingRow = existing as Record<string, unknown>;
+        const serviceId = existingRow.service_id as string | null;
+        const businessId = existingRow.business_id as string;
+
+        if (serviceId) {
+          const { data: usageRows } = await supabaseAdmin
+            .from("service_product_usage")
+            .select("product_id, quantity_per_service")
+            .eq("service_id", serviceId);
+
+          if (usageRows && usageRows.length > 0) {
+            const movements = usageRows.map((u: Record<string, unknown>) => ({
+              business_id: businessId,
+              product_id: u.product_id as string,
+              movement_type: "service_use",
+              quantity: -(Number(u.quantity_per_service)),
+              reference_id: id,
+              reference_type: "appointment",
+              created_by: changedBy ?? null,
+            }));
+
+            const { error: mvErr } = await supabaseAdmin.from("stock_movements").insert(movements);
+            if (mvErr) console.error("stock_movements insert error:", mvErr.message);
+
+            // Decrement current_stock for each product
+            for (const u of usageRows as Record<string, unknown>[]) {
+              const qty = Number(u.quantity_per_service);
+              const { data: prod } = await supabaseAdmin
+                .from("product_catalog")
+                .select("current_stock")
+                .eq("id", u.product_id as string)
+                .single();
+              if (prod) {
+                await supabaseAdmin
+                  .from("product_catalog")
+                  .update({
+                    current_stock: (prod as Record<string, unknown>).current_stock as number - qty,
+                    updated_at: new Date().toISOString(),
+                  })
+                  .eq("id", u.product_id as string);
+              }
+            }
+          }
+        }
+      }
 
       return json(normalizePayment(data));
     }

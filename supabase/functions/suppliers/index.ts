@@ -244,6 +244,50 @@ Deno.serve(withLogging("suppliers", async (req: Request) => {
           .single();
 
         if (error) return serverError(error.message);
+
+        // Auto stock-in: when order received, create stock_movements + update current_stock
+        if (status === "received" && data) {
+          const order = data as Record<string, unknown>;
+          const businessId = order.business_id as string;
+          const items = (order.items as Record<string, unknown>[]) ?? [];
+          const linkedItems = items.filter((i) => i.product_id != null);
+
+          if (linkedItems.length > 0) {
+            const movements = linkedItems.map((item) => ({
+              business_id: businessId,
+              product_id: item.product_id as string,
+              movement_type: "purchase",
+              quantity: Number(item.quantity),
+              unit_cost: item.unit_price != null ? Number(item.unit_price) : null,
+              reference_id: id,
+              reference_type: "supplier_order",
+              created_by: ctx.userId,
+            }));
+
+            const { error: mvErr } = await supabaseAdmin.from("stock_movements").insert(movements);
+            if (mvErr) console.error("stock_movements insert error:", mvErr.message);
+
+            // Update current_stock for each linked product
+            for (const item of linkedItems) {
+              const qty = Number(item.quantity);
+              const { data: prod } = await supabaseAdmin
+                .from("product_catalog")
+                .select("current_stock")
+                .eq("id", item.product_id as string)
+                .single();
+              if (prod) {
+                await supabaseAdmin
+                  .from("product_catalog")
+                  .update({
+                    current_stock: (prod as Record<string, unknown>).current_stock as number + qty,
+                    updated_at: new Date().toISOString(),
+                  })
+                  .eq("id", item.product_id as string);
+              }
+            }
+          }
+        }
+
         return json(data);
       }
 

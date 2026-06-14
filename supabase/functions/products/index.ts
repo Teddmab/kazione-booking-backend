@@ -62,7 +62,7 @@ Deno.serve(withLogging("products", async (req: Request) => {
           .eq("service_id", serviceId);
 
         if (error) return serverError(error.message);
-        return json({ data: data ?? [] });
+        return json({ items: data ?? [] });
       }
 
       // GET /products?id=
@@ -129,7 +129,7 @@ Deno.serve(withLogging("products", async (req: Request) => {
         };
       });
 
-      return json({ data: products, total: count ?? 0 });
+      return json({ products, total: count ?? 0 });
     }
 
     // ── POST ───────────────────────────────────────────────────────────────

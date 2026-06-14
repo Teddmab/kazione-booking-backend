@@ -617,6 +617,35 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
       return json(normalizePayment(data));
     }
 
+    // ── DELETE ?id= ────────────────────────────────────────────────────────
+    if (method === "DELETE") {
+      if (!id) return badRequest("id is required");
+
+      const { data: existing } = await supabaseAdmin
+        .from("appointments")
+        .select("business_id, status")
+        .eq("id", id)
+        .single();
+
+      if (!existing) return notFound("Appointment not found");
+
+      const appt = existing as Record<string, unknown>;
+      if (appt.status !== "completed") {
+        return json(
+          { error: { code: "FORBIDDEN", message: "Only completed appointments can be deleted" } },
+          403,
+        );
+      }
+
+      const ctx = await requireOwnerOrManagerCtx(req, appt.business_id as string);
+      if (ctx instanceof Response) return ctx;
+
+      const { error } = await supabaseAdmin.from("appointments").delete().eq("id", id);
+      if (error) return serverError(error.message);
+
+      return json({ ok: true });
+    }
+
     return badRequest("Method not allowed");
   } catch (err) {
     if (err instanceof Response) return err;

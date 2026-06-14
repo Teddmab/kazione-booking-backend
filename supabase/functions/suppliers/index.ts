@@ -245,45 +245,99 @@ Deno.serve(withLogging("suppliers", async (req: Request) => {
 
         if (error) return serverError(error.message);
 
-        // Auto stock-in: when order received, create stock_movements + update current_stock
+        // Auto stock-in: when order received, resolve/create products then update stock
         if (status === "received" && data) {
           const order = data as Record<string, unknown>;
           const businessId = order.business_id as string;
+          const supplierId = order.supplier_id as string | null;
           const items = (order.items as Record<string, unknown>[]) ?? [];
-          const linkedItems = items.filter((i) => i.product_id != null);
 
-          if (linkedItems.length > 0) {
-            const movements = linkedItems.map((item) => ({
+          for (const item of items) {
+            const qty = Number(item.quantity);
+            const unitCost = item.unit_price != null ? Number(item.unit_price) : null;
+            const productName = (item.product_name as string).trim();
+            const sku = (item.sku as string | null) ?? null;
+
+            // Resolve product: prefer product_id already set, else match by SKU or name
+            let productId = item.product_id as string | null ?? null;
+
+            if (!productId) {
+              // Try to find an existing product for this business by SKU first, then name
+              let matchQuery = supabaseAdmin
+                .from("product_catalog")
+                .select("id, current_stock")
+                .eq("business_id", businessId)
+                .eq("is_active", true);
+
+              if (sku) {
+                matchQuery = matchQuery.eq("sku", sku);
+              } else {
+                matchQuery = matchQuery.ilike("name", productName);
+              }
+
+              const { data: match } = await matchQuery.maybeSingle();
+
+              if (match) {
+                productId = (match as Record<string, unknown>).id as string;
+              } else {
+                // Auto-create product from order item
+                const { data: created, error: createErr } = await supabaseAdmin
+                  .from("product_catalog")
+                  .insert({
+                    business_id: businessId,
+                    supplier_id: supplierId,
+                    name: productName,
+                    sku: sku,
+                    unit: "unit",
+                    unit_cost: unitCost,
+                    current_stock: 0,
+                    is_active: true,
+                  })
+                  .select("id")
+                  .single();
+
+                if (createErr) {
+                  console.error("product auto-create error:", createErr.message);
+                  continue;
+                }
+                productId = (created as Record<string, unknown>).id as string;
+              }
+
+              // Back-fill product_id on the order item for future reference
+              await supabaseAdmin
+                .from("supplier_order_items")
+                .update({ product_id: productId })
+                .eq("id", item.id as string);
+            }
+
+            // Create stock movement
+            const { error: mvErr } = await supabaseAdmin.from("stock_movements").insert({
               business_id: businessId,
-              product_id: item.product_id as string,
+              product_id: productId,
               movement_type: "purchase",
-              quantity: Number(item.quantity),
-              unit_cost: item.unit_price != null ? Number(item.unit_price) : null,
+              quantity: qty,
+              unit_cost: unitCost,
               reference_id: id,
               reference_type: "supplier_order",
               created_by: ctx.userId,
-            }));
-
-            const { error: mvErr } = await supabaseAdmin.from("stock_movements").insert(movements);
+            });
             if (mvErr) console.error("stock_movements insert error:", mvErr.message);
 
-            // Update current_stock for each linked product
-            for (const item of linkedItems) {
-              const qty = Number(item.quantity);
-              const { data: prod } = await supabaseAdmin
+            // Increment current_stock
+            const { data: prod } = await supabaseAdmin
+              .from("product_catalog")
+              .select("current_stock")
+              .eq("id", productId)
+              .single();
+            if (prod) {
+              await supabaseAdmin
                 .from("product_catalog")
-                .select("current_stock")
-                .eq("id", item.product_id as string)
-                .single();
-              if (prod) {
-                await supabaseAdmin
-                  .from("product_catalog")
-                  .update({
-                    current_stock: (prod as Record<string, unknown>).current_stock as number + qty,
-                    updated_at: new Date().toISOString(),
-                  })
-                  .eq("id", item.product_id as string);
-              }
+                .update({
+                  current_stock: (prod as Record<string, unknown>).current_stock as number + qty,
+                  unit_cost: unitCost ?? (prod as Record<string, unknown>).unit_cost,
+                  updated_at: new Date().toISOString(),
+                })
+                .eq("id", productId);
             }
           }
         }

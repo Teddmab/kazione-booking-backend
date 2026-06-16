@@ -96,6 +96,8 @@ Deno.serve(withLogging("services", async (req: Request) => {
           image_url_2,
           image_url_3,
           display_order,
+          staff_commission_type,
+          staff_commission_value,
           created_at,
           updated_at,
           category:service_categories(name)
@@ -174,6 +176,10 @@ Deno.serve(withLogging("services", async (req: Request) => {
           image_url_2: (body.image_url_2 as string | undefined) ?? null,
           image_url_3: (body.image_url_3 as string | undefined) ?? null,
           display_order: Number(body.display_order ?? 0),
+          staff_commission_type: (["percentage", "fixed"].includes(
+            String(body.staff_commission_type ?? "none")
+          ) ? String(body.staff_commission_type) : "none"),
+          staff_commission_value: parseMoney(body.staff_commission_value ?? null),
         })
         .select(`
           id,
@@ -192,6 +198,8 @@ Deno.serve(withLogging("services", async (req: Request) => {
           image_url_2,
           image_url_3,
           display_order,
+          staff_commission_type,
+          staff_commission_value,
           created_at,
           updated_at,
           category:service_categories(name)
@@ -303,6 +311,19 @@ Deno.serve(withLogging("services", async (req: Request) => {
         );
       }
 
+      if (body.staff_commission_type !== undefined) {
+        const ct = String(body.staff_commission_type ?? "none");
+        if (!["none", "percentage", "fixed"].includes(ct)) {
+          return badRequest("staff_commission_type must be none, percentage, or fixed");
+        }
+        updatePayload.staff_commission_type = ct;
+        if (ct === "none") updatePayload.staff_commission_value = null;
+      }
+
+      if (body.staff_commission_value !== undefined) {
+        updatePayload.staff_commission_value = parseMoney(body.staff_commission_value) ?? null;
+      }
+
       if (Object.keys(updatePayload).length === 0) {
         return badRequest("No valid fields provided for update");
       }
@@ -329,6 +350,8 @@ Deno.serve(withLogging("services", async (req: Request) => {
           image_url_2,
           image_url_3,
           display_order,
+          staff_commission_type,
+          staff_commission_value,
           created_at,
           updated_at,
           category:service_categories(name)

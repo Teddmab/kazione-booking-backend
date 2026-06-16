@@ -93,7 +93,7 @@ Deno.serve(withLogging("me", async (req: Request) => {
         .maybeSingle(),
       supabaseAdmin
         .from("business_members")
-        .select("business_id, role, businesses(name, slug, business_type)")
+        .select("id, business_id, role, businesses(name, slug, business_type)")
         .eq("user_id", user.id)
         .eq("is_active", true)
         .order("created_at", { ascending: true }),
@@ -101,18 +101,46 @@ Deno.serve(withLogging("me", async (req: Request) => {
 
     const profile = profileResult.data ?? null;
     const memberships = (membershipsResult.data ?? []) as unknown as Array<{
+      id: string;
       business_id: string;
       role: string;
       businesses: { name: string; slug: string; business_type: string | null } | null;
     }>;
 
-    const businesses = memberships.map((m) => ({
-      businessId: m.business_id,
-      businessName: m.businesses?.name ?? "",
-      slug: m.businesses?.slug ?? "",
-      businessType: m.businesses?.business_type ?? null,
-      role: m.role,
-    }));
+    // Fetch linked staff profiles so we can surface position + staffProfileId
+    // (staff_profiles.business_member_id → business_members.id)
+    const memberIds = memberships.map((m) => m.id);
+    const staffProfileMap = new Map<
+      string,
+      { id: string; position: string | null }
+    >();
+    if (memberIds.length > 0) {
+      const { data: spRows } = await supabaseAdmin
+        .from("staff_profiles")
+        .select("id, business_member_id, position")
+        .in("business_member_id", memberIds)
+        .eq("is_active", true);
+      for (const sp of spRows ?? []) {
+        const row = sp as { id: string; business_member_id: string; position: string | null };
+        staffProfileMap.set(row.business_member_id, {
+          id: row.id,
+          position: row.position ?? null,
+        });
+      }
+    }
+
+    const businesses = memberships.map((m) => {
+      const sp = staffProfileMap.get(m.id) ?? null;
+      return {
+        businessId: m.business_id,
+        businessName: m.businesses?.name ?? "",
+        slug: m.businesses?.slug ?? "",
+        businessType: m.businesses?.business_type ?? null,
+        role: m.role,
+        staffProfileId: sp?.id ?? null,
+        position: sp?.position ?? null,
+      };
+    });
 
     const tenant = businesses.length > 0 ? businesses[0] : null;
 

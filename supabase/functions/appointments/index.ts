@@ -310,7 +310,7 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
       const { data, error, count } = await query;
       if (error) return serverError(error.message);
 
-      const appointments = (data ?? []).map((row) => {
+      const appointments = (data ?? []).map((row: Record<string, unknown>) => {
         const normalized = normalizePayment(row as Record<string, unknown>);
         if (!callerStaffProfileId) return normalized;
 

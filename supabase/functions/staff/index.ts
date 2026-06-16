@@ -69,6 +69,7 @@ Deno.serve(withLogging("staff", async (req: Request) => {
         .select(`
           id,
           display_name,
+          position,
           avatar_url,
           is_active,
           invited_email,
@@ -153,6 +154,7 @@ Deno.serve(withLogging("staff", async (req: Request) => {
         return {
           id: row.id,
           display_name: row.display_name,
+          position: (row.position as string | null) ?? null,
           email: memberInfo?.email ?? invitedEmail ?? null,
           role: memberInfo?.role ?? "staff",
           is_active: row.is_active,
@@ -244,6 +246,8 @@ Deno.serve(withLogging("staff", async (req: Request) => {
         }
       }
 
+      const position = String(body.position ?? "").trim() || null;
+
       // Create the staff profile (active immediately — owner is adding them)
       const { data: staffProfile, error: staffErr } = await supabaseAdmin
         .from("staff_profiles")
@@ -251,9 +255,10 @@ Deno.serve(withLogging("staff", async (req: Request) => {
           business_id: ctx.businessId,
           business_member_id: memberId,
           display_name: name,
+          position,
           is_active: true,
         })
-        .select("id, display_name, avatar_url, is_active")
+        .select("id, display_name, position, avatar_url, is_active")
         .single();
 
       if (staffErr) return serverError(staffErr.message);
@@ -263,6 +268,7 @@ Deno.serve(withLogging("staff", async (req: Request) => {
         {
           id: sp.id,
           display_name: sp.display_name,
+          position: sp.position ?? null,
           email,
           role,
           is_active: sp.is_active,
@@ -497,6 +503,9 @@ Deno.serve(withLogging("staff", async (req: Request) => {
         if (!dn) return badRequest("display_name cannot be empty");
         profileUpdate.display_name = dn;
       }
+      if (body.position !== undefined) {
+        profileUpdate.position = String(body.position ?? "").trim() || null;
+      }
       if (body.bio !== undefined) {
         profileUpdate.bio = String(body.bio ?? "").trim() || null;
       }
@@ -554,7 +563,7 @@ Deno.serve(withLogging("staff", async (req: Request) => {
       const { data: updated, error: fetchErr } = await supabaseAdmin
         .from("staff_profiles")
         .select(`
-          id, display_name, bio, avatar_url, specialties,
+          id, display_name, position, bio, avatar_url, specialties,
           calendar_color, is_active, created_at,
           business_member:business_members(id, role, users(email))
         `)

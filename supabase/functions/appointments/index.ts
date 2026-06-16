@@ -15,8 +15,8 @@ function json(data: unknown, status = 200): Response {
 const APPT_SELECT = `
   *,
   client:clients!inner(id, first_name, last_name, email, phone, avatar_url),
-  service:services!inner(id, name, duration_minutes, price),
-  staff:staff_profiles(id, display_name, avatar_url),
+  service:services!inner(id, name, duration_minutes, price, staff_commission_type, staff_commission_value),
+  staff:staff_profiles(id, display_name, avatar_url, commission_rate),
   payment:payments(status, amount, method, paid_at)
 `;
 
@@ -124,10 +124,35 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
       const businessId = url.searchParams.get("business_id");
       if (!businessId) return badRequest("business_id is required");
 
-      // Verify user is at least a business member for reads
+      // Verify user is at least a business member for reads.
+      // If the caller is a staff member, capture their staff_profile_id
+      // so we can filter the appointment list to only their assignments.
+      let callerStaffProfileId: string | null = null;
       try {
         const user = await verifyAuth(req);
-        await verifyBusinessMember(user.id, businessId);
+        const { data: memberRow, error: memberErr } = await supabaseAdmin
+          .from("business_members")
+          .select("id, role")
+          .eq("user_id", user.id)
+          .eq("business_id", businessId)
+          .eq("is_active", true)
+          .maybeSingle();
+        if (memberErr || !memberRow) {
+          return new Response(
+            JSON.stringify({ error: { code: "FORBIDDEN", message: "Not a member of this business" } }),
+            { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+          );
+        }
+        const callerRole = (memberRow as { id: string; role: string }).role;
+        if (callerRole === "staff") {
+          const { data: sp } = await supabaseAdmin
+            .from("staff_profiles")
+            .select("id")
+            .eq("business_member_id", (memberRow as { id: string }).id)
+            .eq("business_id", businessId)
+            .maybeSingle();
+          callerStaffProfileId = (sp as { id: string } | null)?.id ?? null;
+        }
       } catch (e) {
         if (e instanceof Response) return e;
         throw e;
@@ -267,7 +292,12 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
       if (dateFrom) query = query.gte("starts_at", `${dateFrom}T00:00:00`);
       if (dateTo)   query = query.lte("starts_at", `${dateTo}T23:59:59`);
       if (statusParams?.length) query = query.in("status", statusParams);
-      if (staffId) query = query.eq("staff_profile_id", staffId);
+      // Staff callers: restrict to their own appointments; owner/manager: respect optional staffId param
+      if (callerStaffProfileId) {
+        query = query.eq("staff_profile_id", callerStaffProfileId);
+      } else if (staffId) {
+        query = query.eq("staff_profile_id", staffId);
+      }
       if (search) {
         query = query.or(
           `client.first_name.ilike.%${search}%,client.last_name.ilike.%${search}%,client.email.ilike.%${search}%`,
@@ -280,10 +310,31 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
       const { data, error, count } = await query;
       if (error) return serverError(error.message);
 
-      return json({
-        appointments: (data ?? []).map(normalizePayment),
-        total: count ?? 0,
+      const appointments = (data ?? []).map((row) => {
+        const normalized = normalizePayment(row as Record<string, unknown>);
+        if (!callerStaffProfileId) return normalized;
+
+        // Calculate commission_earned for staff view
+        const svc = (row as Record<string, unknown>).service as Record<string, unknown> | null;
+        const staffRow = (row as Record<string, unknown>).staff as Record<string, unknown> | null;
+        const price = Number((row as Record<string, unknown>).price ?? 0);
+        const commType = (svc?.staff_commission_type as string) ?? "none";
+        const commValue = Number(svc?.staff_commission_value ?? 0);
+        const staffRate = Number(staffRow?.commission_rate ?? 0);
+
+        let commissionEarned: number | null = null;
+        if (commType === "percentage" && commValue > 0) {
+          commissionEarned = Math.round(price * commValue / 100 * 100) / 100;
+        } else if (commType === "fixed" && commValue > 0) {
+          commissionEarned = commValue;
+        } else if (staffRate > 0) {
+          commissionEarned = Math.round(price * staffRate / 100 * 100) / 100;
+        }
+
+        return { ...normalized, commission_earned: commissionEarned };
       });
+
+      return json({ appointments, total: count ?? 0 });
     }
 
     // ── POST ───────────────────────────────────────────────────────────────

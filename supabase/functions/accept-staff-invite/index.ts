@@ -1,15 +1,8 @@
 import { supabaseAdmin } from "../_shared/supabaseAdmin.ts";
-import { corsHeaders, handleCors } from "../_shared/cors.ts";
+import { handleCors, jsonCors } from "../_shared/cors.ts";
 import { badRequest, forbidden, notFound, serverError } from "../_shared/errors.ts";
 import { verifyAuth } from "../_shared/auth.ts";
 import { withLogging } from "../_shared/logger.ts";
-
-function json(data: unknown, status = 200): Response {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: { ...corsHeaders, "Content-Type": "application/json" },
-  });
-}
 
 /**
  * POST /accept-staff-invite
@@ -29,7 +22,7 @@ Deno.serve(withLogging("accept-staff-invite", async (req: Request) => {
   if (corsResp) return corsResp;
 
   if (req.method !== "POST") {
-    return json({ error: { code: "METHOD_NOT_ALLOWED", message: "Only POST is allowed" } }, 405);
+    return jsonCors(req, { error: { code: "METHOD_NOT_ALLOWED", message: "Only POST is allowed" } }, 405);
   }
 
   try {
@@ -53,7 +46,7 @@ Deno.serve(withLogging("accept-staff-invite", async (req: Request) => {
 
     // Idempotent — return success immediately if already active
     if (sp.is_active) {
-      return json({ success: true, already_active: true, business_id: sp.business_id });
+      return jsonCors(req, { success: true, already_active: true, business_id: sp.business_id });
     }
 
     // Security: the logged-in user's email must match the invited_email on the profile
@@ -109,7 +102,7 @@ Deno.serve(withLogging("accept-staff-invite", async (req: Request) => {
       .eq("id", body.staff_profile_id);
     if (activateErr) throw activateErr;
 
-    return json({ success: true, business_id: businessId });
+    return jsonCors(req, { success: true, business_id: businessId });
   } catch (err) {
     if (err instanceof Response) return err;
     console.error("accept-staff-invite error:", err);

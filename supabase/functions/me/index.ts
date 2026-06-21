@@ -1,15 +1,8 @@
 import { supabaseAdmin } from "../_shared/supabaseAdmin.ts";
-import { corsHeaders, handleCors } from "../_shared/cors.ts";
+import { handleCors, jsonCors } from "../_shared/cors.ts";
 import { badRequest, serverError } from "../_shared/errors.ts";
 import { withLogging } from "../_shared/logger.ts";
 import { verifyAuth } from "../_shared/auth.ts";
-
-function json(data: unknown, status = 200): Response {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: { ...corsHeaders, "Content-Type": "application/json" },
-  });
-}
 
 /**
  * GET /me — Returns authenticated user's profile + all business memberships.
@@ -25,7 +18,7 @@ Deno.serve(withLogging("me", async (req: Request) => {
   if (corsResp) return corsResp;
 
   if (req.method !== "GET" && req.method !== "PATCH") {
-    return json({
+    return jsonCors(req, {
       error: {
         code: "METHOD_NOT_ALLOWED",
         message: "Only GET and PATCH are allowed",
@@ -82,7 +75,7 @@ Deno.serve(withLogging("me", async (req: Request) => {
 
       if (updateErr) throw updateErr;
 
-      return json({ profile: updatedProfile ?? null });
+      return jsonCors(req, { profile: updatedProfile ?? null });
     }
 
     const [profileResult, membershipsResult] = await Promise.all([
@@ -144,7 +137,7 @@ Deno.serve(withLogging("me", async (req: Request) => {
 
     const tenant = businesses.length > 0 ? businesses[0] : null;
 
-    return json({ profile, tenant, businesses });
+    return jsonCors(req, { profile, tenant, businesses });
   } catch (e) {
     if (e instanceof Response) return e;
     console.error("me error:", e);

@@ -1,5 +1,5 @@
 import { supabaseAdmin } from "../_shared/supabaseAdmin.ts";
-import { corsHeaders, handleCors } from "../_shared/cors.ts";
+import { corsHeadersFor, handleCors } from "../_shared/cors.ts";
 import { badRequest, serverError } from "../_shared/errors.ts";
 import { withLogging } from "../_shared/logger.ts";
 
@@ -102,7 +102,7 @@ Deno.serve(withLogging("get-availability", async (req: Request) => {
     const today = new Date();
     today.setUTCHours(0, 0, 0, 0);
     if (requestedDate < today) {
-      return jsonOk({
+      return jsonOk(req, {
         date: dateStr!,
         dayName: DAY_NAMES[requestedDate.getUTCDay()],
         service: null,
@@ -126,7 +126,7 @@ Deno.serve(withLogging("get-availability", async (req: Request) => {
     maxDate.setUTCDate(maxDate.getUTCDate() + futureDays);
 
     if (requestedDate > maxDate) {
-      return jsonOk({
+      return jsonOk(req, {
         date: dateStr!,
         dayName: DAY_NAMES[requestedDate.getUTCDay()],
         service: null,
@@ -329,11 +329,11 @@ Deno.serve(withLogging("get-availability", async (req: Request) => {
 // Utility
 // ---------------------------------------------------------------------------
 
-function jsonOk(body: unknown): Response {
+function jsonOk(req: Request, body: unknown): Response {
   return new Response(JSON.stringify(body), {
     status: 200,
     headers: {
-      ...corsHeaders,
+      ...corsHeadersFor(req),
       "Content-Type": "application/json",
       "Cache-Control": "public, max-age=30",
     },

@@ -252,7 +252,7 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
         .maybeSingle(),
       supabaseAdmin
         .from("businesses")
-        .select("name, currency_code")
+        .select("name, currency_code, logo_url")
         .eq("id", business_id)
         .single(),
     ]);
@@ -637,6 +637,7 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
           clientEmail: client.email ?? null,
           clientPhone: client.phone ?? null,
           salonName: business.name,
+          salonLogoUrl: business.logo_url ?? null,
           serviceName: service.name,
           staffName,
           date,

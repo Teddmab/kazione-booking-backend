@@ -5,7 +5,7 @@ import { verifyAuth } from "../_shared/auth.ts";
 import { createPaymentIntent } from "../_shared/stripe.ts";
 import { withLogging } from "../_shared/logger.ts";
 import { checkRateLimit } from "../_shared/rateLimit.ts";
-import { bookingConfirmationEmail, sendEmail } from "../_shared/resend.ts";
+import { bookingConfirmationEmail, bookingReceivedOwnerEmail, sendEmail } from "../_shared/resend.ts";
 import { issueCancelToken } from "../_shared/bookingCancelToken.ts";
 
 // ---------------------------------------------------------------------------
@@ -246,7 +246,7 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
       supabaseAdmin
         .from("business_settings")
         .select(
-          "deposit_percentage, tax_enabled, tax_rate, stripe_account_id, enabled_payment_methods",
+          "deposit_percentage, tax_enabled, tax_rate, stripe_account_id, enabled_payment_methods, booking_notification_email",
         )
         .eq("business_id", business_id)
         .maybeSingle(),
@@ -626,6 +626,27 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
       if (client.email) {
         sendEmail(client.email, emailData.subject, emailData.html).catch(
           (err) => console.error("Email send failed:", err),
+        );
+      }
+
+      // Send owner notification email if configured
+      const ownerNotifEmail = settings?.booking_notification_email as string | null | undefined;
+      if (ownerNotifEmail) {
+        const ownerEmailData = bookingReceivedOwnerEmail({
+          clientName: first,
+          clientEmail: client.email ?? null,
+          clientPhone: client.phone ?? null,
+          salonName: business.name,
+          serviceName: service.name,
+          staffName,
+          date,
+          time,
+          reference: bookingReference,
+          price: `${currencyCode === "EUR" ? "€" : currencyCode} ${totalAmount.toFixed(2)}`,
+          manageUrl: `${appUrl}/owner`,
+        });
+        sendEmail(ownerNotifEmail, ownerEmailData.subject, ownerEmailData.html).catch(
+          (err) => console.error("Owner notification email failed:", err),
         );
       }
 

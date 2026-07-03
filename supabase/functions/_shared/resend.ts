@@ -263,6 +263,20 @@ interface ReviewRequestData {
   reviewUrl: string;
 }
 
+interface OwnerBookingNotificationData {
+  clientName: string;
+  clientEmail?: string | null;
+  clientPhone?: string | null;
+  salonName: string;
+  serviceName: string;
+  staffName: string;
+  date: string;
+  time: string;
+  reference: string;
+  price: string;
+  manageUrl: string;
+}
+
 // ---------------------------------------------------------------------------
 // Booking confirmation
 // ---------------------------------------------------------------------------
@@ -751,4 +765,38 @@ export function staffInviteEmail(data: StaffInviteData, locale?: string) {
 
 export function reviewRequestEmail(data: ReviewRequestData, locale?: string) {
   return reviewRequestTemplates[resolveLocale(locale)](data);
+}
+
+// ---------------------------------------------------------------------------
+// Owner booking notification (internal alert — always in English)
+// ---------------------------------------------------------------------------
+
+export function bookingReceivedOwnerEmail(data: OwnerBookingNotificationData): { subject: string; html: string } {
+  const subject = `New booking — ${data.reference}`;
+  const contactLines: [string, string][] = [];
+  if (data.clientEmail) contactLines.push(["Email", data.clientEmail]);
+  if (data.clientPhone) contactLines.push(["Phone", data.clientPhone]);
+
+  return {
+    subject,
+    html: renderEmail({
+      salonName: data.salonName,
+      subject,
+      body: `
+        ${heading("New booking received")}
+        ${paragraph(`A new appointment has been booked at <strong style="color:${B.textDark};">${data.salonName}</strong>.`)}
+        ${detailTable([
+          ["Client", `<strong>${data.clientName}</strong>`],
+          ...contactLines,
+          ["Service", `<strong>${data.serviceName}</strong>`],
+          ["Staff", data.staffName],
+          ["Date", data.date],
+          ["Time", data.time],
+          ["Price", data.price],
+          ["Reference", referenceChip(data.reference)],
+        ])}
+        ${ctaButton("View in Dashboard", data.manageUrl)}
+      `,
+    }),
+  };
 }

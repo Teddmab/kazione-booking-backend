@@ -318,7 +318,7 @@ Deno.serve(withLogging("get-availability", async (req: Request) => {
       ...(reason ? { reason } : {}),
     };
 
-    return jsonOk(response);
+    return jsonOk(req, response);
   } catch (err) {
     console.error("get-availability error:", err);
     return serverError("Failed to fetch availability");

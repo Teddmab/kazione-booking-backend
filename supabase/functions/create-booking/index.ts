@@ -26,6 +26,7 @@ interface CreateBookingBody {
   };
   payment_method: "deposit" | "full" | "later";
   intake_answer?: string | null;
+  terms_accepted?: boolean;
   locale?: "en" | "et" | "fr";
   gdpr_consent?: boolean;
 }
@@ -523,9 +524,12 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
     const appointmentId = atomicId as string;
     const cancelToken = await issueCancelToken(appointmentId, bookingReference);
 
-    // Store intake answer if provided
-    if (body.intake_answer) {
-      await supabaseAdmin.from("appointments").update({ intake_answer: body.intake_answer }).eq("id", appointmentId);
+    // Store intake answer and terms acceptance if provided
+    const apptExtra: Record<string, unknown> = {};
+    if (body.intake_answer) apptExtra.intake_answer = body.intake_answer;
+    if (body.terms_accepted) apptExtra.terms_accepted_at = new Date().toISOString();
+    if (Object.keys(apptExtra).length > 0) {
+      await supabaseAdmin.from("appointments").update(apptExtra).eq("id", appointmentId);
     }
 
     // STEP 7: INSERT appointment_services

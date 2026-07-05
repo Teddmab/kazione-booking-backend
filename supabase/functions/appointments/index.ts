@@ -3,7 +3,7 @@ import { corsHeaders, handleCors } from "../_shared/cors.ts";
 import { badRequest, notFound, serverError } from "../_shared/errors.ts";
 import { withLogging } from "../_shared/logger.ts";
 import { requireOwnerOrManagerCtx, verifyAuth, verifyBusinessMember } from "../_shared/auth.ts";
-import { bookingRescheduleEmail, sendEmail } from "../_shared/resend.ts";
+import { bookingReceivedOwnerEmail, bookingRescheduleEmail, sendEmail } from "../_shared/resend.ts";
 
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
@@ -397,6 +397,45 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
         new_status: initialStatus,
         reason: body.staff_profile_id ? "Manual booking created" : "Booking created — awaiting staff assignment",
       });
+
+      // Owner notification email — fire & forget
+      {
+        const [notifSettingsRes, notifBizRes] = await Promise.all([
+          supabaseAdmin.from("business_settings").select("booking_notification_email").eq("business_id", ctx.businessId).maybeSingle(),
+          supabaseAdmin.from("businesses").select("name, logo_url, currency_code").eq("id", ctx.businessId).single(),
+        ]);
+        const ownerNotifEmail = notifSettingsRes.data?.booking_notification_email as string | null | undefined;
+        if (ownerNotifEmail) {
+          const biz = notifBizRes.data;
+          const appt = appointment as Record<string, unknown>;
+          const clientRow = appt.client as Record<string, unknown>;
+          const serviceRow = appt.service as Record<string, unknown>;
+          const staffRow = appt.staff as Record<string, unknown> | null;
+          const d = new Date(startsAt.slice(0, 10) + "T00:00:00Z");
+          const formattedDate = d.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric", timeZone: "UTC" });
+          const formattedTime = startsAt.slice(11, 16);
+          const currencyCode = biz?.currency_code ?? "EUR";
+          const priceDisplay = `${currencyCode === "EUR" ? "€" : currencyCode} ${(body.price as number).toFixed(2)}`;
+          const appUrl = Deno.env.get("APP_URL") ?? "https://kazionebooking.com";
+          const ownerEmailData = bookingReceivedOwnerEmail({
+            clientName: `${clientRow.first_name ?? ""} ${clientRow.last_name ?? ""}`.trim() || "Client",
+            clientEmail: (clientRow.email as string | null) ?? null,
+            clientPhone: (clientRow.phone as string | null) ?? null,
+            salonName: biz?.name ?? "",
+            salonLogoUrl: biz?.logo_url ?? null,
+            serviceName: serviceRow.name as string,
+            staffName: (staffRow?.display_name as string | null) ?? "TBD",
+            date: formattedDate,
+            time: formattedTime,
+            reference: bookingReference,
+            price: priceDisplay,
+            manageUrl: `${appUrl}/owner`,
+          });
+          sendEmail(ownerNotifEmail, ownerEmailData.subject, ownerEmailData.html).catch(
+            (err) => console.error("Owner notification email (manual booking) failed:", err),
+          );
+        }
+      }
 
       return json({ ...appointment, payment: null }, 201);
     }

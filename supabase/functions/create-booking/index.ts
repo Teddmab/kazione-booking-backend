@@ -25,6 +25,7 @@ interface CreateBookingBody {
     notes?: string;
   };
   payment_method: "deposit" | "full" | "later";
+  intake_answer?: string | null;
   locale?: "en" | "et" | "fr";
   gdpr_consent?: boolean;
 }
@@ -252,7 +253,7 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
         .maybeSingle(),
       supabaseAdmin
         .from("businesses")
-        .select("name, currency_code")
+        .select("name, currency_code, logo_url")
         .eq("id", business_id)
         .single(),
     ]);
@@ -522,6 +523,11 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
     const appointmentId = atomicId as string;
     const cancelToken = await issueCancelToken(appointmentId, bookingReference);
 
+    // Store intake answer if provided
+    if (body.intake_answer) {
+      await supabaseAdmin.from("appointments").update({ intake_answer: body.intake_answer }).eq("id", appointmentId);
+    }
+
     // STEP 7: INSERT appointment_services
     const { error: apptSvcErr } = await supabaseAdmin
       .from("appointment_services")
@@ -637,6 +643,7 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
           clientEmail: client.email ?? null,
           clientPhone: client.phone ?? null,
           salonName: business.name,
+          salonLogoUrl: business.logo_url ?? null,
           serviceName: service.name,
           staffName,
           date,

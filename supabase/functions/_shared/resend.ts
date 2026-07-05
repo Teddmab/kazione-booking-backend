@@ -268,6 +268,7 @@ interface OwnerBookingNotificationData {
   clientEmail?: string | null;
   clientPhone?: string | null;
   salonName: string;
+  salonLogoUrl?: string | null;
   serviceName: string;
   staffName: string;
   date: string;
@@ -781,6 +782,7 @@ export function bookingReceivedOwnerEmail(data: OwnerBookingNotificationData): {
     subject,
     html: renderEmail({
       salonName: data.salonName,
+      salonLogoUrl: data.salonLogoUrl ?? undefined,
       subject,
       body: `
         ${heading("New booking received")}

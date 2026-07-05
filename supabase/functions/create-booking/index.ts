@@ -26,6 +26,7 @@ interface CreateBookingBody {
   };
   payment_method: "deposit" | "full" | "later";
   intake_answer?: string | null;
+  intake_answers?: Record<string, unknown> | null;
   terms_accepted?: boolean;
   locale?: "en" | "et" | "fr";
   gdpr_consent?: boolean;
@@ -527,6 +528,9 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
     // Store intake answer and terms acceptance if provided
     const apptExtra: Record<string, unknown> = {};
     if (body.intake_answer) apptExtra.intake_answer = body.intake_answer;
+    if (body.intake_answers && Object.keys(body.intake_answers).length > 0) {
+      apptExtra.intake_answers = body.intake_answers;
+    }
     if (body.terms_accepted) apptExtra.terms_accepted_at = new Date().toISOString();
     if (Object.keys(apptExtra).length > 0) {
       await supabaseAdmin.from("appointments").update(apptExtra).eq("id", appointmentId);

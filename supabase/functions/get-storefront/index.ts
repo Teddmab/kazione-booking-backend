@@ -7,6 +7,14 @@ import { withLogging } from "../_shared/logger.ts";
 // StorefrontData interfaces — mirrors frontend src/data/storefrontData.ts
 // ---------------------------------------------------------------------------
 
+interface IntakeField {
+  id: string;
+  label: string;
+  type: "text" | "textarea" | "select" | "checkbox";
+  required: boolean;
+  options?: string[];
+}
+
 interface StorefrontService {
   id: string;
   name: string;
@@ -23,6 +31,7 @@ interface StorefrontService {
   imageUrl2: string | null;
   imageUrl3: string | null;
   displayOrder: number;
+  intakeForm: IntakeField[] | null;
 }
 
 interface StaffMember {
@@ -261,7 +270,7 @@ Deno.serve(withLogging("get-storefront", async (req: Request) => {
         .select(`
           id, name, description, duration_minutes, buffer_minutes, price, currency_code,
           is_active, is_public, image_url, image_url_2, image_url_3, display_order,
-          category_id,
+          category_id, intake_form,
           service_categories ( name ),
           service_translations ( locale, field, value )
         `)
@@ -399,6 +408,7 @@ Deno.serve(withLogging("get-storefront", async (req: Request) => {
           imageUrl2: (svc.image_url_2 as string) ?? null,
           imageUrl3: (svc.image_url_3 as string) ?? null,
           displayOrder: svc.display_order as number,
+          intakeForm: (svc.intake_form as IntakeField[] | null) ?? null,
         };
       },
     );

@@ -98,6 +98,7 @@ Deno.serve(withLogging("services", async (req: Request) => {
           display_order,
           staff_commission_type,
           staff_commission_value,
+          intake_form,
           created_at,
           updated_at,
           category:service_categories(name)
@@ -180,6 +181,7 @@ Deno.serve(withLogging("services", async (req: Request) => {
             String(body.staff_commission_type ?? "none")
           ) ? String(body.staff_commission_type) : "none"),
           staff_commission_value: parseMoney(body.staff_commission_value ?? null),
+          intake_form: (body.intake_form as unknown) ?? null,
         })
         .select(`
           id,
@@ -200,6 +202,7 @@ Deno.serve(withLogging("services", async (req: Request) => {
           display_order,
           staff_commission_type,
           staff_commission_value,
+          intake_form,
           created_at,
           updated_at,
           category:service_categories(name)
@@ -324,6 +327,10 @@ Deno.serve(withLogging("services", async (req: Request) => {
         updatePayload.staff_commission_value = parseMoney(body.staff_commission_value) ?? null;
       }
 
+      if (body.intake_form !== undefined) {
+        updatePayload.intake_form = body.intake_form ?? null;
+      }
+
       if (Object.keys(updatePayload).length === 0) {
         return badRequest("No valid fields provided for update");
       }
@@ -352,6 +359,7 @@ Deno.serve(withLogging("services", async (req: Request) => {
           display_order,
           staff_commission_type,
           staff_commission_value,
+          intake_form,
           created_at,
           updated_at,
           category:service_categories(name)

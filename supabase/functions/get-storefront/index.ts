@@ -10,7 +10,7 @@ import { withLogging } from "../_shared/logger.ts";
 interface IntakeField {
   id: string;
   label: string;
-  type: "text" | "textarea" | "select" | "checkbox";
+  type: "text" | "textarea" | "select" | "checkbox" | "file";
   required: boolean;
   options?: string[];
 }

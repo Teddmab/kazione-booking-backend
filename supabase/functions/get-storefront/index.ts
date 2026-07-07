@@ -7,6 +7,14 @@ import { withLogging } from "../_shared/logger.ts";
 // StorefrontData interfaces — mirrors frontend src/data/storefrontData.ts
 // ---------------------------------------------------------------------------
 
+interface IntakeField {
+  id: string;
+  label: string;
+  type: "text" | "textarea" | "select" | "checkbox";
+  required: boolean;
+  options?: string[];
+}
+
 interface StorefrontService {
   id: string;
   name: string;
@@ -23,6 +31,7 @@ interface StorefrontService {
   imageUrl2: string | null;
   imageUrl3: string | null;
   displayOrder: number;
+  useIntakeForm: boolean;
 }
 
 interface StaffMember {
@@ -128,7 +137,7 @@ interface StorefrontData {
   depositPercent: number;
   enabledPaymentMethods: string[];
   gaMeasurementId: string | null;
-  intakeQuestion: string | null;
+  intakeForm: IntakeField[] | null;
   bookingTerms: string | null;
 
   // Nested
@@ -251,7 +260,7 @@ Deno.serve(withLogging("get-storefront", async (req: Request) => {
       // Business settings (tax + deposit + locale) — exposed so the booking form shows the real total
       supabaseAdmin
         .from("business_settings")
-        .select("tax_enabled, tax_rate, deposit_percentage, enabled_payment_methods, storefront_locale, ga_measurement_id, intake_question, booking_terms")
+        .select("tax_enabled, tax_rate, deposit_percentage, enabled_payment_methods, storefront_locale, ga_measurement_id, intake_form, booking_terms")
         .eq("business_id", businessId)
         .maybeSingle(),
 
@@ -261,7 +270,7 @@ Deno.serve(withLogging("get-storefront", async (req: Request) => {
         .select(`
           id, name, description, duration_minutes, buffer_minutes, price, currency_code,
           is_active, is_public, image_url, image_url_2, image_url_3, display_order,
-          category_id,
+          category_id, use_intake_form,
           service_categories ( name ),
           service_translations ( locale, field, value )
         `)
@@ -399,6 +408,7 @@ Deno.serve(withLogging("get-storefront", async (req: Request) => {
           imageUrl2: (svc.image_url_2 as string) ?? null,
           imageUrl3: (svc.image_url_3 as string) ?? null,
           displayOrder: svc.display_order as number,
+          useIntakeForm: Boolean(svc.use_intake_form),
         };
       },
     );
@@ -529,7 +539,7 @@ Deno.serve(withLogging("get-storefront", async (req: Request) => {
       depositPercent: +(settings?.deposit_percentage ?? 25),
       enabledPaymentMethods: (settings?.enabled_payment_methods as string[] | null) ?? ["deposit", "full", "later"],
       gaMeasurementId: (settings?.ga_measurement_id as string | null) ?? null,
-      intakeQuestion: (settings?.intake_question as string | null) ?? null,
+      intakeForm: (settings?.intake_form as IntakeField[] | null) ?? null,
       bookingTerms: (settings?.booking_terms as string | null) ?? null,
 
       // Nested

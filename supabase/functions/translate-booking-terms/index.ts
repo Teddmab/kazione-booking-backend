@@ -12,7 +12,7 @@
 import { supabaseAdmin } from "../_shared/supabaseAdmin.ts";
 import { corsHeaders, handleCors } from "../_shared/cors.ts";
 import { badRequest, forbidden, serverError, unauthorized } from "../_shared/errors.ts";
-import { requireAuth } from "../_shared/auth.ts";
+import { verifyAuth } from "../_shared/auth.ts";
 import { withLogging } from "../_shared/logger.ts";
 
 const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
@@ -71,7 +71,7 @@ Deno.serve(withLogging("translate-booking-terms", async (req: Request) => {
   if (!business_id) return badRequest("Missing business_id");
 
   // Auth: must be a member of this business
-  const user = await requireAuth(req).catch(() => null);
+  const user = await verifyAuth(req).catch(() => null);
   if (!user) return unauthorized("Authentication required");
 
   const { data: member } = await supabaseAdmin

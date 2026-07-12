@@ -208,6 +208,27 @@ Deno.serve(withLogging("services", async (req: Request) => {
 
       if (error) return serverError(error.message);
 
+      // Auto-assign new service to every active staff member in the business.
+      // Staff can be removed individually afterwards; the intent is that all
+      // staff can perform any new service by default.
+      const newServiceId = (data as Record<string, unknown>).id as string;
+      const { data: activeStaff } = await supabaseAdmin
+        .from("staff_profiles")
+        .select("id")
+        .eq("business_id", ctx.businessId)
+        .eq("is_active", true);
+
+      if (activeStaff && activeStaff.length > 0) {
+        await supabaseAdmin
+          .from("staff_services")
+          .insert(
+            (activeStaff as { id: string }[]).map((s) => ({
+              staff_profile_id: s.id,
+              service_id: newServiceId,
+            })),
+          );
+      }
+
       const category = (data as Record<string, unknown>).category as {
         name?: string;
       } | null;

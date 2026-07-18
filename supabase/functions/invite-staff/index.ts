@@ -134,7 +134,7 @@ Deno.serve(withLogging("invite-staff", async (req: Request) => {
     // accept-staff-invite immediately after the session is established.
     const APP_URL = Deno.env.get("APP_URL") ?? "https://kazione.app";
     const redirectTo =
-      `${APP_URL}/auth/callback?type=staff-invite&staff_profile_id=${staffProfile.id}`;
+      `${APP_URL}/auth/callback?type=staff-invite&staff_profile_id=${staffProfile.id}&country=${encodeURIComponent(country)}`;
 
     const { data: linkData, error: linkErr } = await supabaseAdmin.auth.admin
       .generateLink({
@@ -159,7 +159,7 @@ Deno.serve(withLogging("invite-staff", async (req: Request) => {
         .single(),
       supabaseAdmin
         .from("businesses")
-        .select("name, locale")
+        .select("name, locale, country")
         .eq("id", businessId)
         .single(),
     ]);
@@ -172,10 +172,12 @@ Deno.serve(withLogging("invite-staff", async (req: Request) => {
     const inviterEmail = inviterResult.data?.email?.trim() || null;
     const salonName = businessResult.data?.name ?? "the salon";
     const locale = businessResult.data?.locale ?? "en";
+    const country = (businessResult.data?.country as string | null) ?? "EE";
+    const isEstonia = country === "EE";
 
     // ── Send invitation email ─────────────────────────────────────────────
     const emailData = staffInviteEmail(
-      { salonName, inviterName, acceptUrl },
+      { salonName, inviterName, acceptUrl, isEstonia },
       locale,
     );
 

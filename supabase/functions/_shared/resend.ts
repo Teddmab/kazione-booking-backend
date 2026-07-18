@@ -253,6 +253,7 @@ interface StaffInviteData {
   salonLogoUrl?: string;
   inviterName: string;
   acceptUrl: string;
+  isEstonia?: boolean;
 }
 
 interface ReviewRequestData {
@@ -607,6 +608,54 @@ const bookingRescheduleTemplates: Record<
 };
 
 // ---------------------------------------------------------------------------
+// Estonia entrepreneur notice block (FIE / LHV requirement)
+// ---------------------------------------------------------------------------
+
+function estoniaEntrepreneurNotice(locale: Locale): string {
+  const amber = "#D97706";
+  const amberBg = "#FFFBEB";
+  const amberBorder = "#FDE68A";
+
+  const texts: Record<Locale, { heading: string; body: string; lhv: string }> = {
+    en: {
+      heading: "Important — Entrepreneur Account Required",
+      body: "As a freelance professional working in Estonia, you are legally required to operate as a registered <strong>sole trader (FIE — Füüsilisest isikust ettevõtja)</strong>. All payments on this platform are made to entrepreneur accounts.",
+      lhv: "We recommend opening an <strong>LHV Entrepreneur Account (Ettevõtjakonto)</strong> if you haven't already. You can register online at lhv.ee.",
+    },
+    et: {
+      heading: "Oluline — Ettevõtjakonto nõue",
+      body: "Eestis töötava vabakutselise spetsialistina peate seaduse järgi tegutsema registreeritud <strong>füüsilisest isikust ettevõtjana (FIE)</strong>. Kõik maksed sellel platvormil tehakse ettevõtjakontodele.",
+      lhv: "Soovitame avada <strong>LHV Ettevõtjakonto</strong>, kui seda veel ei ole. Registreerida saab veebis aadressil lhv.ee.",
+    },
+    fr: {
+      heading: "Important — Compte entrepreneur requis",
+      body: "En tant que professionnel indépendant travaillant en Estonie, vous êtes légalement tenu(e) d'exercer en tant qu'<strong>entrepreneur individuel (FIE — Füüsilisest isikust ettevõtja)</strong>. Tous les paiements sur cette plateforme sont effectués sur des comptes entrepreneurs.",
+      lhv: "Nous recommandons d'ouvrir un <strong>compte entrepreneur LHV (Ettevõtjakonto)</strong> si ce n'est pas encore fait. Vous pouvez vous inscrire en ligne sur lhv.ee.",
+    },
+  };
+
+  const t = texts[locale];
+  return `
+    <table width="100%" border="0" cellpadding="0" cellspacing="0" role="presentation"
+      style="margin:24px 0 8px;border-radius:8px;border:1px solid ${amberBorder};background-color:${amberBg};border-collapse:separate;overflow:hidden;">
+      <tr>
+        <td width="4" style="width:4px;background-color:${amber};font-size:0;line-height:0;">&nbsp;</td>
+        <td style="padding:14px 18px;">
+          <p style="margin:0 0 6px;font-family:'Plus Jakarta Sans',Helvetica,Arial,sans-serif;font-size:13px;font-weight:700;color:${amber};letter-spacing:0.1px;">
+            ⚠ ${t.heading}
+          </p>
+          <p style="margin:0 0 8px;font-family:'Plus Jakarta Sans',Helvetica,Arial,sans-serif;font-size:13px;color:#78350F;line-height:1.6;">
+            ${t.body}
+          </p>
+          <p style="margin:0;font-family:'Plus Jakarta Sans',Helvetica,Arial,sans-serif;font-size:13px;color:#78350F;line-height:1.6;">
+            ${t.lhv}
+          </p>
+        </td>
+      </tr>
+    </table>`;
+}
+
+// ---------------------------------------------------------------------------
 // Staff invite
 // ---------------------------------------------------------------------------
 
@@ -627,6 +676,7 @@ const staffInviteTemplates: Record<
           ${paragraph(`<strong style="color:${B.textDark};">${d.inviterName}</strong> has invited you to join <strong style="color:${B.textDark};">${d.salonName}</strong> on KaziOne Booking as a staff member.`)}
           ${paragraph(`Accept the invitation to set up your account and start managing your schedule.`)}
           ${ctaButton("Accept Invitation", d.acceptUrl)}
+          ${d.isEstonia ? estoniaEntrepreneurNotice("en") : ""}
           ${paragraph(`This invitation link expires in 7 days. If you weren't expecting this, you can safely ignore this email.`, `font-size:13px;color:${B.textDim};margin-top:16px;`)}
         `,
       }),
@@ -645,6 +695,7 @@ const staffInviteTemplates: Record<
           ${paragraph(`<strong style="color:${B.textDark};">${d.inviterName}</strong> kutsus Teid liituma saloniga <strong style="color:${B.textDark};">${d.salonName}</strong> KaziOne Booking platvormil.`)}
           ${paragraph(`Nõustuge kutsega, et luua konto ja hakata oma ajakava haldama.`)}
           ${ctaButton("Nõustu kutsega", d.acceptUrl)}
+          ${d.isEstonia ? estoniaEntrepreneurNotice("et") : ""}
           ${paragraph(`See kutse kehtib 7 päeva. Kui Te seda ei oodanud, võite selle kirja ignoreerida.`, `font-size:13px;color:${B.textDim};margin-top:16px;`)}
         `,
       }),
@@ -663,6 +714,7 @@ const staffInviteTemplates: Record<
           ${paragraph(`<strong style="color:${B.textDark};">${d.inviterName}</strong> vous a invité(e) à rejoindre <strong style="color:${B.textDark};">${d.salonName}</strong> sur KaziOne Booking en tant que membre du personnel.`)}
           ${paragraph(`Acceptez l'invitation pour créer votre compte et commencer à gérer votre planning.`)}
           ${ctaButton("Accepter l'invitation", d.acceptUrl)}
+          ${d.isEstonia ? estoniaEntrepreneurNotice("fr") : ""}
           ${paragraph(`Ce lien expire dans 7 jours. Si vous n'attendiez pas cette invitation, vous pouvez ignorer cet e-mail.`, `font-size:13px;color:${B.textDim};margin-top:16px;`)}
         `,
       }),

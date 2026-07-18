@@ -129,12 +129,38 @@ Deno.serve(withLogging("invite-staff", async (req: Request) => {
 
     if (staffErr) throw staffErr;
 
+    // ── Fetch inviter name & business name ────────────────────────────────
+    // Fetch before building the magic link so country is available for redirectTo.
+    const [inviterResult, businessResult] = await Promise.all([
+      supabaseAdmin
+        .from("users")
+        .select("first_name, last_name, email")
+        .eq("id", userId)
+        .single(),
+      supabaseAdmin
+        .from("businesses")
+        .select("name, locale, country")
+        .eq("id", businessId)
+        .single(),
+    ]);
+
+    const inviterName = inviterResult.data
+      ? `${inviterResult.data.first_name ?? ""} ${
+        inviterResult.data.last_name ?? ""
+      }`.trim() || "Your salon"
+      : "Your salon";
+    const inviterEmail = inviterResult.data?.email?.trim() || null;
+    const salonName = businessResult.data?.name ?? "the salon";
+    const locale = businessResult.data?.locale ?? "en";
+    const country = (businessResult.data?.country as string | null) ?? "EE";
+    const isEstonia = country === "EE";
+
     // ── Generate magic link for invitation ────────────────────────────────
-    // Include staff_profile_id in redirectTo so AuthCallbackPage can call
-    // accept-staff-invite immediately after the session is established.
+    // Include staff_profile_id and country in redirectTo so AuthCallbackPage
+    // can call accept-staff-invite and show the Estonia FIE gate if needed.
     const APP_URL = Deno.env.get("APP_URL") ?? "https://kazione.app";
     const redirectTo =
-      `${APP_URL}/auth/callback?type=staff-invite&staff_profile_id=${staffProfile.id}`;
+      `${APP_URL}/auth/callback?type=staff-invite&staff_profile_id=${staffProfile.id}&country=${encodeURIComponent(country)}`;
 
     const { data: linkData, error: linkErr } = await supabaseAdmin.auth.admin
       .generateLink({
@@ -150,32 +176,9 @@ Deno.serve(withLogging("invite-staff", async (req: Request) => {
     const acceptUrl = linkData?.properties?.action_link ??
       `${APP_URL}/auth/callback?type=staff-invite&staff_profile_id=${staffProfile.id}`;
 
-    // ── Fetch inviter name & business name ────────────────────────────────
-    const [inviterResult, businessResult] = await Promise.all([
-      supabaseAdmin
-        .from("users")
-        .select("first_name, last_name, email")
-        .eq("id", userId)
-        .single(),
-      supabaseAdmin
-        .from("businesses")
-        .select("name, locale")
-        .eq("id", businessId)
-        .single(),
-    ]);
-
-    const inviterName = inviterResult.data
-      ? `${inviterResult.data.first_name ?? ""} ${
-        inviterResult.data.last_name ?? ""
-      }`.trim() || "Your salon"
-      : "Your salon";
-    const inviterEmail = inviterResult.data?.email?.trim() || null;
-    const salonName = businessResult.data?.name ?? "the salon";
-    const locale = businessResult.data?.locale ?? "en";
-
     // ── Send invitation email ─────────────────────────────────────────────
     const emailData = staffInviteEmail(
-      { salonName, inviterName, acceptUrl },
+      { salonName, inviterName, acceptUrl, isEstonia },
       locale,
     );
 

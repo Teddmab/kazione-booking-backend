@@ -46,7 +46,19 @@ Deno.serve(withLogging("accept-staff-invite", async (req: Request) => {
 
     // Idempotent — return success immediately if already active
     if (sp.is_active) {
-      return jsonCors(req, { success: true, already_active: true, business_id: sp.business_id });
+      const { data: mem } = await supabaseAdmin
+        .from("business_members")
+        .select("role")
+        .eq("business_id", sp.business_id as string)
+        .eq("user_id", user.id)
+        .eq("is_active", true)
+        .maybeSingle();
+      return jsonCors(req, {
+        success: true,
+        already_active: true,
+        business_id: sp.business_id,
+        role: (mem as Record<string, unknown> | null)?.role ?? "staff",
+      });
     }
 
     // Security: the logged-in user's email must match the invited_email on the profile
@@ -59,18 +71,23 @@ Deno.serve(withLogging("accept-staff-invite", async (req: Request) => {
     const businessId = sp.business_id as string;
     let memberId = sp.business_member_id as string | null;
 
+    let memberRole = "staff";
+
     if (memberId) {
       // Member row already exists (user existed at invite time): activate it
       // and ensure user_id is linked (in case it was null).
-      const { error: memberErr } = await supabaseAdmin
+      const { data: updatedMember, error: memberErr } = await supabaseAdmin
         .from("business_members")
         .update({
           is_active: true,
           user_id: user.id,
           joined_at: new Date().toISOString(),
         })
-        .eq("id", memberId);
+        .eq("id", memberId)
+        .select("role")
+        .single();
       if (memberErr) throw memberErr;
+      memberRole = (updatedMember as Record<string, unknown>).role as string ?? "staff";
     } else {
       // User didn't exist at invite time — create the member row now
       const { data: newMember, error: memberErr } = await supabaseAdmin
@@ -82,11 +99,12 @@ Deno.serve(withLogging("accept-staff-invite", async (req: Request) => {
           is_active: true,
           joined_at: new Date().toISOString(),
         })
-        .select("id")
+        .select("id, role")
         .single();
       if (memberErr) throw memberErr;
 
       memberId = (newMember as Record<string, unknown>).id as string;
+      memberRole = (newMember as Record<string, unknown>).role as string ?? "staff";
 
       // Link the staff profile to the new member row
       await supabaseAdmin
@@ -102,7 +120,7 @@ Deno.serve(withLogging("accept-staff-invite", async (req: Request) => {
       .eq("id", body.staff_profile_id);
     if (activateErr) throw activateErr;
 
-    return jsonCors(req, { success: true, business_id: businessId });
+    return jsonCors(req, { success: true, business_id: businessId, role: memberRole });
   } catch (err) {
     if (err instanceof Response) return err;
     console.error("accept-staff-invite error:", err);

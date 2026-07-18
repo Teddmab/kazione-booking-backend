@@ -1,7 +1,64 @@
 import { supabaseAdmin } from "../_shared/supabaseAdmin.ts";
-import { corsHeaders, handleCors } from "../_shared/cors.ts";
+import { corsHeadersFor, handleCors } from "../_shared/cors.ts";
 import { badRequest, notFound, serverError } from "../_shared/errors.ts";
 import { withLogging } from "../_shared/logger.ts";
+
+const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
+const LOCALE_NAMES: Record<string, string> = {
+  en: "English", et: "Estonian", fr: "French", ru: "Russian",
+};
+
+async function translateIntakeFields(
+  fields: IntakeField[],
+  locale: string,
+): Promise<IntakeField[]> {
+  const apiKey = Deno.env.get("ANTHROPIC_API_KEY");
+  if (!apiKey || locale === "en" || fields.length === 0) return fields;
+
+  // Build a compact payload: just the strings that need translating
+  const payload = fields.map((f) => ({
+    label: f.label,
+    options: f.options?.filter(Boolean) ?? [],
+  }));
+
+  const targetLang = LOCALE_NAMES[locale] ?? locale;
+  const prompt =
+    `Translate the following JSON array of form field labels and options to ${targetLang}. ` +
+    `Keep the same JSON structure. Return ONLY the JSON array, no explanation:\n\n` +
+    JSON.stringify(payload);
+
+  try {
+    const res = await fetch(ANTHROPIC_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model: "claude-haiku-4-5-20251001",
+        max_tokens: 1024,
+        messages: [{ role: "user", content: prompt }],
+      }),
+    });
+
+    if (!res.ok) return fields;
+
+    const data = await res.json() as { content: Array<{ type: string; text: string }> };
+    const text = data.content?.[0]?.text?.trim() ?? "";
+    // Strip optional markdown code fences
+    const json = text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
+    const translated = JSON.parse(json) as Array<{ label: string; options?: string[] }>;
+
+    return fields.map((f, i) => ({
+      ...f,
+      label: translated[i]?.label ?? f.label,
+      options: translated[i]?.options?.length ? translated[i].options : f.options,
+    }));
+  } catch {
+    return fields; // fallback to originals on any error
+  }
+}
 
 // ---------------------------------------------------------------------------
 // StorefrontData interfaces — mirrors frontend src/data/storefrontData.ts
@@ -540,7 +597,10 @@ Deno.serve(withLogging("get-storefront", async (req: Request) => {
       depositPercent: +(settings?.deposit_percentage ?? 25),
       enabledPaymentMethods: (settings?.enabled_payment_methods as string[] | null) ?? ["deposit", "full", "later"],
       gaMeasurementId: (settings?.ga_measurement_id as string | null) ?? null,
-      intakeForm: (settings?.intake_form as IntakeField[] | null) ?? null,
+      intakeForm: await translateIntakeFields(
+        (settings?.intake_form as IntakeField[] | null) ?? [],
+        locale,
+      ).then((f) => f.length ? f : null),
       bookingTerms: (() => {
         const original = (settings?.booking_terms as string | null) ?? null;
         if (!original) return null;
@@ -572,7 +632,7 @@ Deno.serve(withLogging("get-storefront", async (req: Request) => {
     return new Response(JSON.stringify(response), {
       status: 200,
       headers: {
-        ...corsHeaders,
+        ...corsHeadersFor(req),
         "Content-Type": "application/json",
         "Cache-Control": "no-store",
       },

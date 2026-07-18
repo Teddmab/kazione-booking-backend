@@ -15,6 +15,7 @@ interface InviteBody {
   display_name: string;
   role: string;
   specialties?: string[];
+  require_fie?: boolean;
 }
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -159,8 +160,9 @@ Deno.serve(withLogging("invite-staff", async (req: Request) => {
     // Include staff_profile_id and country in redirectTo so AuthCallbackPage
     // can call accept-staff-invite and show the Estonia FIE gate if needed.
     const APP_URL = Deno.env.get("APP_URL") ?? "https://kazione.app";
+    const requireFie = body.require_fie === true;
     const redirectTo =
-      `${APP_URL}/auth/callback?type=staff-invite&staff_profile_id=${staffProfile.id}&country=${encodeURIComponent(country)}`;
+      `${APP_URL}/auth/callback?type=staff-invite&staff_profile_id=${staffProfile.id}&country=${encodeURIComponent(country)}${requireFie ? "&require_fie=1" : ""}`;
 
     const { data: linkData, error: linkErr } = await supabaseAdmin.auth.admin
       .generateLink({

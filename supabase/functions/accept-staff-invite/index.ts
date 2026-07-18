@@ -4,6 +4,34 @@ import { badRequest, forbidden, notFound, serverError } from "../_shared/errors.
 import { verifyAuth } from "../_shared/auth.ts";
 import { withLogging } from "../_shared/logger.ts";
 
+interface MembershipOption {
+  business_id: string;
+  business_name: string;
+  logo_url: string | null;
+  role: string;
+  dashboard: string;
+}
+
+async function fetchMemberships(userId: string): Promise<MembershipOption[]> {
+  const { data } = await supabaseAdmin
+    .from("business_members")
+    .select("role, business_id, businesses(name, logo_url)")
+    .eq("user_id", userId)
+    .eq("is_active", true);
+
+  return (data ?? []).map((m: Record<string, unknown>) => {
+    const biz = m.businesses as { name: string; logo_url: string | null } | null;
+    const role = m.role as string;
+    return {
+      business_id: m.business_id as string,
+      business_name: biz?.name ?? "Business",
+      logo_url: biz?.logo_url ?? null,
+      role,
+      dashboard: ["owner", "manager"].includes(role) ? "/owner" : "/staff",
+    };
+  });
+}
+
 /**
  * POST /accept-staff-invite
  *
@@ -14,6 +42,10 @@ import { withLogging } from "../_shared/logger.ts";
  *
  * Body: { staff_profile_id: string }
  * Auth: Bearer JWT of the newly-signed-in staff member
+ *
+ * Returns: { success, business_id, role, memberships[] } — memberships lists
+ * ALL of the user's active workspaces so the frontend can show a role picker
+ * when the user belongs to more than one business.
  *
  * Idempotent — safe to call even if already active.
  */
@@ -46,18 +78,14 @@ Deno.serve(withLogging("accept-staff-invite", async (req: Request) => {
 
     // Idempotent — return success immediately if already active
     if (sp.is_active) {
-      const { data: mem } = await supabaseAdmin
-        .from("business_members")
-        .select("role")
-        .eq("business_id", sp.business_id as string)
-        .eq("user_id", user.id)
-        .eq("is_active", true)
-        .maybeSingle();
+      const memberships = await fetchMemberships(user.id);
+      const thisRole = memberships.find((m) => m.business_id === sp.business_id as string)?.role ?? "staff";
       return jsonCors(req, {
         success: true,
         already_active: true,
         business_id: sp.business_id,
-        role: (mem as Record<string, unknown> | null)?.role ?? "staff",
+        role: thisRole,
+        memberships,
       });
     }
 
@@ -120,7 +148,10 @@ Deno.serve(withLogging("accept-staff-invite", async (req: Request) => {
       .eq("id", body.staff_profile_id);
     if (activateErr) throw activateErr;
 
-    return jsonCors(req, { success: true, business_id: businessId, role: memberRole });
+    // Fetch all of the user's active memberships for multi-role routing on the frontend
+    const memberships = await fetchMemberships(user.id);
+
+    return jsonCors(req, { success: true, business_id: businessId, role: memberRole, memberships });
   } catch (err) {
     if (err instanceof Response) return err;
     console.error("accept-staff-invite error:", err);

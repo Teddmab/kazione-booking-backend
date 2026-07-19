@@ -315,10 +315,10 @@ Deno.serve(withLogging("get-storefront", async (req: Request) => {
         .eq("id", businessId)
         .single(),
 
-      // Business settings (tax + deposit + locale) — exposed so the booking form shows the real total
+      // Business settings (tax + deposit + locale + privacy flags)
       supabaseAdmin
         .from("business_settings")
-        .select("tax_enabled, tax_rate, deposit_percentage, enabled_payment_methods, storefront_locale, ga_measurement_id, intake_form, booking_terms, translate_booking_terms, booking_terms_translations")
+        .select("tax_enabled, tax_rate, deposit_percentage, enabled_payment_methods, storefront_locale, ga_measurement_id, intake_form, booking_terms, translate_booking_terms, booking_terms_translations, hide_staff_names")
         .eq("business_id", businessId)
         .maybeSingle(),
 
@@ -477,12 +477,13 @@ Deno.serve(withLogging("get-storefront", async (req: Request) => {
         const staffServices = (s.staff_services ?? []) as Array<{
           service_id: string;
         }>;
+        const hideNames = settings?.hide_staff_names === true;
         return {
           id: s.id as string,
-          name: s.display_name as string,
+          name: hideNames ? "Professional" : (s.display_name as string),
           role: businessTypeToStaffRole((business as Record<string, unknown>).business_type as string | null),
-          bio: (s.bio ?? "") as string,
-          avatar: (s.avatar_url as string) ?? null,
+          bio: hideNames ? "" : ((s.bio ?? "") as string),
+          avatar: hideNames ? null : ((s.avatar_url as string) ?? null),
           specialties: (s.specialties ?? []) as string[],
           serviceIds: staffServices.map((ss) => ss.service_id),
         };

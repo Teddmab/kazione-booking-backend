@@ -113,10 +113,10 @@ Deno.serve(withLogging("get-availability", async (req: Request) => {
       });
     }
 
-    // Check booking_future_days from business_settings
+    // Check booking_future_days + privacy flags from business_settings
     const { data: settings, error: settingsErr } = await supabaseAdmin
       .from("business_settings")
-      .select("booking_future_days")
+      .select("booking_future_days, hide_staff_names")
       .eq("business_id", businessId!)
       .maybeSingle();
     if (settingsErr) throw settingsErr;
@@ -214,14 +214,15 @@ Deno.serve(withLogging("get-availability", async (req: Request) => {
     }
 
     // 5. Group by slot_time
+    const hideNames = settings?.hide_staff_names === true;
     const slotMap = new Map<string, SlotStaff[]>();
     for (const row of rawSlots ?? []) {
       const time = (row.slot_time as string).slice(0, 5); // "HH:MM"
       if (!slotMap.has(time)) slotMap.set(time, []);
       slotMap.get(time)!.push({
         id: row.staff_profile_id,
-        name: row.staff_name,
-        avatarUrl: avatarMap[row.staff_profile_id] ?? null,
+        name: hideNames ? "Professional" : row.staff_name,
+        avatarUrl: hideNames ? null : (avatarMap[row.staff_profile_id] ?? null),
         price: +(row.custom_price ?? service.price),
       });
     }

@@ -52,6 +52,220 @@ Deno.serve(withLogging("staff", async (req: Request) => {
   const action = url.searchParams.get("action") ?? undefined;
 
   try {
+    // ── GET /staff?action=self ────────────────────────────────────────────────
+    // Returns the calling staff member's own profile and working hours.
+    // No owner auth required — any active business member can call this.
+    if (method === "GET" && action === "self") {
+      let user;
+      try {
+        user = await verifyAuth(req);
+      } catch (e) {
+        return e instanceof Response ? e : forbidden("Authentication required");
+      }
+
+      const { data: membership, error: memberErr } = await supabaseAdmin
+        .from("business_members")
+        .select("id, business_id, role")
+        .eq("user_id", user.id)
+        .eq("is_active", true)
+        .order("joined_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (memberErr) return serverError(memberErr.message);
+      if (!membership) return notFound("No active business membership found");
+
+      const mem = membership as Record<string, unknown>;
+
+      const { data: profile, error: profileErr } = await supabaseAdmin
+        .from("staff_profiles")
+        .select(`
+          id,
+          display_name,
+          position,
+          avatar_url,
+          specialties,
+          staff_working_hours (
+            id,
+            day_of_week,
+            is_working,
+            start_time,
+            end_time
+          )
+        `)
+        .eq("business_member_id", mem.id as string)
+        .eq("is_active", true)
+        .maybeSingle();
+
+      if (profileErr) return serverError(profileErr.message);
+      if (!profile) return notFound("Staff profile not found");
+
+      const sp = profile as Record<string, unknown>;
+      const wh = (sp.staff_working_hours as Array<Record<string, unknown>>) ?? [];
+
+      return json({
+        id: sp.id,
+        display_name: sp.display_name,
+        position: sp.position ?? null,
+        avatar_url: sp.avatar_url ?? null,
+        specialties: (sp.specialties as string[]) ?? [],
+        business_id: mem.business_id,
+        role: mem.role,
+        working_hours: wh.map((h) => ({
+          day: h.day_of_week,
+          is_working: h.is_working,
+          start_time: h.start_time ?? null,
+          end_time: h.end_time ?? null,
+        })),
+      });
+    }
+
+    // ── GET /staff?action=my-performance&from=&to= ───────────────────────────
+    // Returns the calling staff member's own performance row for the period.
+    // No owner auth required — uses JWT to identify the caller.
+    if (method === "GET" && action === "my-performance") {
+      let user;
+      try {
+        user = await verifyAuth(req);
+      } catch (e) {
+        return e instanceof Response ? e : forbidden("Authentication required");
+      }
+
+      const from = url.searchParams.get("from");
+      const to = url.searchParams.get("to");
+      if (!from || !to) return badRequest("from and to query params are required");
+
+      const { data: membership } = await supabaseAdmin
+        .from("business_members")
+        .select("id, business_id")
+        .eq("user_id", user.id)
+        .eq("is_active", true)
+        .order("joined_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (!membership) return notFound("No active business membership found");
+      const mem = membership as Record<string, unknown>;
+
+      const { data: profile } = await supabaseAdmin
+        .from("staff_profiles")
+        .select("id")
+        .eq("business_member_id", mem.id as string)
+        .eq("is_active", true)
+        .maybeSingle();
+
+      if (!profile) return notFound("Staff profile not found");
+
+      const { data: rows, error: rpcErr } = await supabaseAdmin.rpc("get_staff_performance", {
+        p_business_id: mem.business_id as string,
+        p_from: from,
+        p_to: to,
+      });
+
+      if (rpcErr) return serverError(rpcErr.message);
+
+      const myRow = (rows ?? []).find(
+        (r: Record<string, unknown>) =>
+          r.staff_profile_id === (profile as Record<string, unknown>).id,
+      );
+
+      return json({ performance: myRow ?? null });
+    }
+
+    // ── PUT /staff?action=self-schedule ───────────────────────────────────────
+    // Staff member updates their own weekly working hours (no owner auth needed).
+    if (method === "PUT" && action === "self-schedule") {
+      let user;
+      try {
+        user = await verifyAuth(req);
+      } catch (e) {
+        return e instanceof Response ? e : forbidden("Authentication required");
+      }
+
+      const { data: membership } = await supabaseAdmin
+        .from("business_members")
+        .select("id, business_id")
+        .eq("user_id", user.id)
+        .eq("is_active", true)
+        .limit(1)
+        .maybeSingle();
+
+      if (!membership) return notFound("No active business membership found");
+      const mem = membership as Record<string, unknown>;
+
+      const { data: profile } = await supabaseAdmin
+        .from("staff_profiles")
+        .select("id")
+        .eq("business_member_id", mem.id as string)
+        .eq("is_active", true)
+        .maybeSingle();
+
+      if (!profile) return notFound("Staff profile not found");
+
+      const selfStaffId = (profile as Record<string, unknown>).id as string;
+
+      const rawBody = await req.json();
+      const scheduleArr: unknown[] = Array.isArray(rawBody)
+        ? rawBody
+        : Array.isArray((rawBody as Record<string, unknown>).schedule)
+          ? (rawBody as Record<string, unknown>).schedule as unknown[]
+          : null!;
+
+      if (!Array.isArray(scheduleArr)) {
+        return badRequest("Body must be an array of working-day objects");
+      }
+
+      for (const entry of scheduleArr as Record<string, unknown>[]) {
+        const day = Number(entry.day_of_week ?? entry.day);
+        if (!Number.isInteger(day) || day < 0 || day > 6) {
+          return badRequest(`day_of_week must be 0–6, got: ${entry.day_of_week ?? entry.day}`);
+        }
+        if (entry.is_working) {
+          if (!entry.start_time || !entry.end_time) {
+            return badRequest(`start_time and end_time required when is_working=true (day ${day})`);
+          }
+          if (String(entry.start_time) >= String(entry.end_time)) {
+            return badRequest(`start_time must be before end_time (day ${day})`);
+          }
+        }
+      }
+
+      const { error: deleteErr } = await supabaseAdmin
+        .from("staff_working_hours")
+        .delete()
+        .eq("staff_profile_id", selfStaffId);
+      if (deleteErr) return serverError(deleteErr.message);
+
+      const rows = (scheduleArr as Record<string, unknown>[]).map((e) => {
+        const day = Number(e.day_of_week ?? e.day);
+        const isWorking = Boolean(e.is_working);
+        return {
+          staff_profile_id: selfStaffId,
+          business_id: mem.business_id as string,
+          day_of_week: day,
+          is_working: isWorking,
+          start_time: isWorking ? (e.start_time as string) : null,
+          end_time: isWorking ? (e.end_time as string) : null,
+        };
+      });
+
+      const { data: inserted, error: insertErr } = await supabaseAdmin
+        .from("staff_working_hours")
+        .insert(rows)
+        .select("id, day_of_week, is_working, start_time, end_time");
+      if (insertErr) return serverError(insertErr.message);
+
+      return json({
+        success: true,
+        schedule: (inserted ?? []).map((r: Record<string, unknown>) => ({
+          day: r.day_of_week,
+          is_working: r.is_working,
+          start_time: r.start_time ?? null,
+          end_time: r.end_time ?? null,
+        })),
+      });
+    }
+
     // ── GET /staff ────────────────────────────────────────────────────────────
     // business_id from query param (preferred) or resolved from JWT membership.
     if (method === "GET" && !action) {

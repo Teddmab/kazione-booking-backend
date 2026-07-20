@@ -788,6 +788,49 @@ Deno.serve(withLogging("staff", async (req: Request) => {
       return json({ success: true });
     }
 
+    // ── DELETE /staff?action=cancel-invite&id= ───────────────────────────────
+    // Hard-delete a pending (never-accepted) staff invite. Safe to hard-delete
+    // because the invite was never activated — no user account is linked yet.
+    if (method === "DELETE" && action === "cancel-invite") {
+      if (!staffId) return badRequest("id query param is required");
+
+      const { data: existing, error: existingErr } = await supabaseAdmin
+        .from("staff_profiles")
+        .select("id, business_id, business_member_id, is_active")
+        .eq("id", staffId)
+        .maybeSingle();
+
+      if (existingErr) return serverError(existingErr.message);
+      if (!existing) return notFound("Staff invitation not found");
+
+      const sp = existing as Record<string, unknown>;
+      if (sp.is_active) {
+        return badRequest("Cannot cancel-invite on an active staff member. Use the deactivate action instead.");
+      }
+
+      const ctx = await requireOwnerOrManagerCtx(req, sp.business_id as string);
+      if (ctx instanceof Response) return ctx;
+
+      // Delete the staff_profiles row
+      const { error: deleteProfileErr } = await supabaseAdmin
+        .from("staff_profiles")
+        .delete()
+        .eq("id", staffId)
+        .eq("business_id", ctx.businessId);
+      if (deleteProfileErr) return serverError(deleteProfileErr.message);
+
+      // Delete the business_members row if one was created
+      const memberId = sp.business_member_id as string | null;
+      if (memberId) {
+        await supabaseAdmin
+          .from("business_members")
+          .delete()
+          .eq("id", memberId);
+      }
+
+      return json({ success: true });
+    }
+
     // ── DELETE /staff?id= (soft deactivate — NEVER hard delete) ───────────────
     if (method === "DELETE" && !action) {
       if (!staffId) return badRequest("id query param is required");

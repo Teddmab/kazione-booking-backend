@@ -2,7 +2,7 @@ import { supabaseAdmin } from "../_shared/supabaseAdmin.ts";
 import { corsHeaders, handleCors } from "../_shared/cors.ts";
 import { badRequest, notFound, serverError } from "../_shared/errors.ts";
 import { withLogging } from "../_shared/logger.ts";
-import { requireOwnerOrManagerCtx } from "../_shared/auth.ts";
+import { requireOwnerOrManagerCtx, verifyAuth } from "../_shared/auth.ts";
 
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
@@ -74,10 +74,26 @@ Deno.serve(withLogging("services", async (req: Request) => {
       const businessId = url.searchParams.get("business_id");
       if (!businessId) return badRequest("business_id is required");
 
+      // Owner/manager: full list including inactive.
+      // Any active business member (staff): active-only read access.
       const ctx = await requireOwnerOrManagerCtx(req, businessId);
-      if (ctx instanceof Response) return ctx;
+      let staffReadOnly = false;
 
-      const { data, error } = await supabaseAdmin
+      if (ctx instanceof Response) {
+        let user;
+        try { user = await verifyAuth(req); } catch { return ctx; }
+        const { data: membership } = await supabaseAdmin
+          .from("business_members")
+          .select("id")
+          .eq("user_id", user.id)
+          .eq("business_id", businessId)
+          .eq("is_active", true)
+          .maybeSingle();
+        if (!membership) return ctx;
+        staffReadOnly = true;
+      }
+
+      let query = supabaseAdmin
         .from("services")
         .select(`
           id,
@@ -103,10 +119,16 @@ Deno.serve(withLogging("services", async (req: Request) => {
           updated_at,
           category:service_categories(name)
         `)
-        .eq("business_id", ctx.businessId)
+        .eq("business_id", businessId)
         .order("is_active", { ascending: false })
         .order("display_order", { ascending: true })
         .order("name", { ascending: true });
+
+      if (staffReadOnly) {
+        query = query.eq("is_active", true);
+      }
+
+      const { data, error } = await query;
 
       if (error) return serverError(error.message);
 

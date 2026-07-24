@@ -253,6 +253,7 @@ async function callAnthropic(
 
   if (!res.ok) {
     const errBody = await res.text();
+    console.error("[ai-insights] Anthropic API error (business)", res.status, errBody.slice(0, 300));
     throw new Error(`Anthropic API error ${res.status}: ${errBody}`);
   }
 
@@ -274,7 +275,7 @@ async function callAnthropic(
 async function gatherServices(businessId: string) {
   const { data, error } = await supabaseAdmin
     .from("services")
-    .select("id, name, description, price, duration_minutes, is_active, category_id, staff_commission_type, staff_commission_value, service_categories(name)")
+    .select("id, name, description, price, duration_minutes, is_active, category_id, staff_commission_type, staff_commission_value, updated_at, service_categories(name)")
     .eq("business_id", businessId)
     .eq("is_active", true)
     .order("display_order", { ascending: true });
@@ -283,6 +284,7 @@ async function gatherServices(businessId: string) {
   return (data ?? []).map((svc: Record<string, unknown>) => {
     const cat = svc.service_categories as { name: string } | null;
     return {
+      id: svc.id as string,
       name: svc.name as string,
       description: (svc.description ?? "") as string,
       price: +(svc.price as number),
@@ -290,9 +292,20 @@ async function gatherServices(businessId: string) {
       category: cat?.name ?? null,
       staff_commission_type: (svc.staff_commission_type ?? "none") as string,
       staff_commission_value: svc.staff_commission_value != null ? +(svc.staff_commission_value as number) : null,
+      updated_at: svc.updated_at as string,
     };
   });
 }
+
+function serviceHash(svc: {
+  name: string; price: number; duration_minutes: number;
+  description: string; staff_commission_type: string; staff_commission_value: number | null;
+  updated_at: string;
+}): string {
+  return `${svc.updated_at}|${svc.name}|${svc.price}|${svc.duration_minutes}|${svc.description.length}|${svc.staff_commission_type}|${svc.staff_commission_value}`;
+}
+
+const SERVICE_CACHE_HOURS = 24;
 
 async function callAnthropicServices(
   services: Array<{
@@ -336,6 +349,7 @@ async function callAnthropicServices(
 
   if (!res.ok) {
     const errBody = await res.text();
+    console.error("[ai-insights] Anthropic API error (services)", res.status, errBody.slice(0, 300));
     throw new Error(`Anthropic API error ${res.status}: ${errBody}`);
   }
 
@@ -400,15 +414,93 @@ Deno.serve(withLogging("ai-insights", async (req: Request) => {
       const services = await gatherServices(businessId);
       if (services.length === 0) {
         return new Response(
-          JSON.stringify({ analysis: [], summary: "No active services found.", cached: false }),
+          JSON.stringify({ analysis: [], summary: "No active services found.", cached: false, cached_services: [] }),
           { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } },
         );
       }
-      const result = await callAnthropicServices(services);
-      return new Response(JSON.stringify(result), {
-        status: 200,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
+
+      // Build current hash map: service id → hash
+      const currentHashes = new Map(services.map((s) => [s.id, serviceHash(s)]));
+
+      // Load latest cache entry for this business (within 24h)
+      const cacheThreshold = new Date(Date.now() - SERVICE_CACHE_HOURS * 3600000).toISOString();
+      const { data: cacheEntry } = await supabaseAdmin
+        .from("notifications")
+        .select("metadata, created_at")
+        .eq("business_id", businessId)
+        .eq("type", "ai_service_analysis")
+        .gte("created_at", cacheThreshold)
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      const cachedMeta = (cacheEntry?.metadata ?? null) as Record<string, unknown> | null;
+      const cachedHashes = (cachedMeta?.service_hashes ?? {}) as Record<string, string>;
+      const cachedAnalysis = (cachedMeta?.analysis ?? []) as ServiceInsight[];
+      const cachedAt = cacheEntry?.created_at as string | undefined;
+
+      // Split services: those whose hash matches cached vs. those that changed/are new
+      const staleServices = services.filter((s) => cachedHashes[s.id] !== currentHashes.get(s.id));
+      const cachedServiceNames = services
+        .filter((s) => cachedHashes[s.id] === currentHashes.get(s.id))
+        .map((s) => s.name);
+
+      let freshAnalysis: ServiceInsight[] = [];
+      let summary = (cachedMeta?.summary as string | undefined) ?? "";
+
+      if (staleServices.length === 0 && cachedAnalysis.length > 0) {
+        // Everything cached — return immediately
+        return new Response(
+          JSON.stringify({
+            analysis: cachedAnalysis,
+            summary,
+            cached: true,
+            cached_services: cachedServiceNames.map((name) => ({ name, analyzed_at: cachedAt })),
+          }),
+          { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+        );
+      }
+
+      // Call AI only for stale/new services; preserve cached insights for unchanged ones
+      const servicesToAnalyze = staleServices.length > 0 ? staleServices : services;
+      const freshResult = await callAnthropicServices(servicesToAnalyze);
+      freshAnalysis = freshResult.analysis;
+      summary = freshResult.summary || summary;
+
+      // Merge: cached insights for unchanged services + fresh insights for changed services
+      const freshNames = new Set(staleServices.map((s) => s.name.toLowerCase()));
+      const preservedInsights = cachedAnalysis.filter(
+        (item) => !freshNames.has(item.service_name.toLowerCase()),
+      );
+      const mergedAnalysis = [...preservedInsights, ...freshAnalysis];
+
+      // Persist merged cache (upsert-style: insert new row)
+      const newHashes: Record<string, string> = {};
+      for (const [id, hash] of currentHashes) newHashes[id] = hash;
+
+      await supabaseAdmin.from("notifications").insert({
+        business_id: businessId,
+        user_id: userId,
+        type: "ai_service_analysis",
+        title: "AI Service Analysis",
+        body: `Analysed ${staleServices.length} service(s); ${cachedServiceNames.length} from cache`,
+        metadata: {
+          service_hashes: newHashes,
+          analysis: mergedAnalysis,
+          summary,
+        },
+        is_read: true,
       });
+
+      return new Response(
+        JSON.stringify({
+          analysis: mergedAnalysis,
+          summary,
+          cached: false,
+          cached_services: cachedServiceNames.map((name) => ({ name, analyzed_at: cachedAt })),
+        }),
+        { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      );
     }
 
     // ── Business insights (default) ──────────────────────────────────────

@@ -69,6 +69,12 @@ jobs:
           # into the Supabase edge-runtime sandbox — it must be written here.
           echo "CI=true" >> supabase/functions/.env
 
+      - name: Free Supabase ports (runner may have pre-bound 54322)
+        run: |
+          sudo fuser -k 54321/tcp 2>/dev/null || true
+          sudo fuser -k 54322/tcp 2>/dev/null || true
+          sudo fuser -k 54323/tcp 2>/dev/null || true
+
       - name: Start local Supabase stack
         run: supabase start
 

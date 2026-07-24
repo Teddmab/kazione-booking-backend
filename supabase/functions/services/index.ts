@@ -74,12 +74,14 @@ Deno.serve(withLogging("services", async (req: Request) => {
       const businessId = url.searchParams.get("business_id");
       if (!businessId) return badRequest("business_id is required");
 
-      // Owner/manager: full list including inactive.
-      // Any active business member (staff): active-only read access.
+      // Owner/manager: full list including inactive + auto_show_to_staff.
+      // Any active business member (staff): active-only read access via a
+      // separate query that does NOT reference auto_show_to_staff, so the
+      // staff path works even if migration 067 has not yet been applied.
       const ctx = await requireOwnerOrManagerCtx(req, businessId);
-      let staffReadOnly = false;
 
       if (ctx instanceof Response) {
+        // Not owner/manager — check if they are an active staff member.
         let user;
         try { user = await verifyAuth(req); } catch { return ctx; }
         const { data: membership } = await supabaseAdmin
@@ -90,46 +92,50 @@ Deno.serve(withLogging("services", async (req: Request) => {
           .eq("is_active", true)
           .maybeSingle();
         if (!membership) return ctx;
-        staffReadOnly = true;
+
+        // Staff-safe SELECT — no auto_show_to_staff column reference.
+        const { data, error } = await supabaseAdmin
+          .from("services")
+          .select(`
+            id, business_id, category_id, name, description,
+            duration_minutes, buffer_minutes, price, currency_code,
+            deposit_amount, is_active, is_public, image_url,
+            image_url_2, image_url_3, display_order,
+            staff_commission_type, staff_commission_value,
+            use_intake_form, created_at, updated_at,
+            category:service_categories(name)
+          `)
+          .eq("business_id", businessId)
+          .eq("is_active", true)
+          .order("display_order", { ascending: true })
+          .order("name", { ascending: true });
+
+        if (error) return serverError(error.message);
+
+        const staffRows = (data ?? []).map((row) => {
+          const category = (row as Record<string, unknown>).category as { name?: string } | null;
+          return { ...(row as Record<string, unknown>), category_name: category?.name ?? null };
+        });
+
+        return json(staffRows);
       }
 
-      let query = supabaseAdmin
+      // Owner / manager path — full list with all columns including auto_show_to_staff.
+      const { data, error } = await supabaseAdmin
         .from("services")
         .select(`
-          id,
-          business_id,
-          category_id,
-          name,
-          description,
-          duration_minutes,
-          buffer_minutes,
-          price,
-          currency_code,
-          deposit_amount,
-          is_active,
-          is_public,
-          image_url,
-          image_url_2,
-          image_url_3,
-          display_order,
-          staff_commission_type,
-          staff_commission_value,
-          use_intake_form,
-          auto_show_to_staff,
-          created_at,
-          updated_at,
+          id, business_id, category_id, name, description,
+          duration_minutes, buffer_minutes, price, currency_code,
+          deposit_amount, is_active, is_public, image_url,
+          image_url_2, image_url_3, display_order,
+          staff_commission_type, staff_commission_value,
+          use_intake_form, auto_show_to_staff, created_at, updated_at,
           category:service_categories(name)
         `)
         .eq("business_id", businessId)
         .order("is_active", { ascending: false })
         .order("display_order", { ascending: true })
         .order("name", { ascending: true });
-
-      if (staffReadOnly) {
-        query = query.eq("is_active", true);
-      }
-
-      const { data, error } = await query;
 
       if (error) return serverError(error.message);
 

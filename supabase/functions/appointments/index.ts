@@ -3,7 +3,15 @@ import { corsHeaders, handleCors } from "../_shared/cors.ts";
 import { badRequest, notFound, serverError } from "../_shared/errors.ts";
 import { withLogging } from "../_shared/logger.ts";
 import { requireOwnerOrManagerCtx, verifyAuth, verifyBusinessMember } from "../_shared/auth.ts";
-import { bookingReceivedOwnerEmail, bookingRescheduleEmail, sendEmail } from "../_shared/resend.ts";
+import {
+  bookingCancellationEmail,
+  bookingReceivedOwnerEmail,
+  bookingRescheduleEmail,
+  staffBookingCancellationEmail,
+  staffNewBookingEmail,
+  sendEmail,
+} from "../_shared/resend.ts";
+import { generateIcs, icsToBase64, googleCalendarUrl } from "../_shared/ics.ts";
 
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
@@ -23,6 +31,35 @@ const APPT_SELECT = `
 function normalizePayment(row: Record<string, unknown>) {
   const payment = row.payment as unknown[];
   return { ...row, payment: payment?.[0] ?? null };
+}
+
+async function fetchStaffEmail(staffProfileId: string): Promise<string | null> {
+  const { data: sp } = await supabaseAdmin
+    .from("staff_profiles")
+    .select("business_member_id")
+    .eq("id", staffProfileId)
+    .maybeSingle();
+  const memberId = (sp as Record<string, unknown> | null)?.business_member_id as string | null;
+  if (!memberId) return null;
+  const { data: bm } = await supabaseAdmin
+    .from("business_members")
+    .select("user:users(email)")
+    .eq("id", memberId)
+    .maybeSingle();
+  const u = (bm as Record<string, unknown> | null)?.user as Record<string, unknown> | null;
+  return (u?.email as string | null) ?? null;
+}
+
+async function fetchOwnerEmail(businessId: string): Promise<string | null> {
+  const { data: ownerMember } = await supabaseAdmin
+    .from("business_members")
+    .select("user:users(email)")
+    .eq("business_id", businessId)
+    .eq("role", "owner")
+    .eq("is_active", true)
+    .maybeSingle();
+  const u = (ownerMember as Record<string, unknown> | null)?.user as Record<string, unknown> | null;
+  return (u?.email as string | null) ?? null;
 }
 
 interface StaffSummaryRow {
@@ -400,33 +437,39 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
         reason: body.staff_profile_id ? "Manual booking created" : "Booking created — awaiting staff assignment",
       });
 
-      // Owner notification email — fire & forget
+      // Notifications — fire & forget
       {
         const [notifSettingsRes, notifBizRes] = await Promise.all([
           supabaseAdmin.from("business_settings").select("booking_notification_email").eq("business_id", ctx.businessId).maybeSingle(),
           supabaseAdmin.from("businesses").select("name, logo_url, currency_code").eq("id", ctx.businessId).single(),
         ]);
+        const biz = notifBizRes.data;
+        const appt = appointment as Record<string, unknown>;
+        const clientRow = appt.client as Record<string, unknown>;
+        const serviceRow = appt.service as Record<string, unknown>;
+        const staffRow = appt.staff as Record<string, unknown> | null;
+        const d = new Date(startsAt.slice(0, 10) + "T00:00:00Z");
+        const formattedDate = d.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric", timeZone: "UTC" });
+        const formattedTime = startsAt.slice(11, 16);
+        const currencyCode = biz?.currency_code ?? "EUR";
+        const priceDisplay = `${currencyCode === "EUR" ? "€" : currencyCode} ${(body.price as number).toFixed(2)}`;
+        const appUrl = Deno.env.get("APP_URL") ?? "https://kazionebooking.com";
+        const clientName = `${clientRow.first_name ?? ""} ${clientRow.last_name ?? ""}`.trim() || "Client";
+        const salonName = biz?.name ?? "";
+        const serviceName = serviceRow.name as string;
+        const staffDisplayName = (staffRow?.display_name as string | null) ?? "TBD";
+
+        // Owner notification
         const ownerNotifEmail = notifSettingsRes.data?.booking_notification_email as string | null | undefined;
         if (ownerNotifEmail) {
-          const biz = notifBizRes.data;
-          const appt = appointment as Record<string, unknown>;
-          const clientRow = appt.client as Record<string, unknown>;
-          const serviceRow = appt.service as Record<string, unknown>;
-          const staffRow = appt.staff as Record<string, unknown> | null;
-          const d = new Date(startsAt.slice(0, 10) + "T00:00:00Z");
-          const formattedDate = d.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric", timeZone: "UTC" });
-          const formattedTime = startsAt.slice(11, 16);
-          const currencyCode = biz?.currency_code ?? "EUR";
-          const priceDisplay = `${currencyCode === "EUR" ? "€" : currencyCode} ${(body.price as number).toFixed(2)}`;
-          const appUrl = Deno.env.get("APP_URL") ?? "https://kazionebooking.com";
           const ownerEmailData = bookingReceivedOwnerEmail({
-            clientName: `${clientRow.first_name ?? ""} ${clientRow.last_name ?? ""}`.trim() || "Client",
+            clientName,
             clientEmail: (clientRow.email as string | null) ?? null,
             clientPhone: (clientRow.phone as string | null) ?? null,
-            salonName: biz?.name ?? "",
+            salonName,
             salonLogoUrl: biz?.logo_url ?? null,
-            serviceName: serviceRow.name as string,
-            staffName: (staffRow?.display_name as string | null) ?? "TBD",
+            serviceName,
+            staffName: staffDisplayName,
             date: formattedDate,
             time: formattedTime,
             reference: bookingReference,
@@ -436,6 +479,45 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
           sendEmail(ownerNotifEmail, ownerEmailData.subject, ownerEmailData.html).catch(
             (err) => console.error("Owner notification email (manual booking) failed:", err),
           );
+        }
+
+        // Staff notification with ICS calendar invite
+        if (body.staff_profile_id) {
+          const staffEmail = await fetchStaffEmail(body.staff_profile_id as string).catch(() => null);
+          if (staffEmail) {
+            const startDate = new Date(startsAt);
+            const durationMs = (serviceRow.duration_minutes as number) * 60_000;
+            const endDate = new Date(startDate.getTime() + durationMs);
+            const icsEvent = {
+              uid: `appt-${apptId}@kazione.app`,
+              summary: `${serviceName} — ${clientName}`,
+              description: `Appointment at ${salonName}\nRef: ${bookingReference}`,
+              location: salonName,
+              startAt: startDate,
+              endAt: endDate,
+            };
+            const icsString = generateIcs(icsEvent);
+            const gcalUrl = googleCalendarUrl(icsEvent);
+            const staffEmailData = staffNewBookingEmail({
+              staffName: staffDisplayName,
+              salonName,
+              salonLogoUrl: biz?.logo_url ?? null,
+              clientName,
+              clientPhone: (clientRow.phone as string | null) ?? null,
+              serviceName,
+              date: formattedDate,
+              time: formattedTime,
+              reference: bookingReference,
+              googleCalendarUrl: gcalUrl,
+            });
+            sendEmail(
+              staffEmail,
+              staffEmailData.subject,
+              staffEmailData.html,
+              undefined,
+              [{ filename: "appointment.ics", content: icsToBase64(icsString) }],
+            ).catch((err) => console.error("Staff new-booking email failed:", err));
+          }
         }
       }
 
@@ -532,62 +614,53 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
 
       // ── Email notifications ─────────────────────────────────────────────
       try {
-        // Fetch business name
         const { data: bizRow } = await supabaseAdmin
           .from("businesses")
-          .select("name")
+          .select("name, logo_url")
           .eq("id", ex.business_id as string)
           .single();
 
-        // Fetch owner email via business_members (role = owner)
-        const { data: ownerMember } = await supabaseAdmin
-          .from("business_members")
-          .select("user:users(email)")
-          .eq("business_id", ex.business_id as string)
-          .eq("role", "owner")
-          .eq("is_active", true)
-          .maybeSingle();
-        const ownerEmail = (ownerMember as Record<string, unknown> | null)?.user
-          ? ((ownerMember as Record<string, unknown>).user as Record<string, unknown>).email as string | null
-          : null;
-
-        // Fetch staff member's email via staff_profiles → business_members → users
-        let staffEmail: string | null = null;
-        if (ex.staff_profile_id) {
-          const { data: staffRow } = await supabaseAdmin
-            .from("staff_profiles")
-            .select("business_member_id")
-            .eq("id", ex.staff_profile_id as string)
-            .maybeSingle();
-          const memberId = (staffRow as Record<string, unknown> | null)?.business_member_id as string | null;
-          if (memberId) {
-            const { data: memberRow } = await supabaseAdmin
-              .from("business_members")
-              .select("user:users(email)")
-              .eq("id", memberId)
-              .maybeSingle();
-            staffEmail = (memberRow as Record<string, unknown>)?.user
-              ? ((memberRow as Record<string, unknown>).user as Record<string, unknown>).email as string | null
-              : null;
-          }
-        }
+        const [ownerEmail, staffEmail] = await Promise.all([
+          fetchOwnerEmail(ex.business_id as string),
+          ex.staff_profile_id ? fetchStaffEmail(ex.staff_profile_id as string) : Promise.resolve(null),
+        ]);
 
         const biz = bizRow as Record<string, unknown> | null;
-        // Get client/service/staff from the freshly-fetched updated appointment
         const updatedRecord = updated as Record<string, unknown>;
         const client = updatedRecord.client as Record<string, string>;
         const service = updatedRecord.service as Record<string, string>;
         const staffDisplayName = (updatedRecord.staff as Record<string, string> | null)?.display_name ?? "your stylist";
         const clientEmail = client?.email ?? null;
+        const salonName = (biz?.name as string) ?? "KaziOne";
+        const clientName = client ? `${client.first_name} ${client.last_name}` : "Client";
+        const serviceName = service?.name ?? "Service";
+        const formattedDate = startsAt.toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long", year: "numeric", timeZone: "UTC" });
+        const formattedTime = startsAt.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: "UTC" });
+        const ref = ex.booking_reference as string;
+
+        // ICS for reschedule (same UID — calendar clients update existing event)
+        const durationMs = (ex.duration_minutes as number) * 60_000;
+        const endDate = new Date(startsAt.getTime() + durationMs);
+        const icsEvent = {
+          uid: `appt-${id}@kazione.app`,
+          summary: `${serviceName} — ${clientName}`,
+          description: `Appointment at ${salonName}\nRef: ${ref}`,
+          location: salonName,
+          startAt: startsAt,
+          endAt: endDate,
+        };
+        const icsString = generateIcs(icsEvent);
+        const icsAttachment = [{ filename: "appointment.ics", content: icsToBase64(icsString) }];
 
         const emailData = {
-          clientName: client ? `${client.first_name} ${client.last_name}` : "Client",
-          salonName: (biz?.name as string) ?? "KaziOne",
-          serviceName: service?.name ?? "Service",
+          clientName,
+          salonName,
+          salonLogoUrl: biz?.logo_url as string | undefined,
+          serviceName,
           staffName: staffDisplayName,
-          date: startsAt.toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long", year: "numeric", timeZone: "UTC" }),
-          time: startsAt.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: "UTC" }),
-          reference: ex.booking_reference as string,
+          date: formattedDate,
+          time: formattedTime,
+          reference: ref,
           price: `€${(ex.price as number).toFixed(2)}`,
           manageUrl: `${Deno.env.get("STOREFRONT_BASE_URL") ?? "https://kazione.app"}/client/bookings`,
         };
@@ -599,7 +672,7 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
 
         const { subject, html } = bookingRescheduleEmail(emailData);
         for (const to of recipients) {
-          await sendEmail(to, subject, html).catch((e) =>
+          await sendEmail(to, subject, html, undefined, icsAttachment).catch((e) =>
             console.warn(`reschedule email to ${to} failed:`, e),
           );
         }
@@ -657,6 +730,111 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
         changed_by: changedBy ?? null,
         reason: reason ?? null,
       });
+
+      // Cancellation email notifications
+      if (status === "cancelled") {
+        (async () => {
+          try {
+            const apptRow = data as Record<string, unknown>;
+            const client = apptRow.client as Record<string, string> | null;
+            const service = apptRow.service as Record<string, string> | null;
+            const staffProfileId = apptRow.staff_profile_id as string | null;
+            const businessId = (existing as Record<string, unknown>).business_id as string;
+
+            const { data: bizRow } = await supabaseAdmin
+              .from("businesses")
+              .select("name, logo_url")
+              .eq("id", businessId)
+              .single();
+
+            const [ownerEmail, staffEmail] = await Promise.all([
+              fetchOwnerEmail(businessId),
+              staffProfileId ? fetchStaffEmail(staffProfileId) : Promise.resolve(null),
+            ]);
+
+            const biz = bizRow as Record<string, unknown> | null;
+            const salonName = (biz?.name as string) ?? "KaziOne";
+            const clientName = client ? `${client.first_name} ${client.last_name}` : "Client";
+            const clientEmail = client?.email ?? null;
+            const serviceName = service?.name ?? "Service";
+            const staffDisplayName = (apptRow.staff as Record<string, string> | null)?.display_name ?? "your stylist";
+            const startsAtStr = apptRow.starts_at as string;
+            const startsAtDate = new Date(startsAtStr);
+            const formattedDate = startsAtDate.toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long", year: "numeric", timeZone: "UTC" });
+            const formattedTime = startsAtDate.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: "UTC" });
+            const ref = apptRow.booking_reference as string;
+
+            // CANCEL ICS removes the event from calendars that already have it
+            const durationMs = (apptRow.duration_minutes as number ?? service?.duration_minutes as unknown as number ?? 60) * 60_000;
+            const cancelIcs = generateIcs({
+              uid: `appt-${id}@kazione.app`,
+              summary: `${serviceName} — ${clientName}`,
+              startAt: startsAtDate,
+              endAt: new Date(startsAtDate.getTime() + durationMs),
+              cancel: true,
+            });
+            const cancelAttachment = [{ filename: "cancelled.ics", content: icsToBase64(cancelIcs) }];
+
+            // Client cancellation email
+            if (clientEmail) {
+              const { subject, html } = bookingCancellationEmail({
+                clientName,
+                salonName,
+                salonLogoUrl: biz?.logo_url as string | undefined,
+                serviceName,
+                staffName: staffDisplayName,
+                date: formattedDate,
+                time: formattedTime,
+                reference: ref,
+                price: `€${Number(apptRow.price ?? 0).toFixed(2)}`,
+                manageUrl: `${Deno.env.get("STOREFRONT_BASE_URL") ?? "https://kazione.app"}/book`,
+              });
+              sendEmail(clientEmail, subject, html, undefined, cancelAttachment).catch((e) =>
+                console.warn(`cancel email to client failed:`, e),
+              );
+            }
+
+            // Staff cancellation email
+            if (staffEmail) {
+              const { subject, html } = staffBookingCancellationEmail({
+                staffName: staffDisplayName,
+                salonName,
+                salonLogoUrl: biz?.logo_url as string | null ?? null,
+                clientName,
+                serviceName,
+                date: formattedDate,
+                time: formattedTime,
+                reference: ref,
+                reason: reason ?? null,
+              });
+              sendEmail(staffEmail, subject, html, undefined, cancelAttachment).catch((e) =>
+                console.warn(`cancel email to staff failed:`, e),
+              );
+            }
+
+            // Owner cancellation notification
+            if (ownerEmail && ownerEmail !== clientEmail) {
+              const { subject, html } = bookingCancellationEmail({
+                clientName,
+                salonName,
+                salonLogoUrl: biz?.logo_url as string | undefined,
+                serviceName,
+                staffName: staffDisplayName,
+                date: formattedDate,
+                time: formattedTime,
+                reference: ref,
+                price: `€${Number(apptRow.price ?? 0).toFixed(2)}`,
+                manageUrl: `${Deno.env.get("APP_URL") ?? "https://kazionebooking.com"}/owner`,
+              });
+              sendEmail(ownerEmail, subject, html).catch((e) =>
+                console.warn(`cancel email to owner failed:`, e),
+              );
+            }
+          } catch (cancelEmailErr) {
+            console.warn("cancellation email notification failed:", cancelEmailErr);
+          }
+        })();
+      }
 
       // Auto stock-out: when appointment completed, deduct product usage
       if (status === "completed") {

@@ -688,6 +688,147 @@ Deno.serve(withLogging("staff", async (req: Request) => {
       return json({ success: true, service_id: serviceId, status: response });
     }
 
+    // ── Self-service schedule override endpoints ──────────────────────────────
+    // Staff can manage their own day exceptions without owner auth.
+
+    // GET /staff?action=self-overrides — returns caller's overrides (optional &from=&to=)
+    if (method === "GET" && action === "self-overrides") {
+      let user;
+      try { user = await verifyAuth(req); } catch (e) { return e instanceof Response ? e : forbidden("Authentication required"); }
+
+      const { data: membership } = await supabaseAdmin
+        .from("business_members")
+        .select("id, business_id")
+        .eq("user_id", user.id)
+        .eq("is_active", true)
+        .order("joined_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (!membership) return forbidden("No active business membership found");
+
+      const mem = membership as Record<string, unknown>;
+      const { data: sp } = await supabaseAdmin
+        .from("staff_profiles")
+        .select("id")
+        .eq("business_member_id", mem.id as string)
+        .eq("business_id", mem.business_id as string)
+        .maybeSingle();
+      const spId = (sp as { id: string } | null)?.id;
+      if (!spId) return forbidden("No staff profile found");
+
+      const fromDate = url.searchParams.get("from");
+      const toDate = url.searchParams.get("to");
+      let query = supabaseAdmin
+        .from("staff_schedule_overrides")
+        .select("id, override_date, is_working, start_time, end_time, reason, created_at")
+        .eq("staff_profile_id", spId)
+        .order("override_date", { ascending: true });
+      if (fromDate) query = query.gte("override_date", fromDate);
+      if (toDate) query = query.lte("override_date", toDate);
+
+      const { data: overrides, error: ovErr } = await query;
+      if (ovErr) return serverError(ovErr.message);
+      return json(overrides ?? []);
+    }
+
+    // POST /staff?action=self-override — upsert caller's own override
+    if (method === "POST" && action === "self-override") {
+      let user;
+      try { user = await verifyAuth(req); } catch (e) { return e instanceof Response ? e : forbidden("Authentication required"); }
+
+      const { data: membership } = await supabaseAdmin
+        .from("business_members")
+        .select("id, business_id")
+        .eq("user_id", user.id)
+        .eq("is_active", true)
+        .order("joined_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (!membership) return forbidden("No active business membership found");
+
+      const mem = membership as Record<string, unknown>;
+      const { data: sp } = await supabaseAdmin
+        .from("staff_profiles")
+        .select("id")
+        .eq("business_member_id", mem.id as string)
+        .eq("business_id", mem.business_id as string)
+        .maybeSingle();
+      const spId = (sp as { id: string } | null)?.id;
+      if (!spId) return forbidden("No staff profile found");
+
+      const body = await req.json() as Record<string, unknown>;
+      const overrideDate = String(body.date ?? "").trim();
+      const isWorking = Boolean(body.is_working ?? false);
+      const startTime = body.start_time ? String(body.start_time).trim() : null;
+      const endTime = body.end_time ? String(body.end_time).trim() : null;
+      const reason = body.reason ? String(body.reason).trim() : null;
+
+      if (!overrideDate || !/^\d{4}-\d{2}-\d{2}$/.test(overrideDate)) {
+        return badRequest("date must be YYYY-MM-DD");
+      }
+      if (isWorking && (!startTime || !endTime)) {
+        return badRequest("start_time and end_time required when is_working = true");
+      }
+
+      const { data: upserted, error: upsertErr } = await supabaseAdmin
+        .from("staff_schedule_overrides")
+        .upsert(
+          {
+            staff_profile_id: spId,
+            business_id: mem.business_id as string,
+            override_date: overrideDate,
+            is_working: isWorking,
+            start_time: isWorking ? startTime : null,
+            end_time: isWorking ? endTime : null,
+            reason,
+          },
+          { onConflict: "staff_profile_id,override_date" },
+        )
+        .select("id, override_date, is_working, start_time, end_time, reason")
+        .single();
+
+      if (upsertErr) return serverError(upsertErr.message);
+      return json(upserted, 201);
+    }
+
+    // DELETE /staff?action=self-override&date= — delete caller's own override
+    if (method === "DELETE" && action === "self-override") {
+      const overrideDate = url.searchParams.get("date");
+      if (!overrideDate) return badRequest("date query param is required");
+
+      let user;
+      try { user = await verifyAuth(req); } catch (e) { return e instanceof Response ? e : forbidden("Authentication required"); }
+
+      const { data: membership } = await supabaseAdmin
+        .from("business_members")
+        .select("id, business_id")
+        .eq("user_id", user.id)
+        .eq("is_active", true)
+        .order("joined_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (!membership) return forbidden("No active business membership found");
+
+      const mem = membership as Record<string, unknown>;
+      const { data: sp } = await supabaseAdmin
+        .from("staff_profiles")
+        .select("id")
+        .eq("business_member_id", mem.id as string)
+        .eq("business_id", mem.business_id as string)
+        .maybeSingle();
+      const spId = (sp as { id: string } | null)?.id;
+      if (!spId) return forbidden("No staff profile found");
+
+      const { error: delErr } = await supabaseAdmin
+        .from("staff_schedule_overrides")
+        .delete()
+        .eq("staff_profile_id", spId)
+        .eq("override_date", overrideDate);
+
+      if (delErr) return serverError(delErr.message);
+      return json({ success: true });
+    }
+
     // ── GET /staff?action=services&id= (get current service assignments) ────────
     if (method === "GET" && action === "services") {
       if (!staffId) return badRequest("id query param is required");

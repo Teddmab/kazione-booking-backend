@@ -494,13 +494,25 @@ Deno.serve(withLogging("staff", async (req: Request) => {
       );
     }
 
-    // ── PATCH /staff?action=assign-services&id= (set service assignments) ───────
-    // Accepts { service_ids: string[] } — replaces ALL existing staff_services rows.
+    // ── PATCH /staff?action=assign-services&id= (send service offers) ────────────
+    // Body: { offers: [{service_id, commission_type?, commission_value?}] }
+    //   OR  { service_ids: string[] }  (legacy — sends offers without commission)
+    // New offers start as 'pending'; already-accepted rows are left unchanged.
+    // Services removed from the list are hard-deleted regardless of status.
     if (method === "PATCH" && action === "assign-services") {
       if (!staffId) return badRequest("id query param is required");
       const body = await req.json() as Record<string, unknown>;
-      const serviceIds = body.service_ids as string[] | undefined;
-      if (!Array.isArray(serviceIds)) return badRequest("service_ids must be an array");
+
+      // Normalise both input shapes into an offers array.
+      type OfferInput = { service_id: string; commission_type?: string | null; commission_value?: number | null };
+      let offers: OfferInput[];
+      if (Array.isArray(body.offers)) {
+        offers = body.offers as OfferInput[];
+      } else if (Array.isArray(body.service_ids)) {
+        offers = (body.service_ids as string[]).map((sid) => ({ service_id: sid }));
+      } else {
+        return badRequest("body must contain offers[] or service_ids[]");
+      }
 
       const { data: existing, error: existingErr } = await supabaseAdmin
         .from("staff_profiles")
@@ -517,39 +529,163 @@ Deno.serve(withLogging("staff", async (req: Request) => {
       );
       if (ctx instanceof Response) return ctx;
 
-      // Verify all service_ids belong to this business (active or inactive — owner decides)
-      if (serviceIds.length > 0) {
+      const offeredIds = offers.map((o) => o.service_id);
+
+      // Validate all offered service_ids belong to this business.
+      if (offeredIds.length > 0) {
         const { data: validSvcs, error: svcErr } = await supabaseAdmin
           .from("services")
           .select("id")
-          .in("id", serviceIds)
+          .in("id", offeredIds)
           .eq("business_id", ctx.businessId);
 
         if (svcErr) return serverError(svcErr.message);
-        if ((validSvcs ?? []).length !== serviceIds.length) {
+        if ((validSvcs ?? []).length !== offeredIds.length) {
           return badRequest("One or more service_ids do not belong to this business");
         }
       }
 
-      // Full replace: delete existing assignments then insert new ones
-      const { error: delErr } = await supabaseAdmin
+      // Fetch existing assignments to decide what to insert vs update.
+      const { data: currentRows } = await supabaseAdmin
         .from("staff_services")
-        .delete()
+        .select("service_id, status")
         .eq("staff_profile_id", staffId);
-      if (delErr) return serverError(delErr.message);
 
-      if (serviceIds.length > 0) {
-        const rows = serviceIds.map((sid) => ({
-          staff_profile_id: staffId,
-          service_id: sid,
-        }));
-        const { error: insErr } = await supabaseAdmin
+      const currentMap = new Map(
+        (currentRows ?? []).map((r: Record<string, unknown>) => [
+          r.service_id as string,
+          r.status as string,
+        ]),
+      );
+
+      // Remove assignments no longer in the offered list.
+      const toDelete = (currentRows ?? [])
+        .map((r: Record<string, unknown>) => r.service_id as string)
+        .filter((sid) => !offeredIds.includes(sid));
+
+      if (toDelete.length > 0) {
+        const { error: delErr } = await supabaseAdmin
           .from("staff_services")
-          .insert(rows);
-        if (insErr) return serverError(insErr.message);
+          .delete()
+          .eq("staff_profile_id", staffId)
+          .in("service_id", toDelete);
+        if (delErr) return serverError(delErr.message);
       }
 
-      return json({ success: true, service_ids: serviceIds });
+      // For each offer: insert as pending (new) or re-open declined; leave accepted alone.
+      for (const offer of offers) {
+        const currentStatus = currentMap.get(offer.service_id);
+
+        if (currentStatus === "accepted") {
+          // Already accepted — update commission if provided but don't touch status.
+          if (offer.commission_type !== undefined || offer.commission_value !== undefined) {
+            await supabaseAdmin
+              .from("staff_services")
+              .update({
+                offered_commission_type: offer.commission_type ?? null,
+                offered_commission_value: offer.commission_value ?? null,
+              })
+              .eq("staff_profile_id", staffId)
+              .eq("service_id", offer.service_id);
+          }
+          continue;
+        }
+
+        if (currentStatus === "pending") {
+          // Already pending — update commission if changed.
+          await supabaseAdmin
+            .from("staff_services")
+            .update({
+              offered_commission_type: offer.commission_type ?? null,
+              offered_commission_value: offer.commission_value ?? null,
+              assigned_at: new Date().toISOString(),
+            })
+            .eq("staff_profile_id", staffId)
+            .eq("service_id", offer.service_id);
+          continue;
+        }
+
+        // New or previously declined — insert/upsert as pending.
+        await supabaseAdmin
+          .from("staff_services")
+          .upsert({
+            staff_profile_id: staffId,
+            service_id: offer.service_id,
+            status: "pending",
+            offered_commission_type: offer.commission_type ?? null,
+            offered_commission_value: offer.commission_value ?? null,
+            assigned_at: new Date().toISOString(),
+            responded_at: null,
+          });
+      }
+
+      return json({ success: true, offered_count: offeredIds.length });
+    }
+
+    // ── PATCH /staff?action=respond-service-offer (staff accepts/declines) ────────
+    // Any active business member can call this to respond to their own pending offers.
+    // Body: { service_id: string, response: "accepted" | "declined" }
+    if (method === "PATCH" && action === "respond-service-offer") {
+      let user;
+      try {
+        user = await verifyAuth(req);
+      } catch (e) {
+        return e instanceof Response ? e : forbidden("Authentication required");
+      }
+
+      const body = await req.json() as Record<string, unknown>;
+      const serviceId = body.service_id as string | undefined;
+      const response = body.response as string | undefined;
+
+      if (!serviceId) return badRequest("service_id is required");
+      if (response !== "accepted" && response !== "declined") {
+        return badRequest("response must be 'accepted' or 'declined'");
+      }
+
+      // Find the caller's staff profile.
+      const { data: membership } = await supabaseAdmin
+        .from("business_members")
+        .select("id, business_id")
+        .eq("user_id", user.id)
+        .eq("is_active", true)
+        .order("joined_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (!membership) return forbidden("No active business membership found");
+
+      const mem = membership as Record<string, unknown>;
+      const { data: sp } = await supabaseAdmin
+        .from("staff_profiles")
+        .select("id")
+        .eq("business_member_id", mem.id as string)
+        .eq("business_id", mem.business_id as string)
+        .maybeSingle();
+
+      const spId = (sp as { id: string } | null)?.id;
+      if (!spId) return forbidden("No staff profile found for this account");
+
+      const { data: offer } = await supabaseAdmin
+        .from("staff_services")
+        .select("status")
+        .eq("staff_profile_id", spId)
+        .eq("service_id", serviceId)
+        .maybeSingle();
+
+      if (!offer) return notFound("No service offer found for this service");
+      if ((offer as Record<string, unknown>).status !== "pending") {
+        return badRequest("This offer has already been responded to");
+      }
+
+      const { error: updErr } = await supabaseAdmin
+        .from("staff_services")
+        .update({ status: response, responded_at: new Date().toISOString() })
+        .eq("staff_profile_id", spId)
+        .eq("service_id", serviceId);
+
+      if (updErr) return serverError(updErr.message);
+
+      return json({ success: true, service_id: serviceId, status: response });
     }
 
     // ── GET /staff?action=services&id= (get current service assignments) ────────
@@ -574,12 +710,22 @@ Deno.serve(withLogging("staff", async (req: Request) => {
 
       const { data: rows, error: svcErr } = await supabaseAdmin
         .from("staff_services")
-        .select("service_id")
+        .select("service_id, status, offered_commission_type, offered_commission_value, assigned_at")
         .eq("staff_profile_id", staffId);
 
       if (svcErr) return serverError(svcErr.message);
 
-      return json({ service_ids: (rows ?? []).map((r: Record<string, unknown>) => r.service_id) });
+      const typedRows = (rows ?? []) as Array<Record<string, unknown>>;
+      return json({
+        service_ids: typedRows.map((r) => r.service_id),
+        assignments: typedRows.map((r) => ({
+          service_id: r.service_id,
+          status: r.status ?? "accepted",
+          offered_commission_type: r.offered_commission_type ?? null,
+          offered_commission_value: r.offered_commission_value ?? null,
+          assigned_at: r.assigned_at ?? null,
+        })),
+      });
     }
 
     // ── PATCH /staff?action=resend-invite&id= (resend invitation email) ─────────

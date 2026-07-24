@@ -165,6 +165,7 @@ Deno.serve(withLogging("get-availability", async (req: Request) => {
         .select("custom_price")
         .eq("staff_profile_id", staffId)
         .eq("service_id", serviceId!)
+        .eq("status", "accepted")
         .maybeSingle();
       if (staffSvcErr) throw staffSvcErr;
 

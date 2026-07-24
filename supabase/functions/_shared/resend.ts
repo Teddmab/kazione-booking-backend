@@ -28,7 +28,7 @@ export async function sendEmail(
     to,
     subject,
     html,
-    reply_to: replyTo,
+    replyTo,
   });
 
   if (error) {
@@ -782,6 +782,97 @@ const reviewRequestTemplates: Record<
     };
   },
 };
+
+// ---------------------------------------------------------------------------
+// Staff appointment reminder (internal — English only)
+// ---------------------------------------------------------------------------
+
+interface StaffReminderData {
+  staffName: string;
+  salonName: string;
+  salonLogoUrl?: string;
+  clientName: string;
+  serviceName: string;
+  date: string;
+  time: string;
+  reference: string;
+}
+
+export function staffAppointmentReminderEmail(
+  data: StaffReminderData,
+): { subject: string; html: string } {
+  const subject = `Tomorrow: ${data.clientName} — ${data.serviceName}`;
+  return {
+    subject,
+    html: renderEmail({
+      salonLogoUrl: data.salonLogoUrl,
+      salonName: data.salonName,
+      subject,
+      body: `
+        ${heading("Appointment reminder")}
+        ${paragraph(`Hi <strong style="color:${B.textDark};">${data.staffName}</strong>, you have an appointment tomorrow at <strong style="color:${B.textDark};">${data.salonName}</strong>.`)}
+        ${detailTable([
+          ["Client",  `<strong>${data.clientName}</strong>`],
+          ["Service", `<strong>${data.serviceName}</strong>`],
+          ["Date",    data.date],
+          ["Time",    data.time],
+          ["Reference", referenceChip(data.reference)],
+        ])}
+        ${paragraph(`Please make sure you are prepared for this appointment.`, `font-size:13px;color:${B.textDim};`)}
+      `,
+    }),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Owner upcoming appointment reminder (internal — English only)
+// ---------------------------------------------------------------------------
+
+interface OwnerReminderData {
+  salonName: string;
+  salonLogoUrl?: string;
+  clientName: string;
+  clientEmail?: string | null;
+  clientPhone?: string | null;
+  serviceName: string;
+  staffName: string;
+  date: string;
+  time: string;
+  reference: string;
+  manageUrl: string;
+}
+
+export function ownerAppointmentReminderEmail(
+  data: OwnerReminderData,
+): { subject: string; html: string } {
+  const subject = `Upcoming tomorrow: ${data.clientName} — ${data.reference}`;
+  const contactLines: [string, string][] = [];
+  if (data.clientEmail) contactLines.push(["Client email", data.clientEmail]);
+  if (data.clientPhone) contactLines.push(["Client phone", data.clientPhone]);
+
+  return {
+    subject,
+    html: renderEmail({
+      salonLogoUrl: data.salonLogoUrl,
+      salonName: data.salonName,
+      subject,
+      body: `
+        ${heading("Appointment tomorrow")}
+        ${paragraph(`A confirmed appointment is scheduled for tomorrow at <strong style="color:${B.textDark};">${data.salonName}</strong>.`)}
+        ${detailTable([
+          ["Client",  `<strong>${data.clientName}</strong>`],
+          ...contactLines,
+          ["Service", `<strong>${data.serviceName}</strong>`],
+          ["Staff",   data.staffName],
+          ["Date",    data.date],
+          ["Time",    data.time],
+          ["Reference", referenceChip(data.reference)],
+        ])}
+        ${ctaButton("View in Dashboard", data.manageUrl)}
+      `,
+    }),
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Locale resolver

@@ -207,7 +207,7 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
         });
       }
     } else {
-      // No staff preference — pick first available
+      // No staff preference — pick randomly among available staff for fair distribution
       if (matchingSlots.length === 0) {
         const allTimes = [
           ...new Set(
@@ -224,7 +224,8 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
           available_alternatives: alternatives,
         });
       }
-      selectedStaffId = matchingSlots[0].staff_profile_id;
+      const randomIdx = Math.floor(Math.random() * matchingSlots.length);
+      selectedStaffId = matchingSlots[randomIdx].staff_profile_id;
     }
 
     // Get the effective price from the slot (may include staff override)
@@ -598,23 +599,8 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
     }
 
     if (payment_method === "later") {
-      // ── No payment now — confirm immediately ─────────────────────────
-      const { error: confirmErr } = await supabaseAdmin
-        .from("appointments")
-        .update({ status: "confirmed" })
-        .eq("id", appointmentId);
-
-      if (confirmErr) throw confirmErr;
-
-      // Status log
-      await supabaseAdmin.from("appointment_status_log").insert({
-        appointment_id: appointmentId,
-        old_status: "pending",
-        new_status: "confirmed",
-        reason: "Pay later — auto-confirmed",
-      });
-
-      // Send confirmation email (fire & forget)
+      // ── No payment now — stays pending until owner assigns and confirms ──
+      // Send booking receipt email (fire & forget)
       const appUrl = Deno.env.get("APP_URL") ?? "https://kazionebooking.com";
       const emailData = bookingConfirmationEmail(
         {
@@ -645,8 +631,8 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
       const clientPhone = client.phone?.trim();
       if (clientPhone) {
         const smsText =
-          `${business.name}: booking confirmed — ${service.name} on ${date} at ${time}. ` +
-          `Ref: ${bookingReference}. Manage: ${appUrl}/booking/${bookingReference}`;
+          `${business.name}: booking received — ${service.name} on ${date} at ${time}. ` +
+          `Pending confirmation. Ref: ${bookingReference}. Manage: ${appUrl}/booking/${bookingReference}`;
         if (settings?.sms_notifications_enabled) {
           sendSms(clientPhone, smsText).catch((err) =>
             console.error("SMS send failed:", err),
@@ -710,7 +696,7 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
         booking_reference: bookingReference,
         appointment_id: appointmentId,
         cancel_token: cancelToken,
-        status: "confirmed",
+        status: "pending",
       });
     } else {
       // ── Stripe payment (deposit or full) ─────────────────────────────

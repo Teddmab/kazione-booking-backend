@@ -86,14 +86,37 @@ Deno.serve(withLogging("services", async (req: Request) => {
         try { user = await verifyAuth(req); } catch { return ctx; }
         const { data: membership } = await supabaseAdmin
           .from("business_members")
-          .select("id")
+          .select("id, role")
           .eq("user_id", user.id)
           .eq("business_id", businessId)
           .eq("is_active", true)
           .maybeSingle();
         if (!membership) return ctx;
 
-        // Staff-safe SELECT — no auto_show_to_staff column reference.
+        // Resolve the staff profile for this member.
+        const memberId = (membership as { id: string; role: string }).id;
+        const { data: sp } = await supabaseAdmin
+          .from("staff_profiles")
+          .select("id")
+          .eq("business_member_id", memberId)
+          .eq("business_id", businessId)
+          .maybeSingle();
+        const staffProfileId = (sp as { id: string } | null)?.id ?? null;
+
+        if (!staffProfileId) return json([]);
+
+        // Fetch only services assigned to this staff member (pending + accepted).
+        const { data: assignments } = await supabaseAdmin
+          .from("staff_services")
+          .select("service_id, status, custom_price, offered_commission_type, offered_commission_value")
+          .eq("staff_profile_id", staffProfileId)
+          .in("status", ["pending", "accepted"]);
+
+        const serviceIds = (assignments ?? []).map(
+          (a: Record<string, unknown>) => a.service_id as string,
+        );
+        if (serviceIds.length === 0) return json([]);
+
         const { data, error } = await supabaseAdmin
           .from("services")
           .select(`
@@ -105,6 +128,7 @@ Deno.serve(withLogging("services", async (req: Request) => {
             use_intake_form, created_at, updated_at,
             category:service_categories(name)
           `)
+          .in("id", serviceIds)
           .eq("business_id", businessId)
           .eq("is_active", true)
           .order("display_order", { ascending: true })
@@ -112,9 +136,31 @@ Deno.serve(withLogging("services", async (req: Request) => {
 
         if (error) return serverError(error.message);
 
+        const assignmentMap = new Map(
+          (assignments ?? []).map((a: Record<string, unknown>) => [a.service_id as string, a]),
+        );
+
         const staffRows = (data ?? []).map((row) => {
-          const category = (row as Record<string, unknown>).category as { name?: string } | null;
-          return { ...(row as Record<string, unknown>), category_name: category?.name ?? null };
+          const r = row as Record<string, unknown>;
+          const category = r.category as { name?: string } | null;
+          const a = (assignmentMap.get(r.id as string) ?? {}) as Record<string, unknown>;
+          return {
+            ...r,
+            category_name: category?.name ?? null,
+            assignment_status: (a.status as string | undefined) ?? "accepted",
+            effective_price: a.custom_price != null ? Number(a.custom_price) : r.price,
+            offered_commission_type: (a.offered_commission_type as string | undefined) ?? null,
+            offered_commission_value: a.offered_commission_value != null
+              ? Number(a.offered_commission_value)
+              : null,
+          };
+        });
+
+        // Show pending offers first so staff see what needs their response.
+        staffRows.sort((a, b) => {
+          const ap = a.assignment_status === "pending" ? 0 : 1;
+          const bp = b.assignment_status === "pending" ? 0 : 1;
+          return ap - bp;
         });
 
         return json(staffRows);
@@ -261,6 +307,7 @@ Deno.serve(withLogging("services", async (req: Request) => {
             (activeStaff as { id: string }[]).map((s) => ({
               staff_profile_id: s.id,
               service_id: newServiceId,
+              status: "pending",
             })),
           );
       }

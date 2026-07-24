@@ -342,7 +342,7 @@ Deno.serve(withLogging("get-storefront", async (req: Request) => {
         .from("staff_profiles")
         .select(`
           id, display_name, bio, avatar_url, specialties, is_active,
-          staff_services ( service_id )
+          staff_services ( service_id, status )
         `)
         .eq("business_id", businessId)
         .eq("is_active", true),
@@ -476,6 +476,7 @@ Deno.serve(withLogging("get-storefront", async (req: Request) => {
       (s: Record<string, unknown>) => {
         const staffServices = (s.staff_services ?? []) as Array<{
           service_id: string;
+          status?: string;
         }>;
         const hideNames = settings?.hide_staff_names === true;
         return {
@@ -485,7 +486,9 @@ Deno.serve(withLogging("get-storefront", async (req: Request) => {
           bio: hideNames ? "" : ((s.bio ?? "") as string),
           avatar: hideNames ? null : ((s.avatar_url as string) ?? null),
           specialties: (s.specialties ?? []) as string[],
-          serviceIds: staffServices.map((ss) => ss.service_id),
+          serviceIds: staffServices
+            .filter((ss) => !ss.status || ss.status === "accepted")
+            .map((ss) => ss.service_id),
         };
       },
     );

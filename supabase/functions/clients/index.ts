@@ -111,15 +111,16 @@ Deno.serve(withLogging("clients", async (req: Request) => {
 
       const clients = (data ?? []).map((row: Record<string, unknown>) => {
         const appts = (row.appointments as { id: string; starts_at: string; status: string; price: number }[]) ?? [];
-        const completed = appts.filter((a) => a.status === "completed");
+        const paidAppts = appts.filter((a) => a.status === "completed" || a.status === "confirmed");
+        const completedAppts = appts.filter((a) => a.status === "completed");
         const { appointments: _, ...fields } = row;
         return {
           ...fields,
-          appointment_count: appts.length,
-          last_visit: completed.length > 0
-            ? completed.sort((a, b) => new Date(b.starts_at).getTime() - new Date(a.starts_at).getTime())[0].starts_at
+          appointment_count: appts.filter((a) => a.status !== "cancelled").length,
+          last_visit: completedAppts.length > 0
+            ? completedAppts.sort((a, b) => new Date(b.starts_at).getTime() - new Date(a.starts_at).getTime())[0].starts_at
             : null,
-          total_spent: completed.reduce((sum, a) => sum + a.price, 0),
+          total_spent: paidAppts.reduce((sum, a) => sum + (a.price ?? 0), 0),
         };
       });
 

@@ -5,7 +5,7 @@ import { requireOwnerOrManagerCtx } from "../_shared/auth.ts";
 import { withLogging } from "../_shared/logger.ts";
 import { issueCancelToken } from "../_shared/bookingCancelToken.ts";
 import { sendSms } from "../_shared/messagebird.ts";
-import { sendWhatsApp } from "../_shared/meta-whatsapp.ts";
+import { sendClientWaReminder, sendStaffWaReminder } from "../_shared/bird-whatsapp.ts";
 
 // ---------------------------------------------------------------------------
 // Auth — CRON_SECRET header check
@@ -291,7 +291,13 @@ async function sendReminders(
         }
         const waAlreadySent = !!(appt as unknown as { reminder_whatsapp_sent_at: string | null }).reminder_whatsapp_sent_at;
         if (!waAlreadySent) {
-          await sendWhatsApp(client.phone, smsText).catch((err) =>
+          await sendClientWaReminder(client.phone, {
+            clientName: `${client.first_name} ${client.last_name}`,
+            serviceName: service.name,
+            salonName: business.name,
+            date: dateStr,
+            time: timeStr,
+          }).catch((err) =>
             console.error(`Reminder WhatsApp failed for appointment ${appt.id}:`, err),
           );
           updateFields.reminder_whatsapp_sent_at = now;
@@ -309,7 +315,13 @@ async function sendReminders(
         await sendSms(staffPhone, staffSmsText).catch((err) =>
           console.error(`Staff SMS reminder failed for appointment ${appt.id}:`, err),
         );
-        await sendWhatsApp(staffPhone, staffSmsText).catch((err) =>
+        await sendStaffWaReminder(staffPhone, {
+          staffName: staff?.display_name ?? "Staff",
+          clientName: `${client.first_name} ${client.last_name}`,
+          serviceName: service.name,
+          date: dateStr,
+          time: timeStr,
+        }).catch((err) =>
           console.error(`Staff WhatsApp reminder failed for appointment ${appt.id}:`, err),
         );
       }

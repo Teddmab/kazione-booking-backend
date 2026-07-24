@@ -36,3 +36,13 @@ yarn-error.log*
 supabase/.temp/
 supabase/.branches/
 supabase/.env
+
+# ── Deno cache files (created by `deno check` in supabase/functions/) ─────────
+# These are SQLite databases that confuse the Supabase CLI deploy when present.
+supabase/functions/check_cache_v2
+supabase/functions/check_cache_v2-*
+supabase/functions/dep_analysis_cache_v2
+supabase/functions/dep_analysis_cache_v2-*
+supabase/functions/fast_check_cache_v2
+supabase/functions/node_analysis_cache_v2
+supabase/functions/v8_code_cache_v2

@@ -253,6 +253,7 @@ async function callAnthropic(
 
   if (!res.ok) {
     const errBody = await res.text();
+    console.error("[ai-insights] Anthropic API error (business)", res.status, errBody.slice(0, 300));
     throw new Error(`Anthropic API error ${res.status}: ${errBody}`);
   }
 
@@ -348,6 +349,7 @@ async function callAnthropicServices(
 
   if (!res.ok) {
     const errBody = await res.text();
+    console.error("[ai-insights] Anthropic API error (services)", res.status, errBody.slice(0, 300));
     throw new Error(`Anthropic API error ${res.status}: ${errBody}`);
   }
 

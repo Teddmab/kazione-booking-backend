@@ -85,7 +85,7 @@ async function sendReminders(
       reminder_sms_sent_at, reminder_whatsapp_sent_at,
       client:clients!inner(email, phone, first_name, last_name, preferred_locale),
       service:services!inner(name),
-      staff:staff_profiles(display_name),
+      staff:staff_profiles(display_name, invited_email, business_member_id),
       business:businesses!inner(name, storefronts(address, city))
     `)
     .eq("status", "confirmed");
@@ -111,26 +111,36 @@ async function sendReminders(
 
   if (!appointments || appointments.length === 0) return { sent: 0, errors: 0 };
 
-  // Fetch reminder_hours_before for each distinct business (cron path only)
+  // Fetch settings for all relevant businesses — used for timing window (cron)
+  // and owner notification email (all paths).
   const needsWindowFilter = !businessId && !appointmentId;
-  let settingsMap = new Map<string, number>();
+  const allBusinessIds = [...new Set(appointments.map((a: { business_id: unknown }) => a.business_id as string))];
 
-  if (needsWindowFilter) {
-    const businessIds = [...new Set(appointments.map((a: { business_id: unknown }) => a.business_id as string))];
+  interface BizSettings { reminderHours: number; ownerEmail: string | null }
+  let settingsMap = new Map<string, BizSettings>();
+
+  {
     const { data: settingsRows, error: settingsErr } = await supabaseAdmin
       .from("business_settings")
-      .select("business_id, reminder_hours_before")
-      .in("business_id", businessIds);
+      .select("business_id, reminder_hours_before, booking_notification_email")
+      .in("business_id", allBusinessIds);
 
     if (settingsErr) {
       console.error("Failed to query business_settings:", settingsErr.message);
       return { sent: 0, errors: 1 };
     }
 
-    settingsMap = new Map<string, number>(
-      (settingsRows ?? []).map((s: { business_id: unknown; reminder_hours_before: unknown }) => [
+    settingsMap = new Map<string, BizSettings>(
+      (settingsRows ?? []).map((s: {
+        business_id: unknown;
+        reminder_hours_before: unknown;
+        booking_notification_email: unknown;
+      }) => [
         s.business_id as string,
-        (s.reminder_hours_before as number) ?? 24,
+        {
+          reminderHours: (s.reminder_hours_before as number) ?? 24,
+          ownerEmail: (s.booking_notification_email as string | null) ?? null,
+        },
       ]),
     );
   }
@@ -138,12 +148,31 @@ async function sendReminders(
   // Apply timing window only for the cron path
   const filteredAppointments = needsWindowFilter
     ? (appointments ?? []).filter((appt) => {
-        const hours = settingsMap.get(appt.business_id as string) ?? 24;
+        const hours = settingsMap.get(appt.business_id as string)?.reminderHours ?? 24;
         const windowStart = new Date(now.getTime() + (hours - 1) * 60 * 60 * 1000);
         const windowEnd = new Date(now.getTime() + (hours + 1) * 60 * 60 * 1000);
         return new Date(appt.starts_at) >= windowStart && new Date(appt.starts_at) <= windowEnd;
       })
     : (appointments ?? []);
+
+  // Fetch staff phones via business_members → users for SMS/WA reminders
+  const staffMemberIds = [...new Set(
+    filteredAppointments
+      .map((a) => (a.staff as unknown as { business_member_id: string | null } | null)?.business_member_id)
+      .filter(Boolean),
+  )] as string[];
+
+  const staffPhoneMap = new Map<string, string>(); // business_member_id → phone
+  if (staffMemberIds.length > 0) {
+    const { data: memberRows } = await supabaseAdmin
+      .from("business_members")
+      .select("id, users(phone)")
+      .in("id", staffMemberIds);
+    for (const m of memberRows ?? []) {
+      const phone = (m as unknown as { id: string; users: { phone: string | null } | null }).users?.phone;
+      if (phone) staffPhoneMap.set((m as unknown as { id: string }).id, phone);
+    }
+  }
 
   let sent = 0;
   let errors = 0;
@@ -160,7 +189,11 @@ async function sendReminders(
       if (!client?.email && !client?.phone) continue;
 
       const service = appt.service as unknown as { name: string };
-      const staff = appt.staff as unknown as { display_name: string } | null;
+      const staff = appt.staff as unknown as {
+        display_name: string;
+        invited_email: string | null;
+        business_member_id: string | null;
+      } | null;
       const business = appt.business as unknown as {
         name: string;
         storefronts: { address: string | null; city: string | null }[] | null;
@@ -207,6 +240,40 @@ async function sendReminders(
         continue;
       }
 
+      // Staff email reminder
+      if (staff?.invited_email) {
+        await sendEmailInternal(staff.invited_email, "staff_appointment_reminder", {
+          staffName: staff.display_name,
+          salonName: business.name,
+          clientName: `${client.first_name} ${client.last_name}`,
+          serviceName: service.name,
+          date: dateStr,
+          time: timeStr,
+          reference: appt.booking_reference,
+        }).catch((err) =>
+          console.error(`Staff reminder email failed for appointment ${appt.id}:`, err),
+        );
+      }
+
+      // Owner email reminder
+      const ownerEmail = settingsMap.get(appt.business_id as string)?.ownerEmail;
+      if (ownerEmail) {
+        await sendEmailInternal(ownerEmail, "owner_appointment_reminder", {
+          salonName: business.name,
+          clientName: `${client.first_name} ${client.last_name}`,
+          clientEmail: client.email ?? "",
+          clientPhone: client.phone ?? "",
+          serviceName: service.name,
+          staffName: staff?.display_name ?? "Any available",
+          date: dateStr,
+          time: timeStr,
+          reference: appt.booking_reference,
+          manageUrl: `${siteUrl}/owner/appointments`,
+        }).catch((err) =>
+          console.error(`Owner reminder email failed for appointment ${appt.id}:`, err),
+        );
+      }
+
       const now = new Date().toISOString();
       const updateFields: Record<string, string> = { reminder_sent_at: now };
 
@@ -229,6 +296,22 @@ async function sendReminders(
           );
           updateFields.reminder_whatsapp_sent_at = now;
         }
+      }
+
+      // Staff SMS/WA reminder (if phone available via business_member)
+      const staffPhone = staff?.business_member_id
+        ? staffPhoneMap.get(staff.business_member_id) ?? null
+        : null;
+      if (staffPhone) {
+        const staffSmsText =
+          `${business.name}: reminder — ${client.first_name} ${client.last_name} ` +
+          `for ${service.name} on ${dateStr} at ${timeStr}. Ref: ${appt.booking_reference}`;
+        await sendSms(staffPhone, staffSmsText).catch((err) =>
+          console.error(`Staff SMS reminder failed for appointment ${appt.id}:`, err),
+        );
+        await sendWhatsApp(staffPhone, staffSmsText).catch((err) =>
+          console.error(`Staff WhatsApp reminder failed for appointment ${appt.id}:`, err),
+        );
       }
 
       await supabaseAdmin

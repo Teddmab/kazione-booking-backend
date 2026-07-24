@@ -8,6 +8,8 @@ import {
   bookingRescheduleEmail,
   reviewRequestEmail,
   staffInviteEmail,
+  staffAppointmentReminderEmail,
+  ownerAppointmentReminderEmail,
 } from "../_shared/resend.ts";
 import { withLogging } from "../_shared/logger.ts";
 
@@ -52,7 +54,9 @@ type TemplateName =
   | "booking_cancellation"
   | "booking_reschedule"
   | "staff_invite"
-  | "review_request";
+  | "review_request"
+  | "staff_appointment_reminder"
+  | "owner_appointment_reminder";
 
 interface SendEmailBody {
   to: string;
@@ -68,6 +72,8 @@ const VALID_TEMPLATES: TemplateName[] = [
   "booking_reschedule",
   "staff_invite",
   "review_request",
+  "staff_appointment_reminder",
+  "owner_appointment_reminder",
 ];
 
 // ---------------------------------------------------------------------------
@@ -219,6 +225,41 @@ Deno.serve(withLogging("send-email", async (req: Request) => {
           },
           locale,
         );
+        subject = result.subject;
+        html = result.html;
+        break;
+      }
+
+      case "staff_appointment_reminder": {
+        const result = staffAppointmentReminderEmail({
+          staffName: body.data.staffName ?? "",
+          salonName: body.data.salonName ?? "",
+          salonLogoUrl: body.data.salonLogoUrl || undefined,
+          clientName: body.data.clientName ?? "",
+          serviceName: body.data.serviceName ?? "",
+          date: body.data.date ?? "",
+          time: body.data.time ?? "",
+          reference: body.data.reference ?? "",
+        });
+        subject = result.subject;
+        html = result.html;
+        break;
+      }
+
+      case "owner_appointment_reminder": {
+        const result = ownerAppointmentReminderEmail({
+          salonName: body.data.salonName ?? "",
+          salonLogoUrl: body.data.salonLogoUrl || undefined,
+          clientName: body.data.clientName ?? "",
+          clientEmail: body.data.clientEmail || null,
+          clientPhone: body.data.clientPhone || null,
+          serviceName: body.data.serviceName ?? "",
+          staffName: body.data.staffName ?? "",
+          date: body.data.date ?? "",
+          time: body.data.time ?? "",
+          reference: body.data.reference ?? "",
+          manageUrl: body.data.manageUrl ?? "",
+        });
         subject = result.subject;
         html = result.html;
         break;

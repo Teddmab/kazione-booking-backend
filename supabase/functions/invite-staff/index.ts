@@ -195,8 +195,6 @@ Deno.serve(withLogging("invite-staff", async (req: Request) => {
           body.email,
           emailData.subject,
           emailData.html,
-          undefined,
-          inviterEmail ? `${inviterName} <${inviterEmail}>` : undefined,
         );
       }
     } catch (err) {

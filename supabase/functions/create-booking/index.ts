@@ -7,6 +7,8 @@ import { withLogging } from "../_shared/logger.ts";
 import { checkRateLimit } from "../_shared/rateLimit.ts";
 import { bookingConfirmationEmail, bookingReceivedOwnerEmail, sendEmail } from "../_shared/resend.ts";
 import { issueCancelToken } from "../_shared/bookingCancelToken.ts";
+import { sendSms } from "../_shared/messagebird.ts";
+import { sendWhatsApp } from "../_shared/meta-whatsapp.ts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -248,7 +250,7 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
       supabaseAdmin
         .from("business_settings")
         .select(
-          "deposit_percentage, tax_enabled, tax_rate, stripe_account_id, enabled_payment_methods, booking_notification_email",
+          "deposit_percentage, tax_enabled, tax_rate, stripe_account_id, enabled_payment_methods, booking_notification_email, sms_notifications_enabled, whatsapp_notifications_enabled",
         )
         .eq("business_id", business_id)
         .maybeSingle(),
@@ -637,6 +639,24 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
         sendEmail(client.email, emailData.subject, emailData.html).catch(
           (err) => console.error("Email send failed:", err),
         );
+      }
+
+      // Send client SMS / WhatsApp confirmation (fire & forget)
+      const clientPhone = client.phone?.trim();
+      if (clientPhone) {
+        const smsText =
+          `${business.name}: booking confirmed — ${service.name} on ${date} at ${time}. ` +
+          `Ref: ${bookingReference}. Manage: ${appUrl}/booking/${bookingReference}`;
+        if (settings?.sms_notifications_enabled) {
+          sendSms(clientPhone, smsText).catch((err) =>
+            console.error("SMS send failed:", err),
+          );
+        }
+        if (settings?.whatsapp_notifications_enabled) {
+          sendWhatsApp(clientPhone, smsText).catch((err) =>
+            console.error("WhatsApp send failed:", err),
+          );
+        }
       }
 
       // Send owner notification email if configured

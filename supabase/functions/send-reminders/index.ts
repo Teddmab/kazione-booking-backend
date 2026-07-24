@@ -4,6 +4,8 @@ import { badRequest, unauthorized, serverError } from "../_shared/errors.ts";
 import { requireOwnerOrManagerCtx } from "../_shared/auth.ts";
 import { withLogging } from "../_shared/logger.ts";
 import { issueCancelToken } from "../_shared/bookingCancelToken.ts";
+import { sendSms } from "../_shared/messagebird.ts";
+import { sendWhatsApp } from "../_shared/meta-whatsapp.ts";
 
 // ---------------------------------------------------------------------------
 // Auth — CRON_SECRET header check
@@ -35,7 +37,7 @@ function verifyCronAuth(req: Request): boolean {
 // ---------------------------------------------------------------------------
 
 const FUNCTIONS_URL = Deno.env.get("SUPABASE_URL") + "/functions/v1";
-const INTERNAL_KEY = Deno.env.get("INTERNAL_FUNCTION_KEY")!;
+const INTERNAL_KEY = Deno.env.get("INTERNAL_FUNCTION_KEY") ?? "";
 
 async function sendEmailInternal(
   to: string,
@@ -80,7 +82,8 @@ async function sendReminders(
     .from("appointments")
     .select(`
       id, starts_at, booking_reference, price, business_id,
-      client:clients!inner(email, first_name, last_name, preferred_locale),
+      reminder_sms_sent_at, reminder_whatsapp_sent_at,
+      client:clients!inner(email, phone, first_name, last_name, preferred_locale),
       service:services!inner(name),
       staff:staff_profiles(display_name),
       business:businesses!inner(name, storefronts(address, city))
@@ -149,11 +152,12 @@ async function sendReminders(
     try {
       const client = appt.client as unknown as {
         email: string | null;
+        phone: string | null;
         first_name: string;
         last_name: string;
         preferred_locale: string;
       };
-      if (!client?.email) continue;
+      if (!client?.email && !client?.phone) continue;
 
       const service = appt.service as unknown as { name: string };
       const staff = appt.staff as unknown as { display_name: string } | null;
@@ -183,27 +187,53 @@ async function sendReminders(
       const cancelToken = await issueCancelToken(appt.id, appt.booking_reference);
       const manageUrl = `${siteUrl}/booking/${appt.booking_reference}?token=${encodeURIComponent(cancelToken)}`;
 
-      const delivered = await sendEmailInternal(client.email, "booking_reminder", {
-        clientName: `${client.first_name} ${client.last_name}`,
-        salonName: business.name,
-        serviceName: service.name,
-        staffName: staff?.display_name ?? "Any available",
-        date: dateStr,
-        time: timeStr,
-        reference: appt.booking_reference,
-        price: `€${Number(appt.price).toFixed(2)}`,
-        manageUrl,
-        salonAddress,
-      });
+      const emailDelivered = client.email
+        ? await sendEmailInternal(client.email, "booking_reminder", {
+            clientName: `${client.first_name} ${client.last_name}`,
+            salonName: business.name,
+            serviceName: service.name,
+            staffName: staff?.display_name ?? "Any available",
+            date: dateStr,
+            time: timeStr,
+            reference: appt.booking_reference,
+            price: `€${Number(appt.price).toFixed(2)}`,
+            manageUrl,
+            salonAddress,
+          })
+        : true; // no email address — not a failure
 
-      if (!delivered) {
+      if (!emailDelivered) {
         errors++;
         continue;
       }
 
+      const now = new Date().toISOString();
+      const updateFields: Record<string, string> = { reminder_sent_at: now };
+
+      // SMS reminder
+      if (client.phone) {
+        const smsText =
+          `${business.name}: reminder — ${service.name} on ${dateStr} at ${timeStr}. ` +
+          `Ref: ${appt.booking_reference}. Manage: ${manageUrl}`;
+        const smsAlreadySent = !!(appt as unknown as { reminder_sms_sent_at: string | null }).reminder_sms_sent_at;
+        if (!smsAlreadySent) {
+          await sendSms(client.phone, smsText).catch((err) =>
+            console.error(`Reminder SMS failed for appointment ${appt.id}:`, err),
+          );
+          updateFields.reminder_sms_sent_at = now;
+        }
+        const waAlreadySent = !!(appt as unknown as { reminder_whatsapp_sent_at: string | null }).reminder_whatsapp_sent_at;
+        if (!waAlreadySent) {
+          await sendWhatsApp(client.phone, smsText).catch((err) =>
+            console.error(`Reminder WhatsApp failed for appointment ${appt.id}:`, err),
+          );
+          updateFields.reminder_whatsapp_sent_at = now;
+        }
+      }
+
       await supabaseAdmin
         .from("appointments")
-        .update({ reminder_sent_at: new Date().toISOString() })
+        .update(updateFields)
         .eq("id", appt.id);
 
       sent++;

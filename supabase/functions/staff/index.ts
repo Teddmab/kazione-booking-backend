@@ -158,8 +158,8 @@ Deno.serve(withLogging("staff", async (req: Request) => {
 
       const { data: rows, error: rpcErr } = await supabaseAdmin.rpc("get_staff_performance", {
         p_business_id: mem.business_id as string,
-        p_from: from,
-        p_to: to,
+        p_start_date: from,
+        p_end_date: to,
       });
 
       if (rpcErr) return serverError(rpcErr.message);
@@ -646,7 +646,6 @@ Deno.serve(withLogging("staff", async (req: Request) => {
       const inviterName = inviterResult.data
         ? `${inviterResult.data.first_name ?? ""} ${inviterResult.data.last_name ?? ""}`.trim() || "Your salon"
         : "Your salon";
-      const inviterEmail = inviterResult.data?.email?.trim() || null;
       const salonName = businessResult.data?.name ?? "the salon";
       const locale = businessResult.data?.locale ?? "en";
 
@@ -676,8 +675,6 @@ Deno.serve(withLogging("staff", async (req: Request) => {
             toEmail,
             emailData.subject,
             emailData.html,
-            undefined,
-            inviterEmail ? `${inviterName} <${inviterEmail}>` : undefined,
           );
         }
       } catch (err) {

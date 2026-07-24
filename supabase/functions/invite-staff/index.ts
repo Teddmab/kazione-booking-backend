@@ -150,7 +150,6 @@ Deno.serve(withLogging("invite-staff", async (req: Request) => {
         inviterResult.data.last_name ?? ""
       }`.trim() || "Your salon"
       : "Your salon";
-    const inviterEmail = inviterResult.data?.email?.trim() || null;
     const salonName = businessResult.data?.name ?? "the salon";
     const locale = businessResult.data?.locale ?? "en";
     const country = (businessResult.data?.country as string | null) ?? "EE";
@@ -195,8 +194,6 @@ Deno.serve(withLogging("invite-staff", async (req: Request) => {
           body.email,
           emailData.subject,
           emailData.html,
-          undefined,
-          inviterEmail ? `${inviterName} <${inviterEmail}>` : undefined,
         );
       }
     } catch (err) {

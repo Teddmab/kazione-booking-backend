@@ -280,6 +280,7 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
       const dateTo = url.searchParams.get("date_to");
       const statusParams = url.searchParams.getAll("status");
       const staffId = url.searchParams.get("staff_id");
+      const serviceId = url.searchParams.get("service_id");
       const search = url.searchParams.get("search");
 
       // deno-lint-ignore no-explicit-any
@@ -298,6 +299,7 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
       } else if (staffId) {
         query = query.eq("staff_profile_id", staffId);
       }
+      if (serviceId) query = query.eq("service_id", serviceId);
       if (search) {
         query = query.or(
           `client.first_name.ilike.%${search}%,client.last_name.ilike.%${search}%,client.email.ilike.%${search}%`,

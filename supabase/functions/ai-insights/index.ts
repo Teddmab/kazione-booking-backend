@@ -339,10 +339,6 @@ async function callAnthropicServices(
           role: "user",
           content: `Analyze this service catalog:\n${JSON.stringify(services)}`,
         },
-        {
-          role: "assistant",
-          content: "{",
-        },
       ],
     }),
   });
@@ -354,8 +350,9 @@ async function callAnthropicServices(
   }
 
   const data = await res.json();
-  // Prepend the '{' we sent as the assistant prefill
-  const text = "{" + (data.content?.[0]?.text ?? "");
+  // Strip markdown code fences if the model wraps the JSON
+  const raw = (data.content?.[0]?.text ?? "") as string;
+  const text = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/, "").trim();
 
   let parsed: Record<string, unknown>;
   try {

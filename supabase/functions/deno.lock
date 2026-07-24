@@ -612,6 +612,7 @@
   },
   "workspace": {
     "dependencies": [
+      "npm:@messagebird/sdk@*",
       "npm:@supabase/supabase-js@2",
       "npm:resend@3",
       "npm:stripe@14"

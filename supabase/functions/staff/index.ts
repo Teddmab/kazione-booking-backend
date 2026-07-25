@@ -606,17 +606,21 @@ Deno.serve(withLogging("staff", async (req: Request) => {
         }
 
         // New or previously declined — insert/upsert as pending.
-        await supabaseAdmin
+        const { error: upsertErr } = await supabaseAdmin
           .from("staff_services")
-          .upsert({
-            staff_profile_id: staffId,
-            service_id: offer.service_id,
-            status: "pending",
-            offered_commission_type: offer.commission_type ?? null,
-            offered_commission_value: offer.commission_value ?? null,
-            assigned_at: new Date().toISOString(),
-            responded_at: null,
-          });
+          .upsert(
+            {
+              staff_profile_id: staffId,
+              service_id: offer.service_id,
+              status: "pending",
+              offered_commission_type: offer.commission_type ?? null,
+              offered_commission_value: offer.commission_value ?? null,
+              assigned_at: new Date().toISOString(),
+              responded_at: null,
+            },
+            { onConflict: "staff_profile_id,service_id" },
+          );
+        if (upsertErr) return serverError(upsertErr.message);
       }
 
       return json({ success: true, offered_count: offeredIds.length });
@@ -642,17 +646,27 @@ Deno.serve(withLogging("staff", async (req: Request) => {
         return badRequest("response must be 'accepted' or 'declined'");
       }
 
-      // Find the caller's staff profile.
+      // Resolve which business this service belongs to so we pick the correct
+      // membership for users who belong to more than one business.
+      const { data: svc } = await supabaseAdmin
+        .from("services")
+        .select("business_id")
+        .eq("id", serviceId)
+        .maybeSingle();
+
+      if (!svc) return notFound("Service not found");
+      const offerBusinessId = (svc as Record<string, unknown>).business_id as string;
+
+      // Find the caller's membership in THAT specific business.
       const { data: membership } = await supabaseAdmin
         .from("business_members")
         .select("id, business_id")
         .eq("user_id", user.id)
+        .eq("business_id", offerBusinessId)
         .eq("is_active", true)
-        .order("joined_at", { ascending: false })
-        .limit(1)
         .maybeSingle();
 
-      if (!membership) return forbidden("No active business membership found");
+      if (!membership) return forbidden("No active business membership found for this service's business");
 
       const mem = membership as Record<string, unknown>;
       const { data: sp } = await supabaseAdmin

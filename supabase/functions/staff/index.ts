@@ -893,6 +893,53 @@ Deno.serve(withLogging("staff", async (req: Request) => {
       return json({ success: true });
     }
 
+    // ── PATCH /staff?action=update-self ──────────────────────────────────────────
+    // Staff member updates their own display_name (and optionally bio / position).
+    if (method === "PATCH" && action === "update-self") {
+      let user;
+      try { user = await verifyAuth(req); } catch (e) { return e instanceof Response ? e : forbidden("Authentication required"); }
+
+      let body: Record<string, unknown> = {};
+      try { body = await req.json(); } catch { /* empty body is fine */ }
+
+      const { data: membership } = await supabaseAdmin
+        .from("business_members")
+        .select("id, business_id")
+        .eq("user_id", user.id)
+        .eq("is_active", true)
+        .order("joined_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (!membership) return forbidden("No active business membership found");
+
+      const mem = membership as Record<string, unknown>;
+      const { data: sp } = await supabaseAdmin
+        .from("staff_profiles")
+        .select("id")
+        .eq("business_member_id", mem.id as string)
+        .eq("business_id", mem.business_id as string)
+        .maybeSingle();
+      const spId = (sp as { id: string } | null)?.id;
+      if (!spId) return forbidden("No staff profile found");
+
+      const update: Record<string, unknown> = {};
+      if (typeof body.display_name === "string" && body.display_name.trim()) {
+        update.display_name = body.display_name.trim();
+      }
+
+      if (Object.keys(update).length === 0) return badRequest("No valid fields to update");
+
+      const { data: updated, error: upErr } = await supabaseAdmin
+        .from("staff_profiles")
+        .update(update)
+        .eq("id", spId)
+        .select("id, display_name, position, avatar_url")
+        .single();
+
+      if (upErr) return serverError(upErr.message);
+      return json(updated);
+    }
+
     // ── GET /staff?action=services&id= (get current service assignments) ────────
     if (method === "GET" && action === "services") {
       if (!staffId) return badRequest("id query param is required");

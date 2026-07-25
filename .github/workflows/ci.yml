@@ -53,6 +53,8 @@ jobs:
       - uses: supabase/setup-cli@v1
         with:
           version: 2.105.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Write dev-only edge function secrets
         run: |

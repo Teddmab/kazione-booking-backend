@@ -3,7 +3,7 @@ import { corsHeaders, handleCors } from "../_shared/cors.ts";
 import { badRequest, forbidden, notFound, serverError } from "../_shared/errors.ts";
 import { requireOwnerOrManagerCtx, verifyAuth } from "../_shared/auth.ts";
 import { withLogging } from "../_shared/logger.ts";
-import { sendEmail, staffInviteEmail } from "../_shared/resend.ts";
+import { sendEmail, staffInviteEmail, staffServiceOfferAcceptedEmail } from "../_shared/resend.ts";
 
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
@@ -684,6 +684,56 @@ Deno.serve(withLogging("staff", async (req: Request) => {
         .eq("service_id", serviceId);
 
       if (updErr) return serverError(updErr.message);
+
+      // Send confirmation email when staff accepts
+      if (response === "accepted") {
+        (async () => {
+          try {
+            const [profileRes, serviceRes, memberEmailRes, bizRes] = await Promise.all([
+              supabaseAdmin.from("staff_profiles").select("display_name, business_member_id, business_id").eq("id", spId).maybeSingle(),
+              supabaseAdmin.from("services").select("name, description, price, currency_code, staff_commission_type, staff_commission_value").eq("id", serviceId).maybeSingle(),
+              supabaseAdmin.from("business_members").select("user:users(email)").eq("id", mem.id as string).maybeSingle(),
+              supabaseAdmin.from("businesses").select("name, logo_url").eq("id", mem.business_id as string).maybeSingle(),
+            ]);
+
+            const profile = profileRes.data as Record<string, unknown> | null;
+            const svc = serviceRes.data as Record<string, unknown> | null;
+            const biz = bizRes.data as Record<string, unknown> | null;
+            const emailUser = (memberEmailRes.data as Record<string, unknown> | null)?.user as Record<string, unknown> | null;
+            const staffEmail = emailUser?.email as string | null;
+
+            if (!staffEmail || !profile || !svc) return;
+
+            const currencyCode = (svc.currency_code as string) ?? "EUR";
+            const price = `${currencyCode === "EUR" ? "€" : currencyCode} ${Number(svc.price).toFixed(2)}`;
+
+            let commissionText: string | null = null;
+            const commType = svc.staff_commission_type as string | null;
+            const commValue = Number(svc.staff_commission_value ?? 0);
+            if (commType === "percentage" && commValue > 0) {
+              commissionText = `${commValue}% of booking price`;
+            } else if (commType === "fixed" && commValue > 0) {
+              commissionText = `${currencyCode === "EUR" ? "€" : currencyCode} ${commValue.toFixed(2)} per booking`;
+            }
+
+            const emailData = staffServiceOfferAcceptedEmail({
+              staffName: (profile.display_name as string) ?? "Team member",
+              salonName: (biz?.name as string) ?? "KaziOne",
+              salonLogoUrl: biz?.logo_url as string | null ?? null,
+              serviceName: svc.name as string,
+              serviceDescription: svc.description as string | null ?? null,
+              price,
+              commissionText,
+            });
+
+            await sendEmail(staffEmail, emailData.subject, emailData.html).catch((e) =>
+              console.warn("Service offer accepted email failed:", e),
+            );
+          } catch (e) {
+            console.warn("Service offer accepted email error:", e);
+          }
+        })();
+      }
 
       return json({ success: true, service_id: serviceId, status: response });
     }

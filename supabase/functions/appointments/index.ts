@@ -117,6 +117,7 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
           .from("appointments")
           .select(APPT_SELECT)
           .in("client_id", clientIds)
+          .is("deleted_at", null)
           .order("starts_at", { ascending: false });
 
         if (error) return serverError(error.message);
@@ -132,6 +133,7 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
           .from("appointments")
           .select("id, business_id")
           .eq("id", id)
+          .is("deleted_at", null)
           .maybeSingle();
 
         if (existingErr) return serverError(existingErr.message);
@@ -143,6 +145,7 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
           .from("appointments")
           .select(APPT_SELECT)
           .eq("id", id)
+          .is("deleted_at", null)
           .single();
 
         if (error) {
@@ -241,6 +244,7 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
             .from("appointments")
             .select("staff_profile_id, starts_at, ends_at, status, price")
             .eq("business_id", businessId)
+            .is("deleted_at", null)
             .gte("starts_at", dayStart.toISOString())
             .lt("starts_at", dayEnd.toISOString()),
         ]);
@@ -325,6 +329,7 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
         .from("appointments")
         .select(APPT_SELECT, { count: "exact" })
         .eq("business_id", businessId)
+        .is("deleted_at", null)
         .order("starts_at", { ascending: false });
 
       if (dateFrom) query = query.gte("starts_at", `${dateFrom}T00:00:00`);
@@ -887,7 +892,7 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
       return json(normalizePayment(data));
     }
 
-    // ── DELETE ?id= ────────────────────────────────────────────────────────
+    // ── DELETE ?id= — soft delete (cancelled only) ─────────────────────────
     if (method === "DELETE") {
       if (!id) return badRequest("id is required");
 
@@ -895,25 +900,29 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
         .from("appointments")
         .select("business_id, status")
         .eq("id", id)
+        .is("deleted_at", null)
         .single();
 
       if (!existing) return notFound("Appointment not found");
 
       const appt = existing as Record<string, unknown>;
-      if (appt.status !== "completed") {
+      if (appt.status !== "cancelled") {
         return json(
-          { error: { code: "FORBIDDEN", message: "Only completed appointments can be deleted" } },
-          403,
+          { error: { code: "INVALID_STATE", message: "Only cancelled appointments can be deleted" } },
+          409,
         );
       }
 
       const ctx = await requireOwnerOrManagerCtx(req, appt.business_id as string);
       if (ctx instanceof Response) return ctx;
 
-      const { error } = await supabaseAdmin.from("appointments").delete().eq("id", id);
+      const { error } = await supabaseAdmin
+        .from("appointments")
+        .update({ deleted_at: new Date().toISOString() })
+        .eq("id", id);
       if (error) return serverError(error.message);
 
-      return json({ ok: true });
+      return json({ success: true });
     }
 
     return badRequest("Method not allowed");

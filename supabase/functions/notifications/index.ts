@@ -32,13 +32,20 @@ Deno.serve(withLogging("notifications", async (req: Request) => {
 
     if (method === "GET") {
       const limit = parseInt(url.searchParams.get("limit") ?? "50", 10);
+      const typeFilter = url.searchParams.get("type");
 
-      const { data, error } = await supabaseAdmin
+      let query = supabaseAdmin
         .from("notifications")
         .select("*")
         .eq("user_id", user.id)
         .order("created_at", { ascending: false })
         .limit(limit);
+
+      if (typeFilter) {
+        query = query.eq("type", typeFilter);
+      }
+
+      const { data, error } = await query;
 
       if (error) return serverError(error.message);
       return json(data ?? []);

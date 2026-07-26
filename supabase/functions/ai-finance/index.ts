@@ -348,9 +348,11 @@ Deno.serve(withLogging("ai-finance", async (req: Request) => {
     const body = (await req.json()) as RequestBody;
     const { business_id, period_days, question, focus, context: focusContext } = body;
 
-    const isDebtFastPath = focus === "debt_strategy" && focusContext !== undefined;
+    // Fast-path: caller provides pre-gathered context for any focus value.
+    // Skips the broken RPC-based context gathering entirely.
+    const isFastPath = focus !== undefined && focusContext !== undefined;
 
-    if (!business_id || (!isDebtFastPath && !VALID_PERIODS.includes(period_days!))) {
+    if (!business_id || (!isFastPath && !VALID_PERIODS.includes(period_days!))) {
       return badRequest(
         "business_id and valid period_days (7|14|30|90) required",
       );
@@ -361,43 +363,48 @@ Deno.serve(withLogging("ai-finance", async (req: Request) => {
     if (ctx instanceof Response) return ctx;
     const { userId, businessId } = ctx;
 
-    // ── Debt strategy fast-path (uses caller context, skips RPC gathering) ──
-    if (isDebtFastPath) {
-      const debtCacheThreshold = new Date(Date.now() - 30 * 60 * 1000).toISOString();
-      const { data: debtCached } = await supabaseAdmin
+    // ── Focus fast-path (uses caller context, skips RPC gathering) ──────────
+    if (isFastPath) {
+      const notifType = `ai_${focus}`;
+      const cacheMinutes = 30;
+      const fastCacheThreshold = new Date(Date.now() - cacheMinutes * 60 * 1000).toISOString();
+
+      const { data: fastCached } = await supabaseAdmin
         .from("notifications")
         .select("metadata")
         .eq("business_id", businessId)
-        .eq("type", "ai_debt_strategy")
-        .gte("created_at", debtCacheThreshold)
+        .eq("type", notifType)
+        .gte("created_at", fastCacheThreshold)
         .order("created_at", { ascending: false })
         .limit(1)
         .maybeSingle();
 
-      if (debtCached?.metadata) {
+      if (fastCached?.metadata) {
         return new Response(
           JSON.stringify({
-            insights: (debtCached.metadata as Record<string, unknown>).insights,
+            insights: (fastCached.metadata as Record<string, unknown>).insights,
             cached: true,
           }),
           { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } },
         );
       }
 
-      const debtInsights = await callAnthropicDebtStrategy(focusContext!);
+      const fastInsights = focus === "debt_strategy"
+        ? await callAnthropicDebtStrategy(focusContext!)
+        : await callAnthropic(focusContext!, question);
 
       await supabaseAdmin.from("notifications").insert({
         business_id: businessId,
         user_id: userId,
-        type: "ai_debt_strategy",
-        title: "AI Debt Strategy",
-        body: `Generated ${debtInsights.length} debt management insights`,
-        metadata: { insights: debtInsights },
+        type: notifType,
+        title: `AI ${focus.replace(/_/g, " ")} analysis`,
+        body: `Generated ${fastInsights.length} insights`,
+        metadata: { insights: fastInsights },
         is_read: true,
       });
 
       return new Response(
-        JSON.stringify({ insights: debtInsights, cached: false }),
+        JSON.stringify({ insights: fastInsights, cached: false }),
         { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } },
       );
     }

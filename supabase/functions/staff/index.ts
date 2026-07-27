@@ -1,7 +1,7 @@
 import { supabaseAdmin } from "../_shared/supabaseAdmin.ts";
 import { corsHeaders, handleCors } from "../_shared/cors.ts";
 import { badRequest, forbidden, notFound, serverError } from "../_shared/errors.ts";
-import { requireOwnerOrManagerCtx, verifyAuth } from "../_shared/auth.ts";
+import { requireOwnerOrManagerCtx, verifyAuth, verifyBusinessMember } from "../_shared/auth.ts";
 import { withLogging } from "../_shared/logger.ts";
 import { sendEmail, staffInviteEmail } from "../_shared/resend.ts";
 
@@ -52,6 +52,103 @@ Deno.serve(withLogging("staff", async (req: Request) => {
   const action = url.searchParams.get("action") ?? undefined;
 
   try {
+    // ── GET|POST /staff?action=self — logged-in staff profile + working hours ─
+    // Used by the mobile staff portal (MS1–MS3). Any active business member with
+    // a linked staff_profile can call this for their own business.
+    if ((method === "GET" || method === "POST") && action === "self") {
+      let user;
+      try {
+        user = await verifyAuth(req);
+      } catch (e) {
+        return e instanceof Response ? e : forbidden("Authentication required");
+      }
+
+      let businessId = url.searchParams.get("business_id") ?? undefined;
+      if (!businessId && method === "POST") {
+        const body = await req.json().catch(() => null) as {
+          business_id?: string;
+        } | null;
+        businessId = body?.business_id;
+      }
+      if (!businessId) return badRequest("business_id is required");
+
+      let member: { role: string; memberId: string };
+      try {
+        member = await verifyBusinessMember(user.id, businessId);
+      } catch (e) {
+        return e instanceof Response ? e : forbidden("Not a member of this business");
+      }
+
+      const { data: staffRow, error: staffErr } = await supabaseAdmin
+        .from("staff_profiles")
+        .select(`
+          id,
+          display_name,
+          position,
+          avatar_url,
+          is_active,
+          staff_working_hours (
+            day_of_week,
+            start_time,
+            end_time,
+            is_working
+          )
+        `)
+        .eq("business_id", businessId)
+        .eq("business_member_id", member.memberId)
+        .maybeSingle();
+
+      if (staffErr) return serverError(staffErr.message);
+      if (!staffRow) {
+        return notFound("No staff profile linked to this membership");
+      }
+
+      const { data: profile } = await supabaseAdmin
+        .from("users")
+        .select("id, first_name, last_name, email, phone, avatar_url")
+        .eq("id", user.id)
+        .maybeSingle();
+
+      const row = staffRow as Record<string, unknown>;
+      const workingHours =
+        (row.staff_working_hours as Array<Record<string, unknown>>) ?? [];
+
+      const displayName = String(row.display_name ?? "").trim();
+      const nameParts = displayName.split(/\s+/).filter(Boolean);
+      const firstFromDisplay = nameParts[0] ?? "";
+      const lastFromDisplay = nameParts.slice(1).join(" ");
+
+      const profileRow = profile as {
+        id: string;
+        first_name: string | null;
+        last_name: string | null;
+        email: string | null;
+        phone: string | null;
+        avatar_url: string | null;
+      } | null;
+
+      return json({
+        staff_profile_id: row.id as string,
+        user_id: user.id,
+        first_name: profileRow?.first_name?.trim() || firstFromDisplay,
+        last_name: profileRow?.last_name?.trim() || lastFromDisplay,
+        email: profileRow?.email ?? "",
+        phone: profileRow?.phone ?? undefined,
+        avatar_url:
+          (row.avatar_url as string | null) ??
+          profileRow?.avatar_url ??
+          undefined,
+        role: member.role,
+        position: (row.position as string | null) ?? null,
+        working_hours: workingHours.map((wh) => ({
+          day: Number(wh.day_of_week),
+          is_working: Boolean(wh.is_working),
+          start_time: (wh.start_time as string | null) ?? null,
+          end_time: (wh.end_time as string | null) ?? null,
+        })),
+      });
+    }
+
     // ── GET /staff ────────────────────────────────────────────────────────────
     // business_id from query param (preferred) or resolved from JWT membership.
     if (method === "GET" && !action) {

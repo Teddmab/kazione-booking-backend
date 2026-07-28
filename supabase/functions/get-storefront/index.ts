@@ -1,11 +1,76 @@
 import { supabaseAdmin } from "../_shared/supabaseAdmin.ts";
-import { corsHeaders, handleCors } from "../_shared/cors.ts";
+import { corsHeadersFor, handleCors } from "../_shared/cors.ts";
 import { badRequest, notFound, serverError } from "../_shared/errors.ts";
 import { withLogging } from "../_shared/logger.ts";
+
+const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
+const LOCALE_NAMES: Record<string, string> = {
+  en: "English", et: "Estonian", fr: "French", ru: "Russian",
+};
+
+async function translateIntakeFields(
+  fields: IntakeField[],
+  locale: string,
+): Promise<IntakeField[]> {
+  const apiKey = Deno.env.get("ANTHROPIC_API_KEY");
+  if (!apiKey || locale === "en" || fields.length === 0) return fields;
+
+  // Build a compact payload: just the strings that need translating
+  const payload = fields.map((f) => ({
+    label: f.label,
+    options: f.options?.filter(Boolean) ?? [],
+  }));
+
+  const targetLang = LOCALE_NAMES[locale] ?? locale;
+  const prompt =
+    `Translate the following JSON array of form field labels and options to ${targetLang}. ` +
+    `Keep the same JSON structure. Return ONLY the JSON array, no explanation:\n\n` +
+    JSON.stringify(payload);
+
+  try {
+    const res = await fetch(ANTHROPIC_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model: "claude-haiku-4-5-20251001",
+        max_tokens: 1024,
+        messages: [{ role: "user", content: prompt }],
+      }),
+    });
+
+    if (!res.ok) return fields;
+
+    const data = await res.json() as { content: Array<{ type: string; text: string }> };
+    const text = data.content?.[0]?.text?.trim() ?? "";
+    // Strip optional markdown code fences
+    const json = text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
+    const translated = JSON.parse(json) as Array<{ label: string; options?: string[] }>;
+
+    return fields.map((f, i) => ({
+      ...f,
+      label: translated[i]?.label ?? f.label,
+      options: translated[i]?.options?.length ? translated[i].options : f.options,
+    }));
+  } catch {
+    return fields; // fallback to originals on any error
+  }
+}
 
 // ---------------------------------------------------------------------------
 // StorefrontData interfaces — mirrors frontend src/data/storefrontData.ts
 // ---------------------------------------------------------------------------
+
+interface IntakeField {
+  id: string;
+  label: string;
+  type: "text" | "textarea" | "select" | "checkbox" | "file";
+  required: boolean;
+  options?: string[];
+}
 
 interface StorefrontService {
   id: string;
@@ -23,6 +88,7 @@ interface StorefrontService {
   imageUrl2: string | null;
   imageUrl3: string | null;
   displayOrder: number;
+  useIntakeForm: boolean;
 }
 
 interface StaffMember {
@@ -127,6 +193,10 @@ interface StorefrontData {
   taxRate: number;
   depositPercent: number;
   enabledPaymentMethods: string[];
+  gaMeasurementId: string | null;
+  intakeForm: IntakeField[] | null;
+  bookingTerms: string | null;
+  translateTerms: boolean;
 
   // Nested
   contact: StorefrontContact;
@@ -245,10 +315,10 @@ Deno.serve(withLogging("get-storefront", async (req: Request) => {
         .eq("id", businessId)
         .single(),
 
-      // Business settings (tax + deposit + locale) — exposed so the booking form shows the real total
+      // Business settings (tax + deposit + locale + privacy flags)
       supabaseAdmin
         .from("business_settings")
-        .select("tax_enabled, tax_rate, deposit_percentage, enabled_payment_methods, storefront_locale")
+        .select("tax_enabled, tax_rate, deposit_percentage, enabled_payment_methods, storefront_locale, ga_measurement_id, intake_form, booking_terms, translate_booking_terms, booking_terms_translations, hide_staff_names")
         .eq("business_id", businessId)
         .maybeSingle(),
 
@@ -258,7 +328,7 @@ Deno.serve(withLogging("get-storefront", async (req: Request) => {
         .select(`
           id, name, description, duration_minutes, buffer_minutes, price, currency_code,
           is_active, is_public, image_url, image_url_2, image_url_3, display_order,
-          category_id,
+          category_id, use_intake_form,
           service_categories ( name ),
           service_translations ( locale, field, value )
         `)
@@ -272,7 +342,7 @@ Deno.serve(withLogging("get-storefront", async (req: Request) => {
         .from("staff_profiles")
         .select(`
           id, display_name, bio, avatar_url, specialties, is_active,
-          staff_services ( service_id )
+          staff_services ( service_id, status )
         `)
         .eq("business_id", businessId)
         .eq("is_active", true),
@@ -396,6 +466,7 @@ Deno.serve(withLogging("get-storefront", async (req: Request) => {
           imageUrl2: (svc.image_url_2 as string) ?? null,
           imageUrl3: (svc.image_url_3 as string) ?? null,
           displayOrder: svc.display_order as number,
+          useIntakeForm: Boolean(svc.use_intake_form),
         };
       },
     );
@@ -405,15 +476,19 @@ Deno.serve(withLogging("get-storefront", async (req: Request) => {
       (s: Record<string, unknown>) => {
         const staffServices = (s.staff_services ?? []) as Array<{
           service_id: string;
+          status?: string;
         }>;
+        const hideNames = settings?.hide_staff_names === true;
         return {
           id: s.id as string,
-          name: s.display_name as string,
+          name: hideNames ? "Professional" : (s.display_name as string),
           role: businessTypeToStaffRole((business as Record<string, unknown>).business_type as string | null),
-          bio: (s.bio ?? "") as string,
-          avatar: (s.avatar_url as string) ?? null,
+          bio: hideNames ? "" : ((s.bio ?? "") as string),
+          avatar: hideNames ? null : ((s.avatar_url as string) ?? null),
           specialties: (s.specialties ?? []) as string[],
-          serviceIds: staffServices.map((ss) => ss.service_id),
+          serviceIds: staffServices
+            .filter((ss) => !ss.status || ss.status === "accepted")
+            .map((ss) => ss.service_id),
         };
       },
     );
@@ -525,6 +600,22 @@ Deno.serve(withLogging("get-storefront", async (req: Request) => {
       taxRate: +(settings?.tax_rate ?? 0),
       depositPercent: +(settings?.deposit_percentage ?? 25),
       enabledPaymentMethods: (settings?.enabled_payment_methods as string[] | null) ?? ["deposit", "full", "later"],
+      gaMeasurementId: (settings?.ga_measurement_id as string | null) ?? null,
+      intakeForm: await translateIntakeFields(
+        (settings?.intake_form as IntakeField[] | null) ?? [],
+        locale,
+      ).then((f) => f.length ? f : null),
+      bookingTerms: (() => {
+        const original = (settings?.booking_terms as string | null) ?? null;
+        if (!original) return null;
+        const doTranslate = settings?.translate_booking_terms as boolean | null;
+        const translations = settings?.booking_terms_translations as Record<string, string> | null;
+        if (doTranslate && translations && locale in translations) {
+          return translations[locale];
+        }
+        return original;
+      })(),
+      translateTerms: Boolean(settings?.translate_booking_terms),
 
       // Nested
       contact: {
@@ -545,7 +636,7 @@ Deno.serve(withLogging("get-storefront", async (req: Request) => {
     return new Response(JSON.stringify(response), {
       status: 200,
       headers: {
-        ...corsHeaders,
+        ...corsHeadersFor(req),
         "Content-Type": "application/json",
         "Cache-Control": "no-store",
       },

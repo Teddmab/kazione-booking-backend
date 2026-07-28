@@ -175,6 +175,7 @@ Deno.serve(withLogging("suppliers", async (req: Request) => {
             ordered_at: body.ordered_at ?? null,
             expected_at: body.expected_at ?? null,
             total_amount,
+            invoice_photo_url: body.invoice_photo_url ?? null,
             created_by: ctx.userId,
           })
           .select()
@@ -235,6 +236,7 @@ Deno.serve(withLogging("suppliers", async (req: Request) => {
 
         const update: Record<string, unknown> = { status, updated_at: new Date().toISOString() };
         if (status === "received") update.received_at = new Date().toISOString();
+        if (body.invoice_photo_url !== undefined) update.invoice_photo_url = body.invoice_photo_url ?? null;
 
         const { data, error } = await supabaseAdmin
           .from("supplier_orders")

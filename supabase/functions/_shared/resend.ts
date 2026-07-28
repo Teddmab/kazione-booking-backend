@@ -6,6 +6,11 @@ const resend = RESEND_API_KEY ? new Resend(RESEND_API_KEY) : null;
 const DEFAULT_FROM = Deno.env.get("BUSINESS_EMAIL_FROM") ??
   "KaziOne Booking <onboarding@resend.dev>";
 
+export interface EmailAttachment {
+  filename: string;
+  content: string; // base64-encoded
+}
+
 /**
  * Send a transactional email via Resend.
  */
@@ -14,7 +19,7 @@ export async function sendEmail(
   subject: string,
   html: string,
   from?: string,
-  replyTo?: string,
+  attachments?: EmailAttachment[],
 ) {
   if (!resend) {
     console.warn(
@@ -23,13 +28,17 @@ export async function sendEmail(
     return;
   }
 
-  const { error } = await resend.emails.send({
+  const payload = {
     from: from ?? DEFAULT_FROM,
     to,
     subject,
     html,
-    reply_to: replyTo,
-  });
+    ...(attachments && attachments.length > 0
+      ? { attachments: attachments.map((a) => ({ filename: a.filename, content: a.content })) }
+      : {}),
+  };
+
+  const { error } = await resend.emails.send(payload as Parameters<typeof resend.emails.send>[0]);
 
   if (error) {
     throw new Error(`Resend error: ${JSON.stringify(error)}`);
@@ -253,6 +262,7 @@ interface StaffInviteData {
   salonLogoUrl?: string;
   inviterName: string;
   acceptUrl: string;
+  isEstonia?: boolean;
 }
 
 interface ReviewRequestData {
@@ -261,6 +271,21 @@ interface ReviewRequestData {
   salonLogoUrl?: string;
   serviceName: string;
   reviewUrl: string;
+}
+
+interface OwnerBookingNotificationData {
+  clientName: string;
+  clientEmail?: string | null;
+  clientPhone?: string | null;
+  salonName: string;
+  salonLogoUrl?: string | null;
+  serviceName: string;
+  staffName: string;
+  date: string;
+  time: string;
+  reference: string;
+  price: string;
+  manageUrl: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -592,6 +617,54 @@ const bookingRescheduleTemplates: Record<
 };
 
 // ---------------------------------------------------------------------------
+// Estonia entrepreneur notice block (FIE / LHV requirement)
+// ---------------------------------------------------------------------------
+
+function estoniaEntrepreneurNotice(locale: Locale): string {
+  const amber = "#D97706";
+  const amberBg = "#FFFBEB";
+  const amberBorder = "#FDE68A";
+
+  const texts: Record<Locale, { heading: string; body: string; lhv: string }> = {
+    en: {
+      heading: "Important — Entrepreneur Account Required",
+      body: "As a freelance professional working in Estonia, you are legally required to operate as a registered <strong>sole trader (FIE — Füüsilisest isikust ettevõtja)</strong>. All payments on this platform are made to entrepreneur accounts.",
+      lhv: "We recommend opening an <strong>LHV Entrepreneur Account (Ettevõtjakonto)</strong> if you haven't already. You can register online at lhv.ee.",
+    },
+    et: {
+      heading: "Oluline — Ettevõtjakonto nõue",
+      body: "Eestis töötava vabakutselise spetsialistina peate seaduse järgi tegutsema registreeritud <strong>füüsilisest isikust ettevõtjana (FIE)</strong>. Kõik maksed sellel platvormil tehakse ettevõtjakontodele.",
+      lhv: "Soovitame avada <strong>LHV Ettevõtjakonto</strong>, kui seda veel ei ole. Registreerida saab veebis aadressil lhv.ee.",
+    },
+    fr: {
+      heading: "Important — Compte entrepreneur requis",
+      body: "En tant que professionnel indépendant travaillant en Estonie, vous êtes légalement tenu(e) d'exercer en tant qu'<strong>entrepreneur individuel (FIE — Füüsilisest isikust ettevõtja)</strong>. Tous les paiements sur cette plateforme sont effectués sur des comptes entrepreneurs.",
+      lhv: "Nous recommandons d'ouvrir un <strong>compte entrepreneur LHV (Ettevõtjakonto)</strong> si ce n'est pas encore fait. Vous pouvez vous inscrire en ligne sur lhv.ee.",
+    },
+  };
+
+  const t = texts[locale];
+  return `
+    <table width="100%" border="0" cellpadding="0" cellspacing="0" role="presentation"
+      style="margin:24px 0 8px;border-radius:8px;border:1px solid ${amberBorder};background-color:${amberBg};border-collapse:separate;overflow:hidden;">
+      <tr>
+        <td width="4" style="width:4px;background-color:${amber};font-size:0;line-height:0;">&nbsp;</td>
+        <td style="padding:14px 18px;">
+          <p style="margin:0 0 6px;font-family:'Plus Jakarta Sans',Helvetica,Arial,sans-serif;font-size:13px;font-weight:700;color:${amber};letter-spacing:0.1px;">
+            ⚠ ${t.heading}
+          </p>
+          <p style="margin:0 0 8px;font-family:'Plus Jakarta Sans',Helvetica,Arial,sans-serif;font-size:13px;color:#78350F;line-height:1.6;">
+            ${t.body}
+          </p>
+          <p style="margin:0;font-family:'Plus Jakarta Sans',Helvetica,Arial,sans-serif;font-size:13px;color:#78350F;line-height:1.6;">
+            ${t.lhv}
+          </p>
+        </td>
+      </tr>
+    </table>`;
+}
+
+// ---------------------------------------------------------------------------
 // Staff invite
 // ---------------------------------------------------------------------------
 
@@ -612,6 +685,7 @@ const staffInviteTemplates: Record<
           ${paragraph(`<strong style="color:${B.textDark};">${d.inviterName}</strong> has invited you to join <strong style="color:${B.textDark};">${d.salonName}</strong> on KaziOne Booking as a staff member.`)}
           ${paragraph(`Accept the invitation to set up your account and start managing your schedule.`)}
           ${ctaButton("Accept Invitation", d.acceptUrl)}
+          ${d.isEstonia ? estoniaEntrepreneurNotice("en") : ""}
           ${paragraph(`This invitation link expires in 7 days. If you weren't expecting this, you can safely ignore this email.`, `font-size:13px;color:${B.textDim};margin-top:16px;`)}
         `,
       }),
@@ -630,6 +704,7 @@ const staffInviteTemplates: Record<
           ${paragraph(`<strong style="color:${B.textDark};">${d.inviterName}</strong> kutsus Teid liituma saloniga <strong style="color:${B.textDark};">${d.salonName}</strong> KaziOne Booking platvormil.`)}
           ${paragraph(`Nõustuge kutsega, et luua konto ja hakata oma ajakava haldama.`)}
           ${ctaButton("Nõustu kutsega", d.acceptUrl)}
+          ${d.isEstonia ? estoniaEntrepreneurNotice("et") : ""}
           ${paragraph(`See kutse kehtib 7 päeva. Kui Te seda ei oodanud, võite selle kirja ignoreerida.`, `font-size:13px;color:${B.textDim};margin-top:16px;`)}
         `,
       }),
@@ -648,6 +723,7 @@ const staffInviteTemplates: Record<
           ${paragraph(`<strong style="color:${B.textDark};">${d.inviterName}</strong> vous a invité(e) à rejoindre <strong style="color:${B.textDark};">${d.salonName}</strong> sur KaziOne Booking en tant que membre du personnel.`)}
           ${paragraph(`Acceptez l'invitation pour créer votre compte et commencer à gérer votre planning.`)}
           ${ctaButton("Accepter l'invitation", d.acceptUrl)}
+          ${d.isEstonia ? estoniaEntrepreneurNotice("fr") : ""}
           ${paragraph(`Ce lien expire dans 7 jours. Si vous n'attendiez pas cette invitation, vous pouvez ignorer cet e-mail.`, `font-size:13px;color:${B.textDim};margin-top:16px;`)}
         `,
       }),
@@ -717,6 +793,97 @@ const reviewRequestTemplates: Record<
 };
 
 // ---------------------------------------------------------------------------
+// Staff appointment reminder (internal — English only)
+// ---------------------------------------------------------------------------
+
+interface StaffReminderData {
+  staffName: string;
+  salonName: string;
+  salonLogoUrl?: string;
+  clientName: string;
+  serviceName: string;
+  date: string;
+  time: string;
+  reference: string;
+}
+
+export function staffAppointmentReminderEmail(
+  data: StaffReminderData,
+): { subject: string; html: string } {
+  const subject = `Tomorrow: ${data.clientName} — ${data.serviceName}`;
+  return {
+    subject,
+    html: renderEmail({
+      salonLogoUrl: data.salonLogoUrl,
+      salonName: data.salonName,
+      subject,
+      body: `
+        ${heading("Appointment reminder")}
+        ${paragraph(`Hi <strong style="color:${B.textDark};">${data.staffName}</strong>, you have an appointment tomorrow at <strong style="color:${B.textDark};">${data.salonName}</strong>.`)}
+        ${detailTable([
+          ["Client",  `<strong>${data.clientName}</strong>`],
+          ["Service", `<strong>${data.serviceName}</strong>`],
+          ["Date",    data.date],
+          ["Time",    data.time],
+          ["Reference", referenceChip(data.reference)],
+        ])}
+        ${paragraph(`Please make sure you are prepared for this appointment.`, `font-size:13px;color:${B.textDim};`)}
+      `,
+    }),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Owner upcoming appointment reminder (internal — English only)
+// ---------------------------------------------------------------------------
+
+interface OwnerReminderData {
+  salonName: string;
+  salonLogoUrl?: string;
+  clientName: string;
+  clientEmail?: string | null;
+  clientPhone?: string | null;
+  serviceName: string;
+  staffName: string;
+  date: string;
+  time: string;
+  reference: string;
+  manageUrl: string;
+}
+
+export function ownerAppointmentReminderEmail(
+  data: OwnerReminderData,
+): { subject: string; html: string } {
+  const subject = `Upcoming tomorrow: ${data.clientName} — ${data.reference}`;
+  const contactLines: [string, string][] = [];
+  if (data.clientEmail) contactLines.push(["Client email", data.clientEmail]);
+  if (data.clientPhone) contactLines.push(["Client phone", data.clientPhone]);
+
+  return {
+    subject,
+    html: renderEmail({
+      salonLogoUrl: data.salonLogoUrl,
+      salonName: data.salonName,
+      subject,
+      body: `
+        ${heading("Appointment tomorrow")}
+        ${paragraph(`A confirmed appointment is scheduled for tomorrow at <strong style="color:${B.textDark};">${data.salonName}</strong>.`)}
+        ${detailTable([
+          ["Client",  `<strong>${data.clientName}</strong>`],
+          ...contactLines,
+          ["Service", `<strong>${data.serviceName}</strong>`],
+          ["Staff",   data.staffName],
+          ["Date",    data.date],
+          ["Time",    data.time],
+          ["Reference", referenceChip(data.reference)],
+        ])}
+        ${ctaButton("View in Dashboard", data.manageUrl)}
+      `,
+    }),
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Locale resolver
 // ---------------------------------------------------------------------------
 
@@ -751,4 +918,176 @@ export function staffInviteEmail(data: StaffInviteData, locale?: string) {
 
 export function reviewRequestEmail(data: ReviewRequestData, locale?: string) {
   return reviewRequestTemplates[resolveLocale(locale)](data);
+}
+
+// ---------------------------------------------------------------------------
+// Staff new-booking notification (internal — English only)
+// ---------------------------------------------------------------------------
+
+interface StaffNewBookingData {
+  staffName: string;
+  salonName: string;
+  salonLogoUrl?: string | null;
+  clientName: string;
+  clientPhone?: string | null;
+  serviceName: string;
+  date: string;
+  time: string;
+  reference: string;
+  googleCalendarUrl: string;
+}
+
+export function staffNewBookingEmail(
+  data: StaffNewBookingData,
+): { subject: string; html: string } {
+  const subject = `New appointment — ${data.clientName} (${data.reference})`;
+  const contactLines: [string, string][] = [];
+  if (data.clientPhone) contactLines.push(["Client phone", data.clientPhone]);
+
+  return {
+    subject,
+    html: renderEmail({
+      salonLogoUrl: data.salonLogoUrl ?? undefined,
+      salonName: data.salonName,
+      subject,
+      body: `
+        ${heading("New appointment booked")}
+        ${paragraph(`Hi <strong style="color:${B.textDark};">${data.staffName}</strong>, a new appointment has been booked with you at <strong style="color:${B.textDark};">${data.salonName}</strong>.`)}
+        ${detailTable([
+          ["Client", `<strong>${data.clientName}</strong>`],
+          ...contactLines,
+          ["Service", `<strong>${data.serviceName}</strong>`],
+          ["Date", data.date],
+          ["Time", data.time],
+          ["Reference", referenceChip(data.reference)],
+        ])}
+        ${ctaButton("Add to Google Calendar", data.googleCalendarUrl)}
+        ${paragraph(`A calendar invite (.ics) is attached to this email so you can also add it directly to your preferred calendar app.`, `font-size:13px;color:${B.textDim};margin-top:4px;`)}
+      `,
+    }),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Staff booking cancellation notification (internal — English only)
+// ---------------------------------------------------------------------------
+
+interface StaffCancellationData {
+  staffName: string;
+  salonName: string;
+  salonLogoUrl?: string | null;
+  clientName: string;
+  serviceName: string;
+  date: string;
+  time: string;
+  reference: string;
+  reason?: string | null;
+}
+
+export function staffBookingCancellationEmail(
+  data: StaffCancellationData,
+): { subject: string; html: string } {
+  const subject = `Appointment cancelled — ${data.reference}`;
+  const reasonRows: [string, string][] = data.reason
+    ? [["Reason", data.reason]]
+    : [];
+
+  return {
+    subject,
+    html: renderEmail({
+      salonLogoUrl: data.salonLogoUrl ?? undefined,
+      salonName: data.salonName,
+      subject,
+      body: `
+        ${heading("Appointment cancelled")}
+        ${paragraph(`Hi <strong style="color:${B.textDark};">${data.staffName}</strong>, the following appointment at <strong style="color:${B.textDark};">${data.salonName}</strong> has been cancelled.`)}
+        ${detailTable([
+          ["Client", `<strong>${data.clientName}</strong>`],
+          ["Service", `<strong>${data.serviceName}</strong>`],
+          ["Date", data.date],
+          ["Time", data.time],
+          ...reasonRows,
+          ["Reference", referenceChip(data.reference)],
+        ])}
+        ${paragraph(`This slot is now free. The calendar event has been updated automatically if you added it to your calendar.`, `font-size:13px;color:${B.textDim};`)}
+      `,
+    }),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Staff service offer accepted confirmation (internal — English only)
+// ---------------------------------------------------------------------------
+
+interface StaffServiceOfferAcceptedData {
+  staffName: string;
+  salonName: string;
+  salonLogoUrl?: string | null;
+  serviceName: string;
+  serviceDescription?: string | null;
+  price: string;
+  commissionText?: string | null;
+}
+
+export function staffServiceOfferAcceptedEmail(
+  data: StaffServiceOfferAcceptedData,
+): { subject: string; html: string } {
+  const subject = `You've accepted "${data.serviceName}" at ${data.salonName}`;
+  const extraRows: [string, string][] = [];
+  if (data.commissionText) extraRows.push(["Commission", data.commissionText]);
+
+  return {
+    subject,
+    html: renderEmail({
+      salonLogoUrl: data.salonLogoUrl ?? undefined,
+      salonName: data.salonName,
+      subject,
+      body: `
+        ${heading("Service offer accepted")}
+        ${paragraph(`Hi <strong style="color:${B.textDark};">${data.staffName}</strong>, you have accepted the service offer from <strong style="color:${B.textDark};">${data.salonName}</strong>.`)}
+        ${detailTable([
+          ["Service", `<strong>${data.serviceName}</strong>`],
+          ["Client price", data.price],
+          ...extraRows,
+        ])}
+        ${data.serviceDescription ? paragraph(`<em style="color:${B.textDim};">${data.serviceDescription}</em>`, `font-size:13px;`) : ""}
+        ${paragraph(`Clients can now book appointments with you for this service. You'll receive email notifications for every new booking, reschedule, or cancellation.`, `font-size:13px;color:${B.textDim};`)}
+      `,
+    }),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Owner booking notification (internal alert — always in English)
+// ---------------------------------------------------------------------------
+
+export function bookingReceivedOwnerEmail(data: OwnerBookingNotificationData): { subject: string; html: string } {
+  const subject = `New booking — ${data.reference}`;
+  const contactLines: [string, string][] = [];
+  if (data.clientEmail) contactLines.push(["Email", data.clientEmail]);
+  if (data.clientPhone) contactLines.push(["Phone", data.clientPhone]);
+
+  return {
+    subject,
+    html: renderEmail({
+      salonName: data.salonName,
+      salonLogoUrl: data.salonLogoUrl ?? undefined,
+      subject,
+      body: `
+        ${heading("New booking received")}
+        ${paragraph(`A new appointment has been booked at <strong style="color:${B.textDark};">${data.salonName}</strong>.`)}
+        ${detailTable([
+          ["Client", `<strong>${data.clientName}</strong>`],
+          ...contactLines,
+          ["Service", `<strong>${data.serviceName}</strong>`],
+          ["Staff", data.staffName],
+          ["Date", data.date],
+          ["Time", data.time],
+          ["Price", data.price],
+          ["Reference", referenceChip(data.reference)],
+        ])}
+        ${ctaButton("View in Dashboard", data.manageUrl)}
+      `,
+    }),
+  };
 }

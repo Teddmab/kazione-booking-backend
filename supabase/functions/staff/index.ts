@@ -3,7 +3,7 @@ import { corsHeaders, handleCors } from "../_shared/cors.ts";
 import { badRequest, forbidden, notFound, serverError } from "../_shared/errors.ts";
 import { requireOwnerOrManagerCtx, verifyAuth, verifyBusinessMember } from "../_shared/auth.ts";
 import { withLogging } from "../_shared/logger.ts";
-import { sendEmail, staffInviteEmail } from "../_shared/resend.ts";
+import { sendEmail, staffInviteEmail, staffServiceOfferAcceptedEmail } from "../_shared/resend.ts";
 
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
@@ -52,9 +52,8 @@ Deno.serve(withLogging("staff", async (req: Request) => {
   const action = url.searchParams.get("action") ?? undefined;
 
   try {
-    // ── GET|POST /staff?action=self — logged-in staff profile + working hours ─
-    // Used by the mobile staff portal (MS1–MS3). Any active business member with
-    // a linked staff_profile can call this for their own business.
+    // ── GET|POST /staff?action=self — logged-in staff member profile + working hours ─
+    // Supports GET (web) and POST with business_id in body (mobile portal MS1–MS3).
     if ((method === "GET" || method === "POST") && action === "self") {
       let user;
       try {
@@ -86,12 +85,13 @@ Deno.serve(withLogging("staff", async (req: Request) => {
           display_name,
           position,
           avatar_url,
+          specialties,
           is_active,
           staff_working_hours (
             day_of_week,
+            is_working,
             start_time,
-            end_time,
-            is_working
+            end_time
           )
         `)
         .eq("business_id", businessId)
@@ -103,7 +103,7 @@ Deno.serve(withLogging("staff", async (req: Request) => {
         return notFound("No staff profile linked to this membership");
       }
 
-      const { data: profile } = await supabaseAdmin
+      const { data: userProfile } = await supabaseAdmin
         .from("users")
         .select("id, first_name, last_name, email, phone, avatar_url")
         .eq("id", user.id)
@@ -118,7 +118,7 @@ Deno.serve(withLogging("staff", async (req: Request) => {
       const firstFromDisplay = nameParts[0] ?? "";
       const lastFromDisplay = nameParts.slice(1).join(" ");
 
-      const profileRow = profile as {
+      const profileRow = userProfile as {
         id: string;
         first_name: string | null;
         last_name: string | null;
@@ -140,6 +140,8 @@ Deno.serve(withLogging("staff", async (req: Request) => {
           undefined,
         role: member.role,
         position: (row.position as string | null) ?? null,
+        specialties: (row.specialties as string[]) ?? [],
+        business_id: businessId,
         working_hours: workingHours.map((wh) => ({
           day: Number(wh.day_of_week),
           is_working: Boolean(wh.is_working),
@@ -377,13 +379,25 @@ Deno.serve(withLogging("staff", async (req: Request) => {
       );
     }
 
-    // ── PATCH /staff?action=assign-services&id= (set service assignments) ───────
-    // Accepts { service_ids: string[] } — replaces ALL existing staff_services rows.
+    // ── PATCH /staff?action=assign-services&id= (send service offers) ────────────
+    // Body: { offers: [{service_id, commission_type?, commission_value?}] }
+    //   OR  { service_ids: string[] }  (legacy — sends offers without commission)
+    // New offers start as 'pending'; already-accepted rows are left unchanged.
+    // Services removed from the list are hard-deleted regardless of status.
     if (method === "PATCH" && action === "assign-services") {
       if (!staffId) return badRequest("id query param is required");
       const body = await req.json() as Record<string, unknown>;
-      const serviceIds = body.service_ids as string[] | undefined;
-      if (!Array.isArray(serviceIds)) return badRequest("service_ids must be an array");
+
+      // Normalise both input shapes into an offers array.
+      type OfferInput = { service_id: string; commission_type?: string | null; commission_value?: number | null };
+      let offers: OfferInput[];
+      if (Array.isArray(body.offers)) {
+        offers = body.offers as OfferInput[];
+      } else if (Array.isArray(body.service_ids)) {
+        offers = (body.service_ids as string[]).map((sid) => ({ service_id: sid }));
+      } else {
+        return badRequest("body must contain offers[] or service_ids[]");
+      }
 
       const { data: existing, error: existingErr } = await supabaseAdmin
         .from("staff_profiles")
@@ -400,39 +414,415 @@ Deno.serve(withLogging("staff", async (req: Request) => {
       );
       if (ctx instanceof Response) return ctx;
 
-      // Verify all service_ids belong to this business (active or inactive — owner decides)
-      if (serviceIds.length > 0) {
+      const offeredIds = offers.map((o) => o.service_id);
+
+      // Validate all offered service_ids belong to this business.
+      if (offeredIds.length > 0) {
         const { data: validSvcs, error: svcErr } = await supabaseAdmin
           .from("services")
           .select("id")
-          .in("id", serviceIds)
+          .in("id", offeredIds)
           .eq("business_id", ctx.businessId);
 
         if (svcErr) return serverError(svcErr.message);
-        if ((validSvcs ?? []).length !== serviceIds.length) {
+        if ((validSvcs ?? []).length !== offeredIds.length) {
           return badRequest("One or more service_ids do not belong to this business");
         }
       }
 
-      // Full replace: delete existing assignments then insert new ones
-      const { error: delErr } = await supabaseAdmin
+      // Fetch existing assignments to decide what to insert vs update.
+      const { data: currentRows } = await supabaseAdmin
         .from("staff_services")
-        .delete()
+        .select("service_id, status")
         .eq("staff_profile_id", staffId);
-      if (delErr) return serverError(delErr.message);
 
-      if (serviceIds.length > 0) {
-        const rows = serviceIds.map((sid) => ({
-          staff_profile_id: staffId,
-          service_id: sid,
-        }));
-        const { error: insErr } = await supabaseAdmin
+      const currentMap = new Map(
+        (currentRows ?? []).map((r: Record<string, unknown>) => [
+          r.service_id as string,
+          r.status as string,
+        ]),
+      );
+
+      // Remove assignments no longer in the offered list.
+      const toDelete = (currentRows ?? [])
+        .map((r: Record<string, unknown>) => r.service_id as string)
+        .filter((sid) => !offeredIds.includes(sid));
+
+      if (toDelete.length > 0) {
+        const { error: delErr } = await supabaseAdmin
           .from("staff_services")
-          .insert(rows);
-        if (insErr) return serverError(insErr.message);
+          .delete()
+          .eq("staff_profile_id", staffId)
+          .in("service_id", toDelete);
+        if (delErr) return serverError(delErr.message);
       }
 
-      return json({ success: true, service_ids: serviceIds });
+      // For each offer: insert as pending (new) or re-open declined; leave accepted alone.
+      for (const offer of offers) {
+        const currentStatus = currentMap.get(offer.service_id);
+
+        if (currentStatus === "accepted") {
+          // Already accepted — update commission if provided but don't touch status.
+          if (offer.commission_type !== undefined || offer.commission_value !== undefined) {
+            await supabaseAdmin
+              .from("staff_services")
+              .update({
+                offered_commission_type: offer.commission_type ?? null,
+                offered_commission_value: offer.commission_value ?? null,
+              })
+              .eq("staff_profile_id", staffId)
+              .eq("service_id", offer.service_id);
+          }
+          continue;
+        }
+
+        if (currentStatus === "pending") {
+          // Already pending — update commission if changed.
+          await supabaseAdmin
+            .from("staff_services")
+            .update({
+              offered_commission_type: offer.commission_type ?? null,
+              offered_commission_value: offer.commission_value ?? null,
+              assigned_at: new Date().toISOString(),
+            })
+            .eq("staff_profile_id", staffId)
+            .eq("service_id", offer.service_id);
+          continue;
+        }
+
+        // New or previously declined — insert/upsert as pending.
+        const { error: upsertErr } = await supabaseAdmin
+          .from("staff_services")
+          .upsert(
+            {
+              staff_profile_id: staffId,
+              service_id: offer.service_id,
+              status: "pending",
+              offered_commission_type: offer.commission_type ?? null,
+              offered_commission_value: offer.commission_value ?? null,
+              assigned_at: new Date().toISOString(),
+              responded_at: null,
+            },
+            { onConflict: "staff_profile_id,service_id" },
+          );
+        if (upsertErr) return serverError(upsertErr.message);
+      }
+
+      return json({ success: true, offered_count: offeredIds.length });
+    }
+
+    // ── PATCH /staff?action=respond-service-offer (staff accepts/declines) ────────
+    // Any active business member can call this to respond to their own pending offers.
+    // Body: { service_id: string, response: "accepted" | "declined" }
+    if (method === "PATCH" && action === "respond-service-offer") {
+      let user;
+      try {
+        user = await verifyAuth(req);
+      } catch (e) {
+        return e instanceof Response ? e : forbidden("Authentication required");
+      }
+
+      const body = await req.json() as Record<string, unknown>;
+      const serviceId = body.service_id as string | undefined;
+      const response = body.response as string | undefined;
+
+      if (!serviceId) return badRequest("service_id is required");
+      if (response !== "accepted" && response !== "declined") {
+        return badRequest("response must be 'accepted' or 'declined'");
+      }
+
+      // Resolve which business this service belongs to so we pick the correct
+      // membership for users who belong to more than one business.
+      const { data: svc } = await supabaseAdmin
+        .from("services")
+        .select("business_id")
+        .eq("id", serviceId)
+        .maybeSingle();
+
+      if (!svc) return notFound("Service not found");
+      const offerBusinessId = (svc as Record<string, unknown>).business_id as string;
+
+      // Find the caller's membership in THAT specific business.
+      const { data: membership } = await supabaseAdmin
+        .from("business_members")
+        .select("id, business_id")
+        .eq("user_id", user.id)
+        .eq("business_id", offerBusinessId)
+        .eq("is_active", true)
+        .maybeSingle();
+
+      if (!membership) return forbidden("No active business membership found for this service's business");
+
+      const mem = membership as Record<string, unknown>;
+      const { data: sp } = await supabaseAdmin
+        .from("staff_profiles")
+        .select("id")
+        .eq("business_member_id", mem.id as string)
+        .eq("business_id", mem.business_id as string)
+        .maybeSingle();
+
+      const spId = (sp as { id: string } | null)?.id;
+      if (!spId) return forbidden("No staff profile found for this account");
+
+      const { data: offer } = await supabaseAdmin
+        .from("staff_services")
+        .select("status")
+        .eq("staff_profile_id", spId)
+        .eq("service_id", serviceId)
+        .maybeSingle();
+
+      if (!offer) return notFound("No service offer found for this service");
+      if ((offer as Record<string, unknown>).status !== "pending") {
+        return badRequest("This offer has already been responded to");
+      }
+
+      const { error: updErr } = await supabaseAdmin
+        .from("staff_services")
+        .update({ status: response, responded_at: new Date().toISOString() })
+        .eq("staff_profile_id", spId)
+        .eq("service_id", serviceId);
+
+      if (updErr) return serverError(updErr.message);
+
+      // Send confirmation email when staff accepts
+      if (response === "accepted") {
+        (async () => {
+          try {
+            const [profileRes, serviceRes, memberEmailRes, bizRes] = await Promise.all([
+              supabaseAdmin.from("staff_profiles").select("display_name, business_member_id, business_id").eq("id", spId).maybeSingle(),
+              supabaseAdmin.from("services").select("name, description, price, currency_code, staff_commission_type, staff_commission_value").eq("id", serviceId).maybeSingle(),
+              supabaseAdmin.from("business_members").select("user:users(email)").eq("id", mem.id as string).maybeSingle(),
+              supabaseAdmin.from("businesses").select("name, logo_url").eq("id", mem.business_id as string).maybeSingle(),
+            ]);
+
+            const profile = profileRes.data as Record<string, unknown> | null;
+            const svc = serviceRes.data as Record<string, unknown> | null;
+            const biz = bizRes.data as Record<string, unknown> | null;
+            const emailUser = (memberEmailRes.data as Record<string, unknown> | null)?.user as Record<string, unknown> | null;
+            const staffEmail = emailUser?.email as string | null;
+
+            if (!staffEmail || !profile || !svc) return;
+
+            const currencyCode = (svc.currency_code as string) ?? "EUR";
+            const price = `${currencyCode === "EUR" ? "€" : currencyCode} ${Number(svc.price).toFixed(2)}`;
+
+            let commissionText: string | null = null;
+            const commType = svc.staff_commission_type as string | null;
+            const commValue = Number(svc.staff_commission_value ?? 0);
+            if (commType === "percentage" && commValue > 0) {
+              commissionText = `${commValue}% of booking price`;
+            } else if (commType === "fixed" && commValue > 0) {
+              commissionText = `${currencyCode === "EUR" ? "€" : currencyCode} ${commValue.toFixed(2)} per booking`;
+            }
+
+            const emailData = staffServiceOfferAcceptedEmail({
+              staffName: (profile.display_name as string) ?? "Team member",
+              salonName: (biz?.name as string) ?? "KaziOne",
+              salonLogoUrl: biz?.logo_url as string | null ?? null,
+              serviceName: svc.name as string,
+              serviceDescription: svc.description as string | null ?? null,
+              price,
+              commissionText,
+            });
+
+            await sendEmail(staffEmail, emailData.subject, emailData.html).catch((e) =>
+              console.warn("Service offer accepted email failed:", e),
+            );
+          } catch (e) {
+            console.warn("Service offer accepted email error:", e);
+          }
+        })();
+      }
+
+      return json({ success: true, service_id: serviceId, status: response });
+    }
+
+    // ── Self-service schedule override endpoints ──────────────────────────────
+    // Staff can manage their own day exceptions without owner auth.
+
+    // GET /staff?action=self-overrides — returns caller's overrides (optional &from=&to=)
+    if (method === "GET" && action === "self-overrides") {
+      let user;
+      try { user = await verifyAuth(req); } catch (e) { return e instanceof Response ? e : forbidden("Authentication required"); }
+
+      const { data: membership } = await supabaseAdmin
+        .from("business_members")
+        .select("id, business_id")
+        .eq("user_id", user.id)
+        .eq("is_active", true)
+        .order("joined_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (!membership) return forbidden("No active business membership found");
+
+      const mem = membership as Record<string, unknown>;
+      const { data: sp } = await supabaseAdmin
+        .from("staff_profiles")
+        .select("id")
+        .eq("business_member_id", mem.id as string)
+        .eq("business_id", mem.business_id as string)
+        .maybeSingle();
+      const spId = (sp as { id: string } | null)?.id;
+      if (!spId) return forbidden("No staff profile found");
+
+      const fromDate = url.searchParams.get("from");
+      const toDate = url.searchParams.get("to");
+      let query = supabaseAdmin
+        .from("staff_schedule_overrides")
+        .select("id, override_date, is_working, start_time, end_time, reason, created_at")
+        .eq("staff_profile_id", spId)
+        .order("override_date", { ascending: true });
+      if (fromDate) query = query.gte("override_date", fromDate);
+      if (toDate) query = query.lte("override_date", toDate);
+
+      const { data: overrides, error: ovErr } = await query;
+      if (ovErr) return serverError(ovErr.message);
+      return json(overrides ?? []);
+    }
+
+    // POST /staff?action=self-override — upsert caller's own override
+    if (method === "POST" && action === "self-override") {
+      let user;
+      try { user = await verifyAuth(req); } catch (e) { return e instanceof Response ? e : forbidden("Authentication required"); }
+
+      const { data: membership } = await supabaseAdmin
+        .from("business_members")
+        .select("id, business_id")
+        .eq("user_id", user.id)
+        .eq("is_active", true)
+        .order("joined_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (!membership) return forbidden("No active business membership found");
+
+      const mem = membership as Record<string, unknown>;
+      const { data: sp } = await supabaseAdmin
+        .from("staff_profiles")
+        .select("id")
+        .eq("business_member_id", mem.id as string)
+        .eq("business_id", mem.business_id as string)
+        .maybeSingle();
+      const spId = (sp as { id: string } | null)?.id;
+      if (!spId) return forbidden("No staff profile found");
+
+      const body = await req.json() as Record<string, unknown>;
+      const overrideDate = String(body.date ?? "").trim();
+      const isWorking = Boolean(body.is_working ?? false);
+      const startTime = body.start_time ? String(body.start_time).trim() : null;
+      const endTime = body.end_time ? String(body.end_time).trim() : null;
+      const reason = body.reason ? String(body.reason).trim() : null;
+
+      if (!overrideDate || !/^\d{4}-\d{2}-\d{2}$/.test(overrideDate)) {
+        return badRequest("date must be YYYY-MM-DD");
+      }
+      if (isWorking && (!startTime || !endTime)) {
+        return badRequest("start_time and end_time required when is_working = true");
+      }
+
+      const { data: upserted, error: upsertErr } = await supabaseAdmin
+        .from("staff_schedule_overrides")
+        .upsert(
+          {
+            staff_profile_id: spId,
+            business_id: mem.business_id as string,
+            override_date: overrideDate,
+            is_working: isWorking,
+            start_time: isWorking ? startTime : null,
+            end_time: isWorking ? endTime : null,
+            reason,
+          },
+          { onConflict: "staff_profile_id,override_date" },
+        )
+        .select("id, override_date, is_working, start_time, end_time, reason")
+        .single();
+
+      if (upsertErr) return serverError(upsertErr.message);
+      return json(upserted, 201);
+    }
+
+    // DELETE /staff?action=self-override&date= — delete caller's own override
+    if (method === "DELETE" && action === "self-override") {
+      const overrideDate = url.searchParams.get("date");
+      if (!overrideDate) return badRequest("date query param is required");
+
+      let user;
+      try { user = await verifyAuth(req); } catch (e) { return e instanceof Response ? e : forbidden("Authentication required"); }
+
+      const { data: membership } = await supabaseAdmin
+        .from("business_members")
+        .select("id, business_id")
+        .eq("user_id", user.id)
+        .eq("is_active", true)
+        .order("joined_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (!membership) return forbidden("No active business membership found");
+
+      const mem = membership as Record<string, unknown>;
+      const { data: sp } = await supabaseAdmin
+        .from("staff_profiles")
+        .select("id")
+        .eq("business_member_id", mem.id as string)
+        .eq("business_id", mem.business_id as string)
+        .maybeSingle();
+      const spId = (sp as { id: string } | null)?.id;
+      if (!spId) return forbidden("No staff profile found");
+
+      const { error: delErr } = await supabaseAdmin
+        .from("staff_schedule_overrides")
+        .delete()
+        .eq("staff_profile_id", spId)
+        .eq("override_date", overrideDate);
+
+      if (delErr) return serverError(delErr.message);
+      return json({ success: true });
+    }
+
+    // ── PATCH /staff?action=update-self ──────────────────────────────────────────
+    // Staff member updates their own display_name (and optionally bio / position).
+    if (method === "PATCH" && action === "update-self") {
+      let user;
+      try { user = await verifyAuth(req); } catch (e) { return e instanceof Response ? e : forbidden("Authentication required"); }
+
+      let body: Record<string, unknown> = {};
+      try { body = await req.json(); } catch { /* empty body is fine */ }
+
+      const { data: membership } = await supabaseAdmin
+        .from("business_members")
+        .select("id, business_id")
+        .eq("user_id", user.id)
+        .eq("is_active", true)
+        .order("joined_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (!membership) return forbidden("No active business membership found");
+
+      const mem = membership as Record<string, unknown>;
+      const { data: sp } = await supabaseAdmin
+        .from("staff_profiles")
+        .select("id")
+        .eq("business_member_id", mem.id as string)
+        .eq("business_id", mem.business_id as string)
+        .maybeSingle();
+      const spId = (sp as { id: string } | null)?.id;
+      if (!spId) return forbidden("No staff profile found");
+
+      const update: Record<string, unknown> = {};
+      if (typeof body.display_name === "string" && body.display_name.trim()) {
+        update.display_name = body.display_name.trim();
+      }
+
+      if (Object.keys(update).length === 0) return badRequest("No valid fields to update");
+
+      const { data: updated, error: upErr } = await supabaseAdmin
+        .from("staff_profiles")
+        .update(update)
+        .eq("id", spId)
+        .select("id, display_name, position, avatar_url")
+        .single();
+
+      if (upErr) return serverError(upErr.message);
+      return json(updated);
     }
 
     // ── GET /staff?action=services&id= (get current service assignments) ────────
@@ -457,12 +847,22 @@ Deno.serve(withLogging("staff", async (req: Request) => {
 
       const { data: rows, error: svcErr } = await supabaseAdmin
         .from("staff_services")
-        .select("service_id")
+        .select("service_id, status, offered_commission_type, offered_commission_value, assigned_at")
         .eq("staff_profile_id", staffId);
 
       if (svcErr) return serverError(svcErr.message);
 
-      return json({ service_ids: (rows ?? []).map((r: Record<string, unknown>) => r.service_id) });
+      const typedRows = (rows ?? []) as Array<Record<string, unknown>>;
+      return json({
+        service_ids: typedRows.map((r) => r.service_id),
+        assignments: typedRows.map((r) => ({
+          service_id: r.service_id,
+          status: r.status ?? "accepted",
+          offered_commission_type: r.offered_commission_type ?? null,
+          offered_commission_value: r.offered_commission_value ?? null,
+          assigned_at: r.assigned_at ?? null,
+        })),
+      });
     }
 
     // ── PATCH /staff?action=resend-invite&id= (resend invitation email) ─────────
@@ -529,7 +929,6 @@ Deno.serve(withLogging("staff", async (req: Request) => {
       const inviterName = inviterResult.data
         ? `${inviterResult.data.first_name ?? ""} ${inviterResult.data.last_name ?? ""}`.trim() || "Your salon"
         : "Your salon";
-      const inviterEmail = inviterResult.data?.email?.trim() || null;
       const salonName = businessResult.data?.name ?? "the salon";
       const locale = businessResult.data?.locale ?? "en";
 
@@ -559,8 +958,6 @@ Deno.serve(withLogging("staff", async (req: Request) => {
             toEmail,
             emailData.subject,
             emailData.html,
-            undefined,
-            inviterEmail ? `${inviterName} <${inviterEmail}>` : undefined,
           );
         }
       } catch (err) {
@@ -882,6 +1279,49 @@ Deno.serve(withLogging("staff", async (req: Request) => {
         .eq("override_date", overrideDate);
 
       if (delErr) return serverError(delErr.message);
+      return json({ success: true });
+    }
+
+    // ── DELETE /staff?action=cancel-invite&id= ───────────────────────────────
+    // Hard-delete a pending (never-accepted) staff invite. Safe to hard-delete
+    // because the invite was never activated — no user account is linked yet.
+    if (method === "DELETE" && action === "cancel-invite") {
+      if (!staffId) return badRequest("id query param is required");
+
+      const { data: existing, error: existingErr } = await supabaseAdmin
+        .from("staff_profiles")
+        .select("id, business_id, business_member_id, is_active")
+        .eq("id", staffId)
+        .maybeSingle();
+
+      if (existingErr) return serverError(existingErr.message);
+      if (!existing) return notFound("Staff invitation not found");
+
+      const sp = existing as Record<string, unknown>;
+      if (sp.is_active) {
+        return badRequest("Cannot cancel-invite on an active staff member. Use the deactivate action instead.");
+      }
+
+      const ctx = await requireOwnerOrManagerCtx(req, sp.business_id as string);
+      if (ctx instanceof Response) return ctx;
+
+      // Delete the staff_profiles row
+      const { error: deleteProfileErr } = await supabaseAdmin
+        .from("staff_profiles")
+        .delete()
+        .eq("id", staffId)
+        .eq("business_id", ctx.businessId);
+      if (deleteProfileErr) return serverError(deleteProfileErr.message);
+
+      // Delete the business_members row if one was created
+      const memberId = sp.business_member_id as string | null;
+      if (memberId) {
+        await supabaseAdmin
+          .from("business_members")
+          .delete()
+          .eq("id", memberId);
+      }
+
       return json({ success: true });
     }
 

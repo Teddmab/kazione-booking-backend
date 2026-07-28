@@ -24,6 +24,9 @@ port = 54324
 smtp_port = 54325
 pop3_port = 54326
 
+[analytics]
+enabled = false
+
 [storage]
 enabled = true
 file_size_limit = "50MiB"
@@ -70,7 +73,7 @@ verify_jwt = false
 # NOTE: Supabase scheduled functions require the Pro plan or above.
 [functions.send-reminders]
 verify_jwt = false
-# schedule = "0 8 * * *"   # uncomment when deploying to cloud (Pro plan required)
+# schedule = "0 8 * * *"   # daily 08:00 UTC — requires Supabase Pro plan (cloud only)
 
 # pawapay-webhook receives signed POSTs from PawaPay's servers, not authenticated users.
 # JWT verification is disabled; signature is verified via HMAC-SHA256 in the function.

@@ -18,8 +18,10 @@ interface FinanceInsightItem {
 
 interface RequestBody {
   business_id: string;
-  period_days: 7 | 14 | 30 | 90;
+  period_days?: 7 | 14 | 30 | 90;
   question?: string;
+  focus?: string;
+  context?: Record<string, unknown>;
 }
 
 const VALID_PERIODS = [7, 14, 30, 90];
@@ -282,6 +284,55 @@ async function callAnthropic(
 }
 
 // ---------------------------------------------------------------------------
+// Debt strategy — uses caller-supplied context, no RPC needed
+// ---------------------------------------------------------------------------
+
+async function callAnthropicDebtStrategy(
+  context: Record<string, unknown>,
+): Promise<FinanceInsightItem[]> {
+  const apiKey = Deno.env.get("ANTHROPIC_API_KEY");
+  if (!apiKey) throw new Error("ANTHROPIC_API_KEY not configured");
+
+  const res = await fetch(ANTHROPIC_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+    },
+    body: JSON.stringify({
+      model: "claude-sonnet-4-6",
+      max_tokens: 1200,
+      system:
+        "You are KaziOne AI Finance Advisor for beauty and wellness businesses. " +
+        "Analyze the provided debt summary and return actionable debt management insights as JSON only. " +
+        "Focus on: repayment prioritization, cash flow impact of monthly minimums, debt reduction strategies, " +
+        "overdue debt urgency, and interest cost optimization. Be specific and data-driven. " +
+        'Respond with a JSON object: { "insights": [{ "type": "debt_priority"|"cash_flow"|"repayment_strategy"|"overdue_alert"|"interest_optimization", "title": string, "description": string, "recommendation": string, "priority": "high"|"medium"|"low" }] }. ' +
+        "Return 3-5 insights. Do not include any text outside the JSON object.",
+      messages: [
+        {
+          role: "user",
+          content: `Debt summary:\n${JSON.stringify(context, null, 2)}\n\nProvide actionable debt management strategies.`,
+        },
+      ],
+    }),
+  });
+
+  if (!res.ok) {
+    const errBody = await res.text();
+    throw new Error(`Anthropic API error ${res.status}: ${errBody}`);
+  }
+
+  const data = await res.json();
+  const text = data.content?.[0]?.text ?? "";
+  const jsonMatch = text.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) throw new Error("No valid JSON in AI response");
+  const parsed = JSON.parse(jsonMatch[0]);
+  return (parsed.insights ?? []) as FinanceInsightItem[];
+}
+
+// ---------------------------------------------------------------------------
 // Handler
 // ---------------------------------------------------------------------------
 
@@ -295,19 +346,70 @@ Deno.serve(withLogging("ai-finance", async (req: Request) => {
     }
 
     const body = (await req.json()) as RequestBody;
-    const { business_id, period_days, question } = body;
+    const { business_id, period_days, question, focus, context: focusContext } = body;
 
-    if (!business_id || !VALID_PERIODS.includes(period_days)) {
+    // Fast-path: caller provides pre-gathered context for any focus value.
+    // Skips the broken RPC-based context gathering entirely.
+    const isFastPath = focus !== undefined && focusContext !== undefined;
+
+    if (!business_id || (!isFastPath && !VALID_PERIODS.includes(period_days!))) {
       return badRequest(
         "business_id and valid period_days (7|14|30|90) required",
       );
     }
 
     // 1. Auth: verify JWT + owner/manager membership in one call
-    // business_id is verified against the DB — not blindly trusted from body
     const ctx = await requireOwnerOrManagerCtx(req, business_id);
     if (ctx instanceof Response) return ctx;
     const { userId, businessId } = ctx;
+
+    // ── Focus fast-path (uses caller context, skips RPC gathering) ──────────
+    if (isFastPath) {
+      const notifType = `ai_${focus}`;
+      const cacheMinutes = 30;
+      const fastCacheThreshold = new Date(Date.now() - cacheMinutes * 60 * 1000).toISOString();
+
+      const { data: fastCached } = await supabaseAdmin
+        .from("notifications")
+        .select("metadata")
+        .eq("business_id", businessId)
+        .eq("type", notifType)
+        .gte("created_at", fastCacheThreshold)
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (fastCached?.metadata) {
+        return new Response(
+          JSON.stringify({
+            insights: (fastCached.metadata as Record<string, unknown>).insights,
+            cached: true,
+          }),
+          { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+        );
+      }
+
+      const fastInsights = focus === "debt_strategy"
+        ? await callAnthropicDebtStrategy(focusContext!)
+        : await callAnthropic(focusContext!, question);
+
+      await supabaseAdmin.from("notifications").insert({
+        business_id: businessId,
+        user_id: userId,
+        type: notifType,
+        title: `AI ${focus.replace(/_/g, " ")} analysis`,
+        body: `Generated ${fastInsights.length} insights`,
+        metadata: { insights: fastInsights },
+        is_read: true,
+      });
+
+      return new Response(
+        JSON.stringify({ insights: fastInsights, cached: false }),
+        { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      );
+    }
+
+    // ── Regular finance analysis path ────────────────────────────────────────
 
     // 2. Check cache — ai_finance notification from last 6 hours
     const cacheThreshold = new Date(
@@ -342,11 +444,11 @@ Deno.serve(withLogging("ai-finance", async (req: Request) => {
     }
 
     // 4. Gather finance context
-    const context = await gatherFinanceContext(businessId, period_days);
+    const financeContext = await gatherFinanceContext(businessId, period_days!);
 
     // 5. Call Anthropic
     const insights = await callAnthropic(
-      context as unknown as Record<string, unknown>,
+      financeContext as unknown as Record<string, unknown>,
       question,
     );
 

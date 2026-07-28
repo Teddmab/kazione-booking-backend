@@ -2,7 +2,7 @@ import { supabaseAdmin } from "../_shared/supabaseAdmin.ts";
 import { corsHeaders, handleCors } from "../_shared/cors.ts";
 import { badRequest, notFound, serverError } from "../_shared/errors.ts";
 import { withLogging } from "../_shared/logger.ts";
-import { requireOwnerOrManagerCtx } from "../_shared/auth.ts";
+import { requireOwnerOrManagerCtx, verifyAuth } from "../_shared/auth.ts";
 
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
@@ -74,35 +74,111 @@ Deno.serve(withLogging("services", async (req: Request) => {
       const businessId = url.searchParams.get("business_id");
       if (!businessId) return badRequest("business_id is required");
 
+      // Owner/manager: full list including inactive + auto_show_to_staff.
+      // Any active business member (staff): active-only read access via a
+      // separate query that does NOT reference auto_show_to_staff, so the
+      // staff path works even if migration 067 has not yet been applied.
       const ctx = await requireOwnerOrManagerCtx(req, businessId);
-      if (ctx instanceof Response) return ctx;
 
+      if (ctx instanceof Response) {
+        // Not owner/manager — check if they are an active staff member.
+        let user;
+        try { user = await verifyAuth(req); } catch { return ctx; }
+        const { data: membership } = await supabaseAdmin
+          .from("business_members")
+          .select("id, role")
+          .eq("user_id", user.id)
+          .eq("business_id", businessId)
+          .eq("is_active", true)
+          .maybeSingle();
+        if (!membership) return ctx;
+
+        // Resolve the staff profile for this member.
+        const memberId = (membership as { id: string; role: string }).id;
+        const { data: sp } = await supabaseAdmin
+          .from("staff_profiles")
+          .select("id")
+          .eq("business_member_id", memberId)
+          .eq("business_id", businessId)
+          .maybeSingle();
+        const staffProfileId = (sp as { id: string } | null)?.id ?? null;
+
+        if (!staffProfileId) return json([]);
+
+        // Fetch only services assigned to this staff member (pending + accepted).
+        const { data: assignments } = await supabaseAdmin
+          .from("staff_services")
+          .select("service_id, status, custom_price, offered_commission_type, offered_commission_value")
+          .eq("staff_profile_id", staffProfileId)
+          .in("status", ["pending", "accepted"]);
+
+        const serviceIds = (assignments ?? []).map(
+          (a: Record<string, unknown>) => a.service_id as string,
+        );
+        if (serviceIds.length === 0) return json([]);
+
+        const { data, error } = await supabaseAdmin
+          .from("services")
+          .select(`
+            id, business_id, category_id, name, description,
+            duration_minutes, buffer_minutes, price, currency_code,
+            deposit_amount, is_active, is_public, image_url,
+            image_url_2, image_url_3, display_order,
+            staff_commission_type, staff_commission_value,
+            use_intake_form, created_at, updated_at,
+            category:service_categories(name)
+          `)
+          .in("id", serviceIds)
+          .eq("business_id", businessId)
+          .eq("is_active", true)
+          .order("display_order", { ascending: true })
+          .order("name", { ascending: true });
+
+        if (error) return serverError(error.message);
+
+        const assignmentMap = new Map(
+          (assignments ?? []).map((a: Record<string, unknown>) => [a.service_id as string, a]),
+        );
+
+        const staffRows = (data ?? []).map((row) => {
+          const r = row as Record<string, unknown>;
+          const category = r.category as { name?: string } | null;
+          const a = (assignmentMap.get(r.id as string) ?? {}) as Record<string, unknown>;
+          return {
+            ...r,
+            category_name: category?.name ?? null,
+            assignment_status: (a.status as string | undefined) ?? "accepted",
+            effective_price: a.custom_price != null ? Number(a.custom_price) : r.price,
+            offered_commission_type: (a.offered_commission_type as string | undefined) ?? null,
+            offered_commission_value: a.offered_commission_value != null
+              ? Number(a.offered_commission_value)
+              : null,
+          };
+        });
+
+        // Show pending offers first so staff see what needs their response.
+        staffRows.sort((a, b) => {
+          const ap = a.assignment_status === "pending" ? 0 : 1;
+          const bp = b.assignment_status === "pending" ? 0 : 1;
+          return ap - bp;
+        });
+
+        return json(staffRows);
+      }
+
+      // Owner / manager path — full list with all columns including auto_show_to_staff.
       const { data, error } = await supabaseAdmin
         .from("services")
         .select(`
-          id,
-          business_id,
-          category_id,
-          name,
-          description,
-          duration_minutes,
-          buffer_minutes,
-          price,
-          currency_code,
-          deposit_amount,
-          is_active,
-          is_public,
-          image_url,
-          image_url_2,
-          image_url_3,
-          display_order,
-          staff_commission_type,
-          staff_commission_value,
-          created_at,
-          updated_at,
+          id, business_id, category_id, name, description,
+          duration_minutes, buffer_minutes, price, currency_code,
+          deposit_amount, is_active, is_public, image_url,
+          image_url_2, image_url_3, display_order,
+          staff_commission_type, staff_commission_value,
+          use_intake_form, auto_show_to_staff, created_at, updated_at,
           category:service_categories(name)
         `)
-        .eq("business_id", ctx.businessId)
+        .eq("business_id", businessId)
         .order("is_active", { ascending: false })
         .order("display_order", { ascending: true })
         .order("name", { ascending: true });
@@ -180,6 +256,10 @@ Deno.serve(withLogging("services", async (req: Request) => {
             String(body.staff_commission_type ?? "none")
           ) ? String(body.staff_commission_type) : "none"),
           staff_commission_value: parseMoney(body.staff_commission_value ?? null),
+          use_intake_form: Boolean(body.use_intake_form ?? false),
+          auto_show_to_staff: body.auto_show_to_staff !== undefined
+            ? Boolean(body.auto_show_to_staff)
+            : true,
         })
         .select(`
           id,
@@ -200,6 +280,8 @@ Deno.serve(withLogging("services", async (req: Request) => {
           display_order,
           staff_commission_type,
           staff_commission_value,
+          use_intake_form,
+          auto_show_to_staff,
           created_at,
           updated_at,
           category:service_categories(name)
@@ -207,6 +289,28 @@ Deno.serve(withLogging("services", async (req: Request) => {
         .single();
 
       if (error) return serverError(error.message);
+
+      // Auto-assign new service to every active staff member in the business.
+      // Staff can be removed individually afterwards; the intent is that all
+      // staff can perform any new service by default.
+      const newServiceId = (data as Record<string, unknown>).id as string;
+      const { data: activeStaff } = await supabaseAdmin
+        .from("staff_profiles")
+        .select("id")
+        .eq("business_id", ctx.businessId)
+        .eq("is_active", true);
+
+      if (activeStaff && activeStaff.length > 0) {
+        await supabaseAdmin
+          .from("staff_services")
+          .insert(
+            (activeStaff as { id: string }[]).map((s) => ({
+              staff_profile_id: s.id,
+              service_id: newServiceId,
+              status: "pending",
+            })),
+          );
+      }
 
       const category = (data as Record<string, unknown>).category as {
         name?: string;
@@ -324,6 +428,14 @@ Deno.serve(withLogging("services", async (req: Request) => {
         updatePayload.staff_commission_value = parseMoney(body.staff_commission_value) ?? null;
       }
 
+      if (body.use_intake_form !== undefined) {
+        updatePayload.use_intake_form = Boolean(body.use_intake_form);
+      }
+
+      if (body.auto_show_to_staff !== undefined) {
+        updatePayload.auto_show_to_staff = Boolean(body.auto_show_to_staff);
+      }
+
       if (Object.keys(updatePayload).length === 0) {
         return badRequest("No valid fields provided for update");
       }
@@ -352,6 +464,8 @@ Deno.serve(withLogging("services", async (req: Request) => {
           display_order,
           staff_commission_type,
           staff_commission_value,
+          use_intake_form,
+          auto_show_to_staff,
           created_at,
           updated_at,
           category:service_categories(name)

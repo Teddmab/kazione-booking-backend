@@ -1,12 +1,12 @@
 import { supabaseAdmin } from "../_shared/supabaseAdmin.ts";
-import { corsHeaders, handleCors } from "../_shared/cors.ts";
+import { corsHeadersFor, handleCors } from "../_shared/cors.ts";
 import { serverError } from "../_shared/errors.ts";
 import { withLogging } from "../_shared/logger.ts";
 
-function json(data: unknown, status = 200): Response {
+function json(req: Request, data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
     status,
-    headers: { ...corsHeaders, "Content-Type": "application/json" },
+    headers: { ...corsHeadersFor(req), "Content-Type": "application/json" },
   });
 }
 
@@ -22,7 +22,7 @@ Deno.serve(withLogging("marketplace-storefronts", async (req: Request) => {
   if (corsResp) return corsResp;
 
   if (req.method !== "GET") {
-    return json({ error: { code: "METHOD_NOT_ALLOWED", message: "Only GET is allowed" } }, 405);
+    return json(req, { error: { code: "METHOD_NOT_ALLOWED", message: "Only GET is allowed" } }, 405);
   }
 
   try {
@@ -133,7 +133,7 @@ Deno.serve(withLogging("marketplace-storefronts", async (req: Request) => {
     return new Response(JSON.stringify({ storefronts, total: count ?? 0, locked_countries }), {
       status: 200,
       headers: {
-        ...corsHeaders,
+        ...corsHeadersFor(req),
         "Content-Type": "application/json",
         "Cache-Control": "public, max-age=60",
       },

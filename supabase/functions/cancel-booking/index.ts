@@ -9,6 +9,8 @@ import {
   sendEmail,
   bookingCancellationEmail,
 } from "../_shared/resend.ts";
+import { sendSms } from "../_shared/messagebird.ts";
+import { sendWhatsApp } from "../_shared/meta-whatsapp.ts";
 import Stripe from "stripe";
 
 // ---------------------------------------------------------------------------
@@ -302,7 +304,7 @@ Deno.serve(withLogging("cancel-booking", async (req: Request) => {
       await Promise.all([
         supabaseAdmin
           .from("clients")
-          .select("first_name, email, preferred_locale")
+          .select("first_name, email, phone, preferred_locale")
           .eq("id", appointment.client_id)
           .single(),
         supabaseAdmin
@@ -348,9 +350,24 @@ Deno.serve(withLogging("cancel-booking", async (req: Request) => {
         locale,
       );
 
-      sendEmail(cl.email, emailData.subject, emailData.html).catch((err) =>
-        console.error("Cancellation email failed:", err),
-      );
+      if (cl.email) {
+        sendEmail(cl.email, emailData.subject, emailData.html).catch((err) =>
+          console.error("Cancellation email failed:", err),
+        );
+      }
+
+      const clientPhone = (cl as unknown as { phone?: string | null }).phone?.trim();
+      if (clientPhone) {
+        const smsText =
+          `${biz.name}: your booking ${appointment.booking_reference} ` +
+          `(${svc.name} on ${startsAt.toISOString().slice(0, 10)}) has been cancelled.`;
+        sendSms(clientPhone, smsText).catch((err) =>
+          console.error("Cancellation SMS failed:", err),
+        );
+        sendWhatsApp(clientPhone, smsText).catch((err) =>
+          console.error("Cancellation WhatsApp failed:", err),
+        );
+      }
     }
 
     return new Response(

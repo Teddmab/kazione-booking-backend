@@ -171,6 +171,7 @@ Deno.serve(withLogging("products", async (req: Request) => {
           unit_cost: body.unit_cost ?? null,
           current_stock: body.current_stock ?? 0,
           min_stock_alert: body.min_stock_alert ?? null,
+          photo_url: body.photo_url ?? null,
         })
         .select()
         .single();
@@ -263,7 +264,7 @@ Deno.serve(withLogging("products", async (req: Request) => {
       const ctx = await requireOwnerOrManagerCtx(req, (product as Record<string, unknown>).business_id as string);
       if (ctx instanceof Response) return ctx;
 
-      const allowedFields = ["name", "sku", "category", "unit", "unit_cost", "min_stock_alert", "supplier_id"];
+      const allowedFields = ["name", "sku", "category", "unit", "unit_cost", "min_stock_alert", "supplier_id", "photo_url"];
       const updatePayload: Record<string, unknown> = { updated_at: new Date().toISOString() };
       for (const field of allowedFields) {
         if (field in body) updatePayload[field] = body[field];

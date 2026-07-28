@@ -5,8 +5,10 @@ import { verifyAuth } from "../_shared/auth.ts";
 import { createPaymentIntent } from "../_shared/stripe.ts";
 import { withLogging } from "../_shared/logger.ts";
 import { checkRateLimit } from "../_shared/rateLimit.ts";
-import { bookingConfirmationEmail, sendEmail } from "../_shared/resend.ts";
+import { bookingConfirmationEmail, bookingReceivedOwnerEmail, sendEmail } from "../_shared/resend.ts";
 import { issueCancelToken } from "../_shared/bookingCancelToken.ts";
+import { sendSms } from "../_shared/messagebird.ts";
+import { sendWhatsApp } from "../_shared/meta-whatsapp.ts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -25,6 +27,8 @@ interface CreateBookingBody {
     notes?: string;
   };
   payment_method: "deposit" | "full" | "later";
+  intake_answer?: string | null;
+  terms_accepted?: boolean;
   locale?: "en" | "et" | "fr";
   gdpr_consent?: boolean;
 }
@@ -203,7 +207,7 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
         });
       }
     } else {
-      // No staff preference — pick first available
+      // No staff preference — pick randomly among available staff for fair distribution
       if (matchingSlots.length === 0) {
         const allTimes = [
           ...new Set(
@@ -220,7 +224,8 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
           available_alternatives: alternatives,
         });
       }
-      selectedStaffId = matchingSlots[0].staff_profile_id;
+      const randomIdx = Math.floor(Math.random() * matchingSlots.length);
+      selectedStaffId = matchingSlots[randomIdx].staff_profile_id;
     }
 
     // Get the effective price from the slot (may include staff override)
@@ -246,13 +251,13 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
       supabaseAdmin
         .from("business_settings")
         .select(
-          "deposit_percentage, tax_enabled, tax_rate, stripe_account_id, enabled_payment_methods",
+          "deposit_percentage, tax_enabled, tax_rate, stripe_account_id, enabled_payment_methods, booking_notification_email, sms_notifications_enabled, whatsapp_notifications_enabled",
         )
         .eq("business_id", business_id)
         .maybeSingle(),
       supabaseAdmin
         .from("businesses")
-        .select("name, currency_code")
+        .select("name, currency_code, logo_url")
         .eq("id", business_id)
         .single(),
     ]);
@@ -522,6 +527,14 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
     const appointmentId = atomicId as string;
     const cancelToken = await issueCancelToken(appointmentId, bookingReference);
 
+    // Store intake answer and terms acceptance if provided
+    const apptExtra: Record<string, unknown> = {};
+    if (body.intake_answer) apptExtra.intake_answer = body.intake_answer;
+    if (body.terms_accepted) apptExtra.terms_accepted_at = new Date().toISOString();
+    if (Object.keys(apptExtra).length > 0) {
+      await supabaseAdmin.from("appointments").update(apptExtra).eq("id", appointmentId);
+    }
+
     // STEP 7: INSERT appointment_services
     const { error: apptSvcErr } = await supabaseAdmin
       .from("appointment_services")
@@ -586,23 +599,8 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
     }
 
     if (payment_method === "later") {
-      // ── No payment now — confirm immediately ─────────────────────────
-      const { error: confirmErr } = await supabaseAdmin
-        .from("appointments")
-        .update({ status: "confirmed" })
-        .eq("id", appointmentId);
-
-      if (confirmErr) throw confirmErr;
-
-      // Status log
-      await supabaseAdmin.from("appointment_status_log").insert({
-        appointment_id: appointmentId,
-        old_status: "pending",
-        new_status: "confirmed",
-        reason: "Pay later — auto-confirmed",
-      });
-
-      // Send confirmation email (fire & forget)
+      // ── No payment now — stays pending until owner assigns and confirms ──
+      // Send booking receipt email (fire & forget)
       const appUrl = Deno.env.get("APP_URL") ?? "https://kazionebooking.com";
       const emailData = bookingConfirmationEmail(
         {
@@ -626,6 +624,46 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
       if (client.email) {
         sendEmail(client.email, emailData.subject, emailData.html).catch(
           (err) => console.error("Email send failed:", err),
+        );
+      }
+
+      // Send client SMS / WhatsApp confirmation (fire & forget)
+      const clientPhone = client.phone?.trim();
+      if (clientPhone) {
+        const smsText =
+          `${business.name}: booking received — ${service.name} on ${date} at ${time}. ` +
+          `Pending confirmation. Ref: ${bookingReference}. Manage: ${appUrl}/booking/${bookingReference}`;
+        if (settings?.sms_notifications_enabled) {
+          sendSms(clientPhone, smsText).catch((err) =>
+            console.error("SMS send failed:", err),
+          );
+        }
+        if (settings?.whatsapp_notifications_enabled) {
+          sendWhatsApp(clientPhone, smsText).catch((err) =>
+            console.error("WhatsApp send failed:", err),
+          );
+        }
+      }
+
+      // Send owner notification email if configured
+      const ownerNotifEmail = settings?.booking_notification_email as string | null | undefined;
+      if (ownerNotifEmail) {
+        const ownerEmailData = bookingReceivedOwnerEmail({
+          clientName: first,
+          clientEmail: client.email ?? null,
+          clientPhone: client.phone ?? null,
+          salonName: business.name,
+          salonLogoUrl: business.logo_url ?? null,
+          serviceName: service.name,
+          staffName,
+          date,
+          time,
+          reference: bookingReference,
+          price: `${currencyCode === "EUR" ? "€" : currencyCode} ${totalAmount.toFixed(2)}`,
+          manageUrl: `${appUrl}/owner`,
+        });
+        sendEmail(ownerNotifEmail, ownerEmailData.subject, ownerEmailData.html).catch(
+          (err) => console.error("Owner notification email failed:", err),
         );
       }
 
@@ -658,7 +696,7 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
         booking_reference: bookingReference,
         appointment_id: appointmentId,
         cancel_token: cancelToken,
-        status: "confirmed",
+        status: "pending",
       });
     } else {
       // ── Stripe payment (deposit or full) ─────────────────────────────

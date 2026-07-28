@@ -16,6 +16,8 @@ import {
   bookingRescheduleEmail,
 } from "../_shared/resend.ts";
 import { issueCancelToken } from "../_shared/bookingCancelToken.ts";
+import { sendSms } from "../_shared/messagebird.ts";
+import { sendWhatsApp } from "../_shared/meta-whatsapp.ts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -265,7 +267,7 @@ Deno.serve(withLogging("reschedule-booking", async (req: Request) => {
       await Promise.all([
         supabaseAdmin
           .from("clients")
-          .select("first_name, email, preferred_locale")
+          .select("first_name, email, phone, preferred_locale")
           .eq("id", appointment.client_id)
           .single(),
         supabaseAdmin
@@ -311,9 +313,24 @@ Deno.serve(withLogging("reschedule-booking", async (req: Request) => {
         locale,
       );
 
-      sendEmail(cl.email, emailData.subject, emailData.html).catch((err) =>
-        console.error("Reschedule email failed:", err),
-      );
+      if (cl.email) {
+        sendEmail(cl.email, emailData.subject, emailData.html).catch((err) =>
+          console.error("Reschedule email failed:", err),
+        );
+      }
+
+      const clientPhone = (cl as unknown as { phone?: string | null }).phone?.trim();
+      if (clientPhone) {
+        const smsText =
+          `${biz.name}: your booking ${appointment.booking_reference} has been rescheduled ` +
+          `to ${body.new_date} at ${body.new_time}.`;
+        sendSms(clientPhone, smsText).catch((err) =>
+          console.error("Reschedule SMS failed:", err),
+        );
+        sendWhatsApp(clientPhone, smsText).catch((err) =>
+          console.error("Reschedule WhatsApp failed:", err),
+        );
+      }
     }
 
     return new Response(

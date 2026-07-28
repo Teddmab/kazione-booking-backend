@@ -17,9 +17,12 @@ interface InsightItem {
 }
 
 interface ServiceSuggestion {
-  field: "name" | "description" | "price" | "duration_minutes";
+  field: "name" | "description" | "price" | "duration_minutes" | "staff_commission";
   suggested_value: string | null;
   reason: string;
+  // Commission-specific extras (populated when field === "staff_commission")
+  suggested_commission_type?: "percentage" | "fixed";
+  suggested_commission_value?: number;
 }
 
 interface ServiceInsight {
@@ -250,6 +253,7 @@ async function callAnthropic(
 
   if (!res.ok) {
     const errBody = await res.text();
+    console.error("[ai-insights] Anthropic API error (business)", res.status, errBody.slice(0, 300));
     throw new Error(`Anthropic API error ${res.status}: ${errBody}`);
   }
 
@@ -271,7 +275,7 @@ async function callAnthropic(
 async function gatherServices(businessId: string) {
   const { data, error } = await supabaseAdmin
     .from("services")
-    .select("id, name, description, price, duration_minutes, is_active, category_id, service_categories(name)")
+    .select("id, name, description, price, duration_minutes, is_active, category_id, staff_commission_type, staff_commission_value, updated_at, service_categories(name)")
     .eq("business_id", businessId)
     .eq("is_active", true)
     .order("display_order", { ascending: true });
@@ -280,17 +284,35 @@ async function gatherServices(businessId: string) {
   return (data ?? []).map((svc: Record<string, unknown>) => {
     const cat = svc.service_categories as { name: string } | null;
     return {
+      id: svc.id as string,
       name: svc.name as string,
       description: (svc.description ?? "") as string,
       price: +(svc.price as number),
       duration_minutes: svc.duration_minutes as number,
       category: cat?.name ?? null,
+      staff_commission_type: (svc.staff_commission_type ?? "none") as string,
+      staff_commission_value: svc.staff_commission_value != null ? +(svc.staff_commission_value as number) : null,
+      updated_at: svc.updated_at as string,
     };
   });
 }
 
+function serviceHash(svc: {
+  name: string; price: number; duration_minutes: number;
+  description: string; staff_commission_type: string; staff_commission_value: number | null;
+  updated_at: string;
+}): string {
+  return `${svc.updated_at}|${svc.name}|${svc.price}|${svc.duration_minutes}|${svc.description.length}|${svc.staff_commission_type}|${svc.staff_commission_value}`;
+}
+
+const SERVICE_CACHE_HOURS = 24;
+
 async function callAnthropicServices(
-  services: Array<{ name: string; description: string; price: number; duration_minutes: number; category: string | null }>,
+  services: Array<{
+    name: string; description: string; price: number;
+    duration_minutes: number; category: string | null;
+    staff_commission_type: string; staff_commission_value: number | null;
+  }>,
 ): Promise<ServiceAnalysisResponse> {
   const apiKey = Deno.env.get("ANTHROPIC_API_KEY");
   if (!apiKey) throw new Error("ANTHROPIC_API_KEY not configured");
@@ -304,21 +326,18 @@ async function callAnthropicServices(
     },
     body: JSON.stringify({
       model: "claude-sonnet-4-6",
-      max_tokens: 2500,
+      max_tokens: 4000,
       system:
-        "You are KaziOne AI, a business analyst for beauty and wellness businesses. " +
-        "Analyze this service catalog and identify potential issues. " +
-        "Check each service for: (1) missing or very short description (<10 words), (2) price anomalies (unusually high/low compared to others, or 0 price), (3) missing category, (4) suspiciously long or short duration relative to the service name. " +
-        "Be practical — flag real issues, not minor style preferences. " +
-        'Respond with a JSON object: { "analysis": [{ "service_name": string, "severity": "ok"|"warning"|"error", "issues": string[], "suggestions": [{ "field": "name"|"description"|"price"|"duration_minutes", "suggested_value": string|null, "reason": string }] }], "summary": string }. ' +
-        "severity=error means the issue will likely confuse clients (e.g. no description, zero price). severity=warning means it should be reviewed (e.g. vague description). severity=ok means the service looks good. " +
-        "For each issue, include a suggestion entry: for 'description' issues provide a 2-3 sentence professional description as suggested_value; for 'name' issues (capitalisation, typos) provide the corrected name; for 'price' and 'duration_minutes' issues set suggested_value to null since you cannot determine the correct value. " +
-        "Services with severity 'ok' should have an empty suggestions array. " +
-        "Do not include any text outside the JSON object.",
+        "You are KaziOne AI, a business analyst for beauty and wellness salons. " +
+        "Analyze the service catalog and flag real issues. Keep all text values short (max 20 words each). " +
+        "Check each service for: (1) missing/very short description (<8 words), (2) price anomaly (0 or very different from similar services), (3) missing category, (4) duration mismatch for service type, (5) no staff commission set (recommend industry-standard rate). " +
+        "Industry commission norms for Estonia/EU salons: hair services 30-40%, nail services 35-45%, massage/spa 40-50%, other beauty 30-40%. " +
+        'Output ONLY valid JSON matching this exact schema (no text outside the object): { "analysis": [{ "service_name": string, "severity": "ok"|"warning"|"error", "issues": string[], "suggestions": [{ "field": "name"|"description"|"price"|"duration_minutes"|"staff_commission", "suggested_value": string|null, "reason": string, "suggested_commission_type": "percentage"|"fixed"|null, "suggested_commission_value": number|null }] }], "summary": string }. ' +
+        "Rules: description suggestions must be ≤20 words. For staff_commission field: set suggested_commission_type to 'percentage', suggested_commission_value to the recommended %, suggested_value to null. For price/duration anomalies set suggested_value to null. Services that look good: severity=ok, empty issues and suggestions arrays.",
       messages: [
         {
           role: "user",
-          content: `Analyze this service catalog:\n${JSON.stringify(services, null, 2)}`,
+          content: `Analyze this service catalog:\n${JSON.stringify(services)}`,
         },
       ],
     }),
@@ -326,15 +345,35 @@ async function callAnthropicServices(
 
   if (!res.ok) {
     const errBody = await res.text();
+    console.error("[ai-insights] Anthropic API error (services)", res.status, errBody.slice(0, 300));
     throw new Error(`Anthropic API error ${res.status}: ${errBody}`);
   }
 
   const data = await res.json();
-  const text = data.content?.[0]?.text ?? "";
-  const jsonMatch = text.match(/\{[\s\S]*\}/);
-  if (!jsonMatch) throw new Error("No valid JSON in AI response");
+  // Strip markdown code fences if the model wraps the JSON
+  const raw = (data.content?.[0]?.text ?? "") as string;
+  const text = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/, "").trim();
 
-  const parsed = JSON.parse(jsonMatch[0]);
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    // Attempt to salvage truncated JSON by extracting as much analysis as possible
+    const partial = text.match(/\{[\s\S]*/)?.[0] ?? "{}";
+    try {
+      // Try repairing common truncation: close unclosed arrays/objects
+      const repaired = partial
+        .replace(/,\s*$/, "")          // trailing comma
+        .replace(/\[\s*$/, "[]")       // open array at end
+        + (partial.split("{").length - partial.split("}").length > 0
+          ? "}".repeat(partial.split("{").length - partial.split("}").length)
+          : "");
+      parsed = JSON.parse(repaired);
+    } catch {
+      throw new Error(`AI returned invalid JSON. Raw: ${text.slice(0, 200)}`);
+    }
+  }
+
   return {
     analysis: (parsed.analysis ?? []) as ServiceInsight[],
     summary: (parsed.summary ?? "") as string,
@@ -372,15 +411,93 @@ Deno.serve(withLogging("ai-insights", async (req: Request) => {
       const services = await gatherServices(businessId);
       if (services.length === 0) {
         return new Response(
-          JSON.stringify({ analysis: [], summary: "No active services found.", cached: false }),
+          JSON.stringify({ analysis: [], summary: "No active services found.", cached: false, cached_services: [] }),
           { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } },
         );
       }
-      const result = await callAnthropicServices(services);
-      return new Response(JSON.stringify(result), {
-        status: 200,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
+
+      // Build current hash map: service id → hash
+      const currentHashes = new Map(services.map((s) => [s.id, serviceHash(s)]));
+
+      // Load latest cache entry for this business (within 24h)
+      const cacheThreshold = new Date(Date.now() - SERVICE_CACHE_HOURS * 3600000).toISOString();
+      const { data: cacheEntry } = await supabaseAdmin
+        .from("notifications")
+        .select("metadata, created_at")
+        .eq("business_id", businessId)
+        .eq("type", "ai_service_analysis")
+        .gte("created_at", cacheThreshold)
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      const cachedMeta = (cacheEntry?.metadata ?? null) as Record<string, unknown> | null;
+      const cachedHashes = (cachedMeta?.service_hashes ?? {}) as Record<string, string>;
+      const cachedAnalysis = (cachedMeta?.analysis ?? []) as ServiceInsight[];
+      const cachedAt = cacheEntry?.created_at as string | undefined;
+
+      // Split services: those whose hash matches cached vs. those that changed/are new
+      const staleServices = services.filter((s) => cachedHashes[s.id] !== currentHashes.get(s.id));
+      const cachedServiceNames = services
+        .filter((s) => cachedHashes[s.id] === currentHashes.get(s.id))
+        .map((s) => s.name);
+
+      let freshAnalysis: ServiceInsight[] = [];
+      let summary = (cachedMeta?.summary as string | undefined) ?? "";
+
+      if (staleServices.length === 0 && cachedAnalysis.length > 0) {
+        // Everything cached — return immediately
+        return new Response(
+          JSON.stringify({
+            analysis: cachedAnalysis,
+            summary,
+            cached: true,
+            cached_services: cachedServiceNames.map((name) => ({ name, analyzed_at: cachedAt })),
+          }),
+          { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+        );
+      }
+
+      // Call AI only for stale/new services; preserve cached insights for unchanged ones
+      const servicesToAnalyze = staleServices.length > 0 ? staleServices : services;
+      const freshResult = await callAnthropicServices(servicesToAnalyze);
+      freshAnalysis = freshResult.analysis;
+      summary = freshResult.summary || summary;
+
+      // Merge: cached insights for unchanged services + fresh insights for changed services
+      const freshNames = new Set(staleServices.map((s) => s.name.toLowerCase()));
+      const preservedInsights = cachedAnalysis.filter(
+        (item) => !freshNames.has(item.service_name.toLowerCase()),
+      );
+      const mergedAnalysis = [...preservedInsights, ...freshAnalysis];
+
+      // Persist merged cache (upsert-style: insert new row)
+      const newHashes: Record<string, string> = {};
+      for (const [id, hash] of currentHashes) newHashes[id] = hash;
+
+      await supabaseAdmin.from("notifications").insert({
+        business_id: businessId,
+        user_id: userId,
+        type: "ai_service_analysis",
+        title: "AI Service Analysis",
+        body: `Analysed ${staleServices.length} service(s); ${cachedServiceNames.length} from cache`,
+        metadata: {
+          service_hashes: newHashes,
+          analysis: mergedAnalysis,
+          summary,
+        },
+        is_read: true,
       });
+
+      return new Response(
+        JSON.stringify({
+          analysis: mergedAnalysis,
+          summary,
+          cached: false,
+          cached_services: cachedServiceNames.map((name) => ({ name, analyzed_at: cachedAt })),
+        }),
+        { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      );
     }
 
     // ── Business insights (default) ──────────────────────────────────────

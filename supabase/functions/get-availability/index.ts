@@ -1,5 +1,5 @@
 import { supabaseAdmin } from "../_shared/supabaseAdmin.ts";
-import { corsHeaders, handleCors } from "../_shared/cors.ts";
+import { corsHeadersFor, handleCors } from "../_shared/cors.ts";
 import { badRequest, serverError } from "../_shared/errors.ts";
 import { withLogging } from "../_shared/logger.ts";
 
@@ -102,7 +102,7 @@ Deno.serve(withLogging("get-availability", async (req: Request) => {
     const today = new Date();
     today.setUTCHours(0, 0, 0, 0);
     if (requestedDate < today) {
-      return jsonOk({
+      return jsonOk(req, {
         date: dateStr!,
         dayName: DAY_NAMES[requestedDate.getUTCDay()],
         service: null,
@@ -113,10 +113,10 @@ Deno.serve(withLogging("get-availability", async (req: Request) => {
       });
     }
 
-    // Check booking_future_days from business_settings
+    // Check booking_future_days + privacy flags from business_settings
     const { data: settings, error: settingsErr } = await supabaseAdmin
       .from("business_settings")
-      .select("booking_future_days")
+      .select("booking_future_days, hide_staff_names")
       .eq("business_id", businessId!)
       .maybeSingle();
     if (settingsErr) throw settingsErr;
@@ -126,7 +126,7 @@ Deno.serve(withLogging("get-availability", async (req: Request) => {
     maxDate.setUTCDate(maxDate.getUTCDate() + futureDays);
 
     if (requestedDate > maxDate) {
-      return jsonOk({
+      return jsonOk(req, {
         date: dateStr!,
         dayName: DAY_NAMES[requestedDate.getUTCDay()],
         service: null,
@@ -165,6 +165,7 @@ Deno.serve(withLogging("get-availability", async (req: Request) => {
         .select("custom_price")
         .eq("staff_profile_id", staffId)
         .eq("service_id", serviceId!)
+        .eq("status", "accepted")
         .maybeSingle();
       if (staffSvcErr) throw staffSvcErr;
 
@@ -214,14 +215,15 @@ Deno.serve(withLogging("get-availability", async (req: Request) => {
     }
 
     // 5. Group by slot_time
+    const hideNames = settings?.hide_staff_names === true;
     const slotMap = new Map<string, SlotStaff[]>();
     for (const row of rawSlots ?? []) {
       const time = (row.slot_time as string).slice(0, 5); // "HH:MM"
       if (!slotMap.has(time)) slotMap.set(time, []);
       slotMap.get(time)!.push({
         id: row.staff_profile_id,
-        name: row.staff_name,
-        avatarUrl: avatarMap[row.staff_profile_id] ?? null,
+        name: hideNames ? "Professional" : row.staff_name,
+        avatarUrl: hideNames ? null : (avatarMap[row.staff_profile_id] ?? null),
         price: +(row.custom_price ?? service.price),
       });
     }
@@ -318,7 +320,7 @@ Deno.serve(withLogging("get-availability", async (req: Request) => {
       ...(reason ? { reason } : {}),
     };
 
-    return jsonOk(response);
+    return jsonOk(req, response);
   } catch (err) {
     console.error("get-availability error:", err);
     return serverError("Failed to fetch availability");
@@ -329,11 +331,11 @@ Deno.serve(withLogging("get-availability", async (req: Request) => {
 // Utility
 // ---------------------------------------------------------------------------
 
-function jsonOk(body: unknown): Response {
+function jsonOk(req: Request, body: unknown): Response {
   return new Response(JSON.stringify(body), {
     status: 200,
     headers: {
-      ...corsHeaders,
+      ...corsHeadersFor(req),
       "Content-Type": "application/json",
       "Cache-Control": "public, max-age=30",
     },

@@ -751,6 +751,7 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
       const status = body.status as string;
       const reason = body.reason as string | undefined;
       const changedBy = (body.changed_by as string | undefined) ?? ctx.userId;
+      const paymentMethod = body.payment_method as string | undefined;
 
       const updateFields: Record<string, unknown> = { status };
       if (status === "cancelled") {
@@ -882,6 +883,39 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
             console.warn("cancellation email notification failed:", cancelEmailErr);
           }
         })();
+      }
+
+      // Settle payment when appointment is marked completed
+      if (status === "completed") {
+        const method = paymentMethod ?? "cash";
+        const completedRow = existing as Record<string, unknown>;
+        const price = Number(completedRow.price ?? 0);
+        const businessIdForPayment = completedRow.business_id as string;
+
+        const { data: existingPayment } = await supabaseAdmin
+          .from("payments")
+          .select("id, status")
+          .eq("appointment_id", id)
+          .maybeSingle();
+
+        if (existingPayment) {
+          const pay = existingPayment as Record<string, unknown>;
+          if (pay.status !== "paid") {
+            await supabaseAdmin
+              .from("payments")
+              .update({ status: "paid", paid_at: new Date().toISOString(), method })
+              .eq("id", pay.id as string);
+          }
+        } else if (price > 0) {
+          await supabaseAdmin.from("payments").insert({
+            business_id: businessIdForPayment,
+            appointment_id: id,
+            amount: price,
+            status: "paid",
+            method,
+            paid_at: new Date().toISOString(),
+          });
+        }
       }
 
       // Auto stock-out: when appointment completed, deduct product usage

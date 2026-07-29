@@ -31,6 +31,7 @@ interface CreateBookingBody {
   terms_accepted?: boolean;
   locale?: "en" | "et" | "fr";
   gdpr_consent?: boolean;
+  referrer_staff_id?: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -527,10 +528,11 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
     const appointmentId = atomicId as string;
     const cancelToken = await issueCancelToken(appointmentId, bookingReference);
 
-    // Store intake answer and terms acceptance if provided
+    // Store intake answer, terms acceptance, and referrer if provided
     const apptExtra: Record<string, unknown> = {};
     if (body.intake_answer) apptExtra.intake_answer = body.intake_answer;
     if (body.terms_accepted) apptExtra.terms_accepted_at = new Date().toISOString();
+    if (body.referrer_staff_id) apptExtra.referrer_staff_id = body.referrer_staff_id;
     if (Object.keys(apptExtra).length > 0) {
       await supabaseAdmin.from("appointments").update(apptExtra).eq("id", appointmentId);
     }

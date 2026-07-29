@@ -184,7 +184,13 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
       (s: { slot_time: string }) => s.slot_time.slice(0, 5) === requestedTime,
     );
 
-    // If a specific staff was requested, filter to them
+    // Resolve which staff member will service the booking (for slot blocking).
+    // Three cases:
+    //   1. Explicit staff_profile_id → honour it (existing behaviour)
+    //   2. referrer_staff_id present → try to use the referrer; fall back to any available
+    //   3. Neither → pick any available staff for the atomic lock, then unassign after insert
+    const referrerStaffId = body.referrer_staff_id ?? null;
+
     let selectedStaffId = staff_profile_id;
     if (staff_profile_id) {
       const staffSlot = matchingSlots.find(
@@ -209,7 +215,6 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
         });
       }
     } else {
-      // No staff preference — pick randomly among available staff for fair distribution
       if (matchingSlots.length === 0) {
         const allTimes = [
           ...new Set(
@@ -226,8 +231,20 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
           available_alternatives: alternatives,
         });
       }
-      const randomIdx = Math.floor(Math.random() * matchingSlots.length);
-      selectedStaffId = matchingSlots[randomIdx].staff_profile_id;
+
+      if (referrerStaffId) {
+        // Referral booking — prefer the referred staff's slot
+        const referrerSlot = matchingSlots.find(
+          (s: { staff_profile_id: string }) => s.staff_profile_id === referrerStaffId,
+        );
+        selectedStaffId = referrerSlot
+          ? referrerStaffId
+          : matchingSlots[0].staff_profile_id; // fallback if referrer unavailable at this time
+      } else {
+        // Non-referral, no staff preference — pick any for atomic lock; staff is cleared after insert
+        const randomIdx = Math.floor(Math.random() * matchingSlots.length);
+        selectedStaffId = matchingSlots[randomIdx].staff_profile_id;
+      }
     }
 
     // Get the effective price from the slot (may include staff override)
@@ -529,15 +546,26 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
     const appointmentId = atomicId as string;
     const cancelToken = await issueCancelToken(appointmentId, bookingReference);
 
-    // Store intake answers, terms acceptance, and referrer if provided
+    // Post-insert updates: intake answers, referral, and status/staff adjustments.
     const apptExtra: Record<string, unknown> = {};
+
     if (body.intake_answers && Object.keys(body.intake_answers).length > 0) {
       apptExtra.intake_answers = body.intake_answers;
     } else if (body.intake_answer) {
       apptExtra.intake_answer = body.intake_answer;
     }
     if (body.terms_accepted) apptExtra.terms_accepted_at = new Date().toISOString();
-    if (body.referrer_staff_id) apptExtra.referrer_staff_id = body.referrer_staff_id;
+
+    if (referrerStaffId) {
+      // Referral booking: record the referrer and mark as offered (staff must confirm)
+      apptExtra.referrer_staff_id = referrerStaffId;
+      apptExtra.status = "offered";
+    } else if (!staff_profile_id) {
+      // Non-referral booking with no explicit staff preference: clear the slot-lock staff
+      // so the appointment appears unassigned until the owner manually assigns a staff member.
+      apptExtra.staff_profile_id = null;
+    }
+
     if (Object.keys(apptExtra).length > 0) {
       await supabaseAdmin.from("appointments").update(apptExtra).eq("id", appointmentId);
     }

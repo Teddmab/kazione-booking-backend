@@ -710,9 +710,9 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
       };
 
       // Owner/manager OR assigned staff may update status (staff portal MS1)
-      let ctx: { userId: string; businessId: string; role: string } | Response =
-        await requireOwnerOrManagerCtx(req, existingRow.business_id);
-      if (ctx instanceof Response) {
+      const ownerResult = await requireOwnerOrManagerCtx(req, existingRow.business_id);
+      let ctx: { userId: string; businessId: string; role: string };
+      if (ownerResult instanceof Response) {
         try {
           const user = await verifyAuth(req);
           const { data: memberRow } = await supabaseAdmin
@@ -723,7 +723,7 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
             .eq("is_active", true)
             .maybeSingle();
           if (!memberRow || (memberRow as { role: string }).role !== "staff") {
-            return ctx;
+            return ownerResult;
           }
           const { data: sp } = await supabaseAdmin
             .from("staff_profiles")
@@ -742,8 +742,10 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
           };
         } catch (e) {
           if (e instanceof Response) return e;
-          return ctx;
+          return ownerResult;
         }
+      } else {
+        ctx = ownerResult;
       }
 
       const status = body.status as string;

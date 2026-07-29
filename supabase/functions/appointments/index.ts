@@ -693,10 +693,10 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
       if (!id) return badRequest("id is required");
       const body = await req.json() as Record<string, unknown>;
 
-      // Fetch appointment to get business_id for auth (+ service_id for stock-out)
+      // Fetch appointment to get business_id for auth (+ service_id for stock-out + price for payment settlement)
       const { data: existing, error: fetchErr } = await supabaseAdmin
         .from("appointments")
-        .select("status, business_id, service_id, staff_profile_id")
+        .select("status, business_id, service_id, staff_profile_id, price")
         .eq("id", id)
         .single();
 

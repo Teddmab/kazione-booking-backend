@@ -2,6 +2,9 @@
 -- Extend get_staff_performance to include referral stats (S18).
 -- Adds 3 new columns: referrals_initiated, referral_conversions, referral_revenue.
 -- Requires migration 074 (referrer_staff_id column on appointments).
+--
+-- DROP required because CREATE OR REPLACE cannot change the return type.
+DROP FUNCTION IF EXISTS get_staff_performance(uuid, date, date);
 
 CREATE OR REPLACE FUNCTION get_staff_performance(
   p_business_id uuid,

@@ -1364,6 +1364,114 @@ Deno.serve(withLogging("staff", async (req: Request) => {
       return json({ success: true });
     }
 
+    // ── GET /staff?action=my-performance&business_id=&from=&to= ─────────────
+    if (method === "GET" && action === "my-performance") {
+      const user = await verifyAuth(req);
+      const perfBusinessId = url.searchParams.get("business_id");
+      const from = url.searchParams.get("from");
+      const to = url.searchParams.get("to");
+      if (!perfBusinessId) return badRequest("business_id is required");
+      if (!from || !to) return badRequest("from and to query params are required");
+
+      // Resolve this user's staff_profile for the business via business_members join
+      const { data: bmRow } = await supabaseAdmin
+        .from("business_members")
+        .select("id, role")
+        .eq("user_id", user.id)
+        .eq("business_id", perfBusinessId)
+        .eq("is_active", true)
+        .maybeSingle();
+
+      if (!bmRow) return forbidden("Not a member of this business");
+
+      const { data: spRow } = await supabaseAdmin
+        .from("staff_profiles")
+        .select("id, display_name, commission_rate")
+        .eq("business_member_id", (bmRow as Record<string, unknown>).id as string)
+        .eq("business_id", perfBusinessId)
+        .maybeSingle();
+
+      if (!spRow) return notFound("Staff profile not found for this user");
+
+      const sp = spRow as Record<string, unknown>;
+      const myStaffId = sp.id as string;
+
+      // Appointment stats (as assigned staff) + referral stats in parallel
+      const [apptResult, referralResult, reviewResult] = await Promise.all([
+        supabaseAdmin
+          .from("appointments")
+          .select("status, price, client_id, service:services(staff_commission_type, staff_commission_value)")
+          .eq("staff_profile_id", myStaffId)
+          .eq("business_id", perfBusinessId)
+          .is("deleted_at", null)
+          .gte("starts_at", `${from}T00:00:00`)
+          .lte("starts_at", `${to}T23:59:59`),
+        supabaseAdmin
+          .from("appointments")
+          .select("status, price")
+          .eq("referrer_staff_id", myStaffId)
+          .eq("business_id", perfBusinessId)
+          .is("deleted_at", null)
+          .gte("starts_at", `${from}T00:00:00`)
+          .lte("starts_at", `${to}T23:59:59`),
+        supabaseAdmin
+          .from("reviews")
+          .select("rating")
+          .eq("staff_profile_id", myStaffId)
+          .gte("created_at", `${from}T00:00:00`)
+          .lte("created_at", `${to}T23:59:59`),
+      ]);
+
+      const rows = (apptResult.data ?? []) as Record<string, unknown>[];
+      const completed = rows.filter((a) => a.status === "completed");
+      const active = rows.filter((a) => a.status !== "cancelled" && a.status !== "no_show");
+      const completionRate = active.length > 0 ? completed.length / active.length : 0;
+      const revenue = completed.reduce((s, a) => s + Number(a.price ?? 0), 0);
+      const uniqueClients = new Set(completed.map((a) => a.client_id as string)).size;
+
+      const commRate = Number(sp.commission_rate ?? 0);
+      let commissionAmount = 0;
+      for (const a of completed) {
+        const svc = a.service as Record<string, unknown> | null;
+        const commType = (svc?.staff_commission_type as string) ?? "none";
+        const commValue = Number(svc?.staff_commission_value ?? 0);
+        if (commType === "percentage" && commValue > 0) {
+          commissionAmount += Number(a.price ?? 0) * commValue / 100;
+        } else if (commType === "fixed" && commValue > 0) {
+          commissionAmount += commValue;
+        } else if (commRate > 0) {
+          commissionAmount += Number(a.price ?? 0) * commRate / 100;
+        }
+      }
+
+      const ratings = (reviewResult.data ?? []) as { rating: number }[];
+      const avgRating = ratings.length > 0
+        ? ratings.reduce((s, r) => s + r.rating, 0) / ratings.length
+        : 0;
+
+      const refRows = (referralResult.data ?? []) as Record<string, unknown>[];
+      const refConverted = refRows.filter((a) =>
+        a.status === "completed" || a.status === "confirmed",
+      );
+      const referralRevenue = refConverted.reduce((s, a) => s + Number(a.price ?? 0), 0);
+
+      return json({
+        performance: {
+          staff_profile_id: myStaffId,
+          display_name: sp.display_name as string,
+          bookings: completed.length,
+          revenue: Math.round(revenue * 100) / 100,
+          commission_amount: Math.round(commissionAmount * 100) / 100,
+          unique_clients: uniqueClients,
+          completion_rate: completionRate,
+          avg_rating: Math.round(avgRating * 10) / 10,
+          referrals_initiated: refRows.length,
+          referral_conversions: refConverted.length,
+          referral_revenue: Math.round(referralRevenue * 100) / 100,
+        },
+      });
+    }
+
     return badRequest(`Method ${method} is not supported`);
   } catch (err) {
     if (err instanceof Response) return err;

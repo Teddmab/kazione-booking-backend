@@ -28,6 +28,7 @@ interface CreateBookingBody {
   };
   payment_method: "deposit" | "full" | "later";
   intake_answer?: string | null;
+  intake_answers?: Record<string, { label: string; value: unknown }> | null;
   terms_accepted?: boolean;
   locale?: "en" | "et" | "fr";
   gdpr_consent?: boolean;
@@ -528,9 +529,13 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
     const appointmentId = atomicId as string;
     const cancelToken = await issueCancelToken(appointmentId, bookingReference);
 
-    // Store intake answer, terms acceptance, and referrer if provided
+    // Store intake answers, terms acceptance, and referrer if provided
     const apptExtra: Record<string, unknown> = {};
-    if (body.intake_answer) apptExtra.intake_answer = body.intake_answer;
+    if (body.intake_answers && Object.keys(body.intake_answers).length > 0) {
+      apptExtra.intake_answers = body.intake_answers;
+    } else if (body.intake_answer) {
+      apptExtra.intake_answer = body.intake_answer;
+    }
     if (body.terms_accepted) apptExtra.terms_accepted_at = new Date().toISOString();
     if (body.referrer_staff_id) apptExtra.referrer_staff_id = body.referrer_staff_id;
     if (Object.keys(apptExtra).length > 0) {

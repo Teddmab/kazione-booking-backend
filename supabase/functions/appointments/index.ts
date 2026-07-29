@@ -24,7 +24,7 @@ const APPT_SELECT = `
   *,
   client:clients!inner(id, first_name, last_name, email, phone, avatar_url),
   service:services!inner(id, name, duration_minutes, price, staff_commission_type, staff_commission_value),
-  staff:staff_profiles(id, display_name, avatar_url, commission_rate),
+  staff:staff_profiles!staff_profile_id(id, display_name, avatar_url, commission_rate),
   payment:payments(status, amount, method, paid_at)
 `;
 

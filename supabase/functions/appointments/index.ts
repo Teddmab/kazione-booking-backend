@@ -1,6 +1,6 @@
 import { supabaseAdmin } from "../_shared/supabaseAdmin.ts";
 import { corsHeaders, handleCors } from "../_shared/cors.ts";
-import { badRequest, notFound, serverError } from "../_shared/errors.ts";
+import { badRequest, forbidden, notFound, serverError } from "../_shared/errors.ts";
 import { withLogging } from "../_shared/logger.ts";
 import { requireOwnerOrManagerCtx, verifyAuth, verifyBusinessMember } from "../_shared/auth.ts";
 import {
@@ -696,18 +696,61 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
       // Fetch appointment to get business_id for auth (+ service_id for stock-out)
       const { data: existing, error: fetchErr } = await supabaseAdmin
         .from("appointments")
-        .select("status, business_id, service_id")
+        .select("status, business_id, service_id, staff_profile_id")
         .eq("id", id)
         .single();
 
       if (fetchErr || !existing) return notFound("Appointment not found");
 
-      const ctx = await requireOwnerOrManagerCtx(req, (existing as Record<string, unknown>).business_id as string);
-      if (ctx instanceof Response) return ctx;
+      const existingRow = existing as {
+        status: string;
+        business_id: string;
+        service_id: string | null;
+        staff_profile_id: string | null;
+      };
+
+      // Owner/manager OR assigned staff may update status (staff portal MS1)
+      const ownerResult = await requireOwnerOrManagerCtx(req, existingRow.business_id);
+      let ctx: { userId: string; businessId: string; role: string };
+      if (ownerResult instanceof Response) {
+        try {
+          const user = await verifyAuth(req);
+          const { data: memberRow } = await supabaseAdmin
+            .from("business_members")
+            .select("id, role")
+            .eq("user_id", user.id)
+            .eq("business_id", existingRow.business_id)
+            .eq("is_active", true)
+            .maybeSingle();
+          if (!memberRow || (memberRow as { role: string }).role !== "staff") {
+            return ownerResult;
+          }
+          const { data: sp } = await supabaseAdmin
+            .from("staff_profiles")
+            .select("id")
+            .eq("business_member_id", (memberRow as { id: string }).id)
+            .eq("business_id", existingRow.business_id)
+            .maybeSingle();
+          const callerStaffId = (sp as { id: string } | null)?.id ?? null;
+          if (!callerStaffId || callerStaffId !== existingRow.staff_profile_id) {
+            return forbidden("You can only update your own appointments");
+          }
+          ctx = {
+            userId: user.id,
+            businessId: existingRow.business_id,
+            role: "staff",
+          };
+        } catch (e) {
+          if (e instanceof Response) return e;
+          return ownerResult;
+        }
+      } else {
+        ctx = ownerResult;
+      }
 
       const status = body.status as string;
       const reason = body.reason as string | undefined;
-      const changedBy = body.changed_by as string | undefined;
+      const changedBy = (body.changed_by as string | undefined) ?? ctx.userId;
 
       const updateFields: Record<string, unknown> = { status };
       if (status === "cancelled") {

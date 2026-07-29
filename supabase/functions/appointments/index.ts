@@ -25,6 +25,7 @@ const APPT_SELECT = `
   client:clients!inner(id, first_name, last_name, email, phone, avatar_url),
   service:services!inner(id, name, duration_minutes, price, staff_commission_type, staff_commission_value),
   staff:staff_profiles!staff_profile_id(id, display_name, avatar_url, commission_rate),
+  referrer_staff:staff_profiles!referrer_staff_id(id, display_name, avatar_url),
   payment:payments(status, amount, method, paid_at)
 `;
 
@@ -551,9 +552,9 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
 
       const { data: updated, error: updateErr } = await supabaseAdmin
         .from("appointments")
-        .update({ staff_profile_id: staffProfileId, status: "confirmed" })
+        .update({ staff_profile_id: staffProfileId, status: "offered" })
         .eq("id", id)
-        .select(`*, client:clients!inner(id, first_name, last_name, email, phone, avatar_url), service:services!inner(id, name, duration_minutes, price), staff:staff_profiles(id, display_name, avatar_url), payment:payments(status, amount, method, paid_at)`)
+        .select(APPT_SELECT)
         .single();
 
       if (updateErr) return serverError(updateErr.message);
@@ -561,11 +562,95 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
       await supabaseAdmin.from("appointment_status_log").insert({
         appointment_id: id,
         old_status: oldStatus,
-        new_status: "confirmed",
-        reason: "Staff assigned",
+        new_status: "offered",
+        reason: "Staff offered appointment — awaiting confirmation",
       });
 
-      return json(updated);
+      return json(normalizePayment(updated as Record<string, unknown>));
+    }
+
+    // ── PATCH ?action=respond-offer ────────────────────────────────────────────
+    // Staff member accepts or declines an offered appointment.
+    // Body: { business_id, response: 'accepted' | 'declined' }
+    // Owners/managers may also call this to confirm on behalf of staff.
+    if (method === "PATCH" && action === "respond-offer") {
+      if (!id) return badRequest("id is required");
+      const body = await req.json() as Record<string, unknown>;
+      const response = body.response as string | undefined;
+      if (response !== "accepted" && response !== "declined") {
+        return badRequest("response must be 'accepted' or 'declined'");
+      }
+
+      const { data: existing, error: fetchErr } = await supabaseAdmin
+        .from("appointments")
+        .select("business_id, status, staff_profile_id")
+        .eq("id", id)
+        .maybeSingle();
+
+      if (fetchErr || !existing) return notFound("Appointment not found");
+
+      const ex = existing as { business_id: string; status: string; staff_profile_id: string | null };
+
+      if (ex.status !== "offered") {
+        return badRequest(`Cannot respond — appointment is '${ex.status}', not 'offered'`);
+      }
+
+      // Check if caller is owner/manager; if not, verify they are the assigned staff
+      const ownerResult = await requireOwnerOrManagerCtx(req, ex.business_id);
+      if (ownerResult instanceof Response) {
+        // Not owner/manager — must be the assigned staff member
+        try {
+          const user = await verifyAuth(req);
+          const { data: memberRow } = await supabaseAdmin
+            .from("business_members")
+            .select("id, role")
+            .eq("user_id", user.id)
+            .eq("business_id", ex.business_id)
+            .eq("is_active", true)
+            .maybeSingle();
+
+          if (!memberRow || (memberRow as { role: string }).role !== "staff") {
+            return ownerResult;
+          }
+
+          const { data: sp } = await supabaseAdmin
+            .from("staff_profiles")
+            .select("id")
+            .eq("business_member_id", (memberRow as { id: string }).id)
+            .eq("business_id", ex.business_id)
+            .maybeSingle();
+
+          const callerStaffId = (sp as { id: string } | null)?.id ?? null;
+          if (!callerStaffId || callerStaffId !== ex.staff_profile_id) {
+            return forbidden("You can only respond to your own appointment offers");
+          }
+        } catch (e) {
+          if (e instanceof Response) return e;
+          return ownerResult;
+        }
+      }
+
+      const newStatus = response === "accepted" ? "confirmed" : "pending";
+      const updatePayload: Record<string, unknown> = { status: newStatus };
+      if (response === "declined") updatePayload.staff_profile_id = null;
+
+      const { data: updated, error: updateErr } = await supabaseAdmin
+        .from("appointments")
+        .update(updatePayload)
+        .eq("id", id)
+        .select(APPT_SELECT)
+        .single();
+
+      if (updateErr) return serverError(updateErr.message);
+
+      await supabaseAdmin.from("appointment_status_log").insert({
+        appointment_id: id,
+        old_status: "offered",
+        new_status: newStatus,
+        reason: response === "accepted" ? "Staff accepted appointment" : "Staff declined — returned to unassigned",
+      });
+
+      return json(normalizePayment(updated as Record<string, unknown>));
     }
 
     // ── PATCH ?action=reschedule ────────────────────────────────────────────

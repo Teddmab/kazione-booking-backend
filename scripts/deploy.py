@@ -11,9 +11,13 @@ in non-TTY environments. This script uses Python's pty module to provide a
 proper pseudo-terminal, and passes --use-api so bundling happens server-side
 (no Docker needed). Functions that use bare specifiers (resend, stripe) get
 --import-map automatically.
+
+On 409 "deployment already exists" the script automatically deletes the
+function and retries once — this clears stale deployment hash conflicts.
 """
 
 import pty, os, select, subprocess, time, re, sys, glob
+import urllib.request, json
 
 PROJECT_REF = "hwvqbsqlvwvedyhfuiwt"
 PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -44,6 +48,36 @@ def no_jwt_functions() -> set:
 NO_JWT = no_jwt_functions()
 
 
+def _access_token() -> str:
+    for path in [os.path.expanduser("~/.config/supabase/access-token"),
+                 os.path.expanduser("~/.supabase/access-token")]:
+        try:
+            return open(path).read().strip()
+        except FileNotFoundError:
+            pass
+    return os.environ.get("SUPABASE_ACCESS_TOKEN", "")
+
+
+def delete_function(slug: str) -> bool:
+    """Delete the function from the Management API so a fresh deploy can proceed."""
+    token = _access_token()
+    if not token:
+        print(f"  [warn] no access token — cannot delete {slug} for retry", flush=True)
+        return False
+    url = f"https://api.supabase.com/v1/projects/{PROJECT_REF}/functions/{slug}"
+    req = urllib.request.Request(url, method="DELETE",
+                                  headers={"Authorization": f"Bearer {token}"})
+    try:
+        with urllib.request.urlopen(req) as r:
+            ok = r.status == 200
+            if ok:
+                print(f"  [retry] deleted {slug} from production", flush=True)
+            return ok
+    except Exception as e:
+        print(f"  [warn] delete failed: {e}", flush=True)
+        return False
+
+
 def needs_import_map(slug: str) -> bool:
     idx = os.path.join(FUNCTIONS_DIR, slug, "index.ts")
     try:
@@ -58,7 +92,6 @@ def needs_import_map(slug: str) -> bool:
         try:
             with open(shared) as f:
                 if BARE_SPECIFIER_PATTERN.search(f.read()):
-                    # only matters if this function imports that shared file
                     shared_name = os.path.basename(shared)
                     if shared_name.replace(".ts", "") in src:
                         return True
@@ -67,7 +100,8 @@ def needs_import_map(slug: str) -> bool:
     return False
 
 
-def deploy(slug: str) -> bool:
+def _run_deploy_cmd(slug: str) -> tuple[bool, bool]:
+    """Run the deploy CLI command. Returns (success, got_409)."""
     cmd = [
         "npx", "supabase", "functions", "deploy", slug,
         "--project-ref", PROJECT_REF, "--use-api",
@@ -83,13 +117,13 @@ def deploy(slug: str) -> bool:
     )
     os.close(slave)
 
+    output_lines: list[str] = []
     start = time.time()
     while proc.poll() is None and time.time() - start < 120:
         r, _, _ = select.select([master], [], [], 0.3)
         if r:
             try:
                 chunk = os.read(master, 4096)
-                # Respond to terminal capability queries so CLI doesn't hang
                 if b"\x1b]11;?" in chunk:
                     os.write(master, b"\x1b]11;rgb:0000/0000/0000\x07")
                 if b"\x1b[6n" in chunk:
@@ -101,22 +135,35 @@ def deploy(slug: str) -> bool:
                     s = line.strip()
                     if s and not set(s) <= {"⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}:
                         print(f"  {s}", flush=True)
+                        output_lines.append(s)
             except OSError:
                 break
 
-    if proc.poll() is None:
+    timed_out = proc.poll() is None
+    if timed_out:
         proc.kill()
-        try:
-            os.close(master)
-        except Exception:
-            pass
-        return False
-
     try:
         os.close(master)
     except Exception:
         pass
-    return proc.returncode == 0
+
+    if timed_out:
+        return False, False
+
+    got_409 = any("409" in l and "deployment already exists" in l for l in output_lines)
+    return proc.returncode == 0, got_409
+
+
+def deploy(slug: str) -> bool:
+    ok, got_409 = _run_deploy_cmd(slug)
+    if ok:
+        return True
+    if got_409:
+        print(f"  [409] stale deployment hash — deleting and retrying {slug}", flush=True)
+        if delete_function(slug):
+            ok, _ = _run_deploy_cmd(slug)
+            return ok
+    return False
 
 
 def all_function_slugs() -> list[str]:

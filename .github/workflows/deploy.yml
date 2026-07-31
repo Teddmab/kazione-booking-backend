@@ -22,22 +22,7 @@ jobs:
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
         run: |
-          set +e
-          supabase functions deploy \
-            --project-ref "${{ secrets.SUPABASE_PROJECT_ID }}" \
-            --use-api \
-            --import-map supabase/functions/deno.json 2>&1 | tee /tmp/deploy.log
-          DEPLOY_EXIT=${PIPESTATUS[0]}
-          set -e
-          if [ "$DEPLOY_EXIT" -ne 0 ]; then
-            # 409 means "deployment already exists" (same content hash) — idempotent, not a real error
-            NON_409=$(grep "unexpected deploy status" /tmp/deploy.log | grep -v "409" || true)
-            if [ -z "$NON_409" ]; then
-              echo "All functions already up to date (409) — treating as success"
-              exit 0
-            fi
-            exit "$DEPLOY_EXIT"
-          fi
+          python3 scripts/deploy.py
 
       - name: Push pending migrations
         env:

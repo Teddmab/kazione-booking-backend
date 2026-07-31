@@ -1058,6 +1058,159 @@ export function staffServiceOfferAcceptedEmail(
 }
 
 // ---------------------------------------------------------------------------
+// Staff appointment offer notification (internal — English only)
+// ---------------------------------------------------------------------------
+
+interface StaffAppointmentOfferData {
+  staffName: string;
+  salonName: string;
+  salonLogoUrl?: string | null;
+  clientName: string;
+  serviceName: string;
+  date: string;
+  time: string;
+  reference: string;
+  dashboardUrl: string;
+}
+
+export function staffAppointmentOfferEmail(data: StaffAppointmentOfferData): { subject: string; html: string } {
+  const subject = `Appointment offer — ${data.serviceName} (${data.reference})`;
+  return {
+    subject,
+    html: renderEmail({
+      salonLogoUrl: data.salonLogoUrl ?? undefined,
+      salonName: data.salonName,
+      subject,
+      body: `
+        ${heading("You have a new appointment offer")}
+        ${paragraph(`Hi <strong style="color:${B.textDark};">${data.staffName}</strong>, ${data.salonName} would like you to take the following appointment. Please accept or decline in your dashboard.`)}
+        ${detailTable([
+          ["Client", `<strong>${data.clientName}</strong>`],
+          ["Service", `<strong>${data.serviceName}</strong>`],
+          ["Date", data.date],
+          ["Time", data.time],
+          ["Reference", referenceChip(data.reference)],
+        ])}
+        ${ctaButton("Accept or Decline", data.dashboardUrl)}
+      `,
+    }),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Staff service offer notification (internal — English only)
+// ---------------------------------------------------------------------------
+
+interface StaffServiceOfferData {
+  staffName: string;
+  salonName: string;
+  salonLogoUrl?: string | null;
+  serviceNames: string[];
+  dashboardUrl: string;
+}
+
+export function staffServiceOfferEmail(data: StaffServiceOfferData): { subject: string; html: string } {
+  const count = data.serviceNames.length;
+  const subject = `${count} service offer${count !== 1 ? "s" : ""} from ${data.salonName}`;
+  const serviceRows: [string, string][] = data.serviceNames.map((name, i) => [
+    i === 0 ? "Services" : "",
+    `<strong>${name}</strong>`,
+  ]);
+  return {
+    subject,
+    html: renderEmail({
+      salonLogoUrl: data.salonLogoUrl ?? undefined,
+      salonName: data.salonName,
+      subject,
+      body: `
+        ${heading("New service offers")}
+        ${paragraph(`Hi <strong style="color:${B.textDark};">${data.staffName}</strong>, <strong style="color:${B.textDark};">${data.salonName}</strong> has offered you ${count === 1 ? "a new service" : `${count} new services`}. Review and accept or decline in your dashboard.`)}
+        ${detailTable(serviceRows)}
+        ${ctaButton("Review Offers", data.dashboardUrl)}
+      `,
+    }),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Owner pending-completion notification (internal — English only)
+// ---------------------------------------------------------------------------
+
+interface OwnerPendingCompletionData {
+  salonName: string;
+  salonLogoUrl?: string | null;
+  staffName: string;
+  clientName: string;
+  serviceName: string;
+  date: string;
+  time: string;
+  reference: string;
+  paymentMethod: string;
+  dashboardUrl: string;
+}
+
+export function ownerPendingCompletionEmail(data: OwnerPendingCompletionData): { subject: string; html: string } {
+  const subject = `Completion request — ${data.reference} (${data.staffName})`;
+  return {
+    subject,
+    html: renderEmail({
+      salonLogoUrl: data.salonLogoUrl ?? undefined,
+      salonName: data.salonName,
+      subject,
+      body: `
+        ${heading("Staff marked appointment complete")}
+        ${paragraph(`<strong style="color:${B.textDark};">${data.staffName}</strong> has marked the following appointment as complete and is waiting for your confirmation.`)}
+        ${detailTable([
+          ["Client", `<strong>${data.clientName}</strong>`],
+          ["Service", `<strong>${data.serviceName}</strong>`],
+          ["Date", data.date],
+          ["Time", data.time],
+          ["Payment", data.paymentMethod],
+          ["Reference", referenceChip(data.reference)],
+        ])}
+        ${ctaButton("Confirm in Dashboard", data.dashboardUrl)}
+      `,
+    }),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Staff completion confirmed notification (internal — English only)
+// ---------------------------------------------------------------------------
+
+interface StaffCompletionConfirmedData {
+  staffName: string;
+  salonName: string;
+  salonLogoUrl?: string | null;
+  clientName: string;
+  serviceName: string;
+  date: string;
+  reference: string;
+}
+
+export function staffCompletionConfirmedEmail(data: StaffCompletionConfirmedData): { subject: string; html: string } {
+  const subject = `Appointment confirmed complete — ${data.reference}`;
+  return {
+    subject,
+    html: renderEmail({
+      salonLogoUrl: data.salonLogoUrl ?? undefined,
+      salonName: data.salonName,
+      subject,
+      body: `
+        ${heading("Appointment confirmed complete")}
+        ${paragraph(`Hi <strong style="color:${B.textDark};">${data.staffName}</strong>, the owner has confirmed the following appointment as completed. Your earnings have been recorded.`)}
+        ${detailTable([
+          ["Client", `<strong>${data.clientName}</strong>`],
+          ["Service", `<strong>${data.serviceName}</strong>`],
+          ["Date", data.date],
+          ["Reference", referenceChip(data.reference)],
+        ])}
+      `,
+    }),
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Owner booking notification (internal alert — always in English)
 // ---------------------------------------------------------------------------
 

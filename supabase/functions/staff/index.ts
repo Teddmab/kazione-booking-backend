@@ -3,7 +3,7 @@ import { corsHeaders, handleCors } from "../_shared/cors.ts";
 import { badRequest, forbidden, notFound, serverError } from "../_shared/errors.ts";
 import { requireOwnerOrManagerCtx, verifyAuth, verifyBusinessMember } from "../_shared/auth.ts";
 import { withLogging } from "../_shared/logger.ts";
-import { sendEmail, staffInviteEmail, staffServiceOfferAcceptedEmail } from "../_shared/resend.ts";
+import { sendEmail, staffInviteEmail, staffServiceOfferAcceptedEmail, staffServiceOfferEmail } from "../_shared/resend.ts";
 
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
@@ -458,6 +458,7 @@ Deno.serve(withLogging("staff", async (req: Request) => {
       }
 
       // For each offer: insert as pending (new) or re-open declined; leave accepted alone.
+      const newlyOfferedServiceIds: string[] = [];
       for (const offer of offers) {
         const currentStatus = currentMap.get(offer.service_id);
 
@@ -491,6 +492,7 @@ Deno.serve(withLogging("staff", async (req: Request) => {
         }
 
         // New or previously declined — insert/upsert as pending.
+        newlyOfferedServiceIds.push(offer.service_id);
         const { error: upsertErr } = await supabaseAdmin
           .from("staff_services")
           .upsert(
@@ -506,6 +508,42 @@ Deno.serve(withLogging("staff", async (req: Request) => {
             { onConflict: "staff_profile_id,service_id" },
           );
         if (upsertErr) return serverError(upsertErr.message);
+      }
+
+      // Email staff about newly offered services (fire & forget)
+      if (newlyOfferedServiceIds.length > 0) {
+        (async () => {
+          try {
+            const [profileRes, bizRes, svcRes] = await Promise.all([
+              supabaseAdmin.from("staff_profiles").select("display_name, business_member_id, business_id").eq("id", staffId).maybeSingle(),
+              supabaseAdmin.from("businesses").select("name, logo_url").eq("id", ctx.businessId).single(),
+              supabaseAdmin.from("services").select("id, name").in("id", newlyOfferedServiceIds),
+            ]);
+            const profile = profileRes.data as Record<string, unknown> | null;
+            const biz = bizRes.data as Record<string, unknown> | null;
+            const svcRows = (svcRes.data ?? []) as Record<string, unknown>[];
+            if (!profile) return;
+            const memberId = profile.business_member_id as string | null;
+            if (!memberId) return;
+            const { data: memberEmail } = await supabaseAdmin
+              .from("business_members")
+              .select("user:users(email)")
+              .eq("id", memberId)
+              .maybeSingle();
+            const userObj = (memberEmail as Record<string, unknown> | null)?.user as Record<string, unknown> | null;
+            const staffEmail = userObj?.email as string | null;
+            if (!staffEmail) return;
+            const appUrl = Deno.env.get("APP_URL") ?? "https://kazionebooking.com";
+            const { subject, html } = staffServiceOfferEmail({
+              staffName: (profile.display_name as string) ?? "Team member",
+              salonName: (biz?.name as string) ?? "KaziOne",
+              salonLogoUrl: biz?.logo_url as string | null ?? null,
+              serviceNames: svcRows.map((s) => s.name as string),
+              dashboardUrl: `${appUrl}/staff/services`,
+            });
+            await sendEmail(staffEmail, subject, html).catch((e) => console.warn("service offer email failed:", e));
+          } catch (e) { console.warn("service offer email error:", e); }
+        })();
       }
 
       return json({ success: true, offered_count: offeredIds.length });

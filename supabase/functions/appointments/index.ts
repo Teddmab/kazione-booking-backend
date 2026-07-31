@@ -421,7 +421,7 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
           internal_notes: body.internal_notes ?? null,
           status: body.staff_profile_id ? "confirmed" : "pending",
         })
-        .select(`*, client:clients!inner(id, first_name, last_name, email, phone, avatar_url), service:services!inner(id, name, duration_minutes, price), staff:staff_profiles(id, display_name, avatar_url)`)
+        .select(`*, client:clients!inner(id, first_name, last_name, email, phone, avatar_url), service:services!inner(id, name, duration_minutes, price, staff_commission_type, staff_commission_value), staff:staff_profiles!staff_profile_id(id, display_name, avatar_url)`)
         .single();
 
       if (error) return serverError(error.message);

@@ -12,6 +12,7 @@ import {
   staffAppointmentOfferEmail,
   ownerPendingCompletionEmail,
   staffCompletionConfirmedEmail,
+  reviewRequestEmail,
   sendEmail,
 } from "../_shared/resend.ts";
 import { generateIcs, icsToBase64, googleCalendarUrl } from "../_shared/ics.ts";
@@ -1163,6 +1164,65 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
             } catch (e) { console.warn("completion confirmed staff email error:", e); }
           })();
         }
+      }
+
+      // Generate review token and email client when appointment is completed
+      if (status === "completed") {
+        (async () => {
+          try {
+            const apptRow = data as Record<string, unknown>;
+            const client = apptRow.client as Record<string, string> | null;
+            const clientEmail = client?.email ?? null;
+            if (!clientEmail) return;
+
+            const { data: bizRow } = await supabaseAdmin.from("businesses").select("name, logo_url, slug").eq("id", existingRow.business_id).single();
+            const biz = bizRow as Record<string, unknown> | null;
+            const service = apptRow.service as Record<string, string> | null;
+
+            // Generate a 16-byte hex token
+            const tokenBytes = crypto.getRandomValues(new Uint8Array(16));
+            const reviewToken = Array.from(tokenBytes).map((b) => b.toString(16).padStart(2, "0")).join("");
+
+            // Upsert review row with token (creates the row; rating filled later by client)
+            const { data: existingReview } = await supabaseAdmin
+              .from("reviews")
+              .select("id")
+              .eq("appointment_id", id)
+              .maybeSingle();
+
+            if (existingReview) {
+              await supabaseAdmin
+                .from("reviews")
+                .update({ review_token: reviewToken })
+                .eq("id", (existingReview as Record<string, unknown>).id as string);
+            } else {
+              await supabaseAdmin.from("reviews").insert({
+                business_id: existingRow.business_id,
+                client_id: apptRow.client_id,
+                appointment_id: id,
+                rating: 5, // placeholder — overwritten when client submits
+                is_public: false,
+                review_token: reviewToken,
+              });
+            }
+
+            const appUrl = Deno.env.get("STOREFRONT_BASE_URL") ?? "https://kazione.app";
+            const reviewUrl = `${appUrl}/review?token=${reviewToken}`;
+            const { subject, html } = reviewRequestEmail({
+              clientName: client ? `${client.first_name} ${client.last_name}` : "there",
+              salonName: (biz?.name as string) ?? "KaziOne",
+              salonLogoUrl: biz?.logo_url as string | undefined,
+              serviceName: service?.name ?? "your appointment",
+              reviewUrl,
+            });
+
+            await sendEmail(clientEmail, subject, html).catch((e) =>
+              console.warn("review request email failed:", e),
+            );
+          } catch (e) {
+            console.warn("review token generation failed:", e);
+          }
+        })();
       }
 
       // Auto stock-out: when appointment completed, deduct product usage

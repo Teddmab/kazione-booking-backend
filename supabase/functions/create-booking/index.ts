@@ -5,7 +5,7 @@ import { verifyAuth } from "../_shared/auth.ts";
 import { createPaymentIntent } from "../_shared/stripe.ts";
 import { withLogging } from "../_shared/logger.ts";
 import { checkRateLimit } from "../_shared/rateLimit.ts";
-import { bookingConfirmationEmail, bookingReceivedOwnerEmail, sendEmail } from "../_shared/resend.ts";
+import { bookingConfirmationEmail, bookingReceivedOwnerEmail, staffAppointmentOfferEmail, sendEmail } from "../_shared/resend.ts";
 import { issueCancelToken } from "../_shared/bookingCancelToken.ts";
 import { sendSms } from "../_shared/messagebird.ts";
 import { sendWhatsApp } from "../_shared/meta-whatsapp.ts";
@@ -560,6 +560,38 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
       // Referral booking: record the referrer and mark as offered (staff must confirm)
       apptExtra.referrer_staff_id = referrerStaffId;
       apptExtra.status = "offered";
+      // Notify the referred staff member by email (fire & forget)
+      (async () => {
+        try {
+          const { data: spRow } = await supabaseAdmin
+            .from("staff_profiles")
+            .select("display_name, business_member_id")
+            .eq("id", referrerStaffId)
+            .maybeSingle();
+          if (!spRow) return;
+          const sp = spRow as Record<string, unknown>;
+          const { data: bmRow } = await supabaseAdmin
+            .from("business_members")
+            .select("user:users(email)")
+            .eq("id", sp.business_member_id as string)
+            .maybeSingle();
+          const staffEmail = ((bmRow as Record<string, unknown> | null)?.user as Record<string, unknown> | null)?.email as string | null;
+          if (!staffEmail) return;
+          const appUrl = Deno.env.get("APP_URL") ?? "https://kazionebooking.com";
+          const { subject, html } = staffAppointmentOfferEmail({
+            staffName: (sp.display_name as string) ?? "Team member",
+            salonName: business.name,
+            salonLogoUrl: business.logo_url ?? null,
+            clientName: first,
+            serviceName: service.name,
+            date,
+            time,
+            reference: bookingReference,
+            dashboardUrl: `${appUrl}/staff`,
+          });
+          await sendEmail(staffEmail, subject, html).catch((e) => console.warn("referral offer email failed:", e));
+        } catch (e) { console.warn("referral offer email error:", e); }
+      })();
     } else if (!staff_profile_id) {
       // Non-referral booking with no explicit staff preference: clear the slot-lock staff
       // so the appointment appears unassigned until the owner manually assigns a staff member.

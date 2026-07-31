@@ -9,6 +9,9 @@ import {
   bookingRescheduleEmail,
   staffBookingCancellationEmail,
   staffNewBookingEmail,
+  staffAppointmentOfferEmail,
+  ownerPendingCompletionEmail,
+  staffCompletionConfirmedEmail,
   sendEmail,
 } from "../_shared/resend.ts";
 import { generateIcs, icsToBase64, googleCalendarUrl } from "../_shared/ics.ts";
@@ -566,6 +569,32 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
         reason: "Staff offered appointment — awaiting confirmation",
       });
 
+      // Notify the offered staff member by email
+      (async () => {
+        try {
+          const apptRow = updated as Record<string, unknown>;
+          const client = apptRow.client as Record<string, string> | null;
+          const service = apptRow.service as Record<string, string> | null;
+          const staffEmail = await fetchStaffEmail(staffProfileId);
+          if (!staffEmail) return;
+          const { data: bizRow } = await supabaseAdmin.from("businesses").select("name, logo_url").eq("id", apptRow.business_id as string).single();
+          const biz = bizRow as Record<string, unknown> | null;
+          const startsAtDate = new Date(apptRow.starts_at as string);
+          const { subject, html } = staffAppointmentOfferEmail({
+            staffName: (apptRow.staff as Record<string, string> | null)?.display_name ?? "Team member",
+            salonName: (biz?.name as string) ?? "KaziOne",
+            salonLogoUrl: biz?.logo_url as string | null ?? null,
+            clientName: client ? `${client.first_name} ${client.last_name}` : "Client",
+            serviceName: service?.name ?? "Service",
+            date: startsAtDate.toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long", year: "numeric", timeZone: "UTC" }),
+            time: startsAtDate.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: "UTC" }),
+            reference: apptRow.booking_reference as string,
+            dashboardUrl: `${Deno.env.get("APP_URL") ?? "https://kazionebooking.com"}/staff`,
+          });
+          await sendEmail(staffEmail, subject, html).catch((e) => console.warn("assign-staff offer email failed:", e));
+        } catch (e) { console.warn("assign-staff offer email error:", e); }
+      })();
+
       return json(normalizePayment(updated as Record<string, unknown>));
     }
 
@@ -649,6 +678,41 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
         new_status: newStatus,
         reason: response === "accepted" ? "Staff accepted appointment" : "Staff declined — returned to unassigned",
       });
+
+      // Notify owner of staff's response
+      (async () => {
+        try {
+          const apptRow = updated as Record<string, unknown>;
+          const ownerEmail = await fetchOwnerEmail(ex.business_id);
+          if (!ownerEmail) return;
+          const { data: bizRow } = await supabaseAdmin.from("businesses").select("name, logo_url").eq("id", ex.business_id).single();
+          const biz = bizRow as Record<string, unknown> | null;
+          const client = apptRow.client as Record<string, string> | null;
+          const service = apptRow.service as Record<string, string> | null;
+          const staffDisplayName = (apptRow.staff as Record<string, string> | null)?.display_name ?? "Staff";
+          const startsAtDate = new Date(apptRow.starts_at as string);
+          const verb = response === "accepted" ? "accepted" : "declined";
+          const appUrl = Deno.env.get("APP_URL") ?? "https://kazionebooking.com";
+          await sendEmail(
+            ownerEmail,
+            `${staffDisplayName} ${verb} appointment — ${apptRow.booking_reference}`,
+            bookingReceivedOwnerEmail({
+              clientName: client ? `${client.first_name} ${client.last_name}` : "Client",
+              clientEmail: client?.email ?? null,
+              clientPhone: null,
+              salonName: (biz?.name as string) ?? "KaziOne",
+              salonLogoUrl: biz?.logo_url as string | null ?? null,
+              serviceName: service?.name ?? "Service",
+              staffName: `${staffDisplayName} (${verb})`,
+              date: startsAtDate.toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long", year: "numeric", timeZone: "UTC" }),
+              time: startsAtDate.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: "UTC" }),
+              reference: apptRow.booking_reference as string,
+              price: `€${Number(apptRow.price ?? 0).toFixed(2)}`,
+              manageUrl: `${appUrl}/owner/appointments`,
+            }).html,
+          ).catch((e) => console.warn("respond-offer owner email failed:", e));
+        } catch (e) { console.warn("respond-offer owner email error:", e); }
+      })();
 
       return json(normalizePayment(updated as Record<string, unknown>));
     }
@@ -838,6 +902,16 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
       const changedBy = (body.changed_by as string | undefined) ?? ctx.userId;
       const paymentMethod = body.payment_method as string | undefined;
 
+      // Staff-only: may only set pending_completion on their own confirmed/in_progress appointments.
+      // Owners may set any status including completing a pending_completion.
+      if (status === "pending_completion" && ctx.role !== "staff") {
+        return badRequest("Only staff may submit pending_completion");
+      }
+      const allowedFromStatuses: string[] = ["confirmed", "in_progress", "pending", "offered", "pending_completion"];
+      if (!allowedFromStatuses.includes(existingRow.status)) {
+        return badRequest(`Cannot transition from '${existingRow.status}' to '${status}'`);
+      }
+
       const updateFields: Record<string, unknown> = { status };
       if (status === "cancelled") {
         updateFields.cancellation_reason = reason ?? null;
@@ -970,18 +1044,78 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
         })();
       }
 
-      // Settle payment when appointment is marked completed
-      if (status === "completed") {
-        const method = paymentMethod ?? "cash";
-        const completedRow = existing as Record<string, unknown>;
-        const price = Number(completedRow.price ?? 0);
-        const businessIdForPayment = completedRow.business_id as string;
+      // When staff submits pending_completion: save payment method on payments table and email owner
+      if (status === "pending_completion") {
+        const submittedMethod = paymentMethod ?? "cash";
+        const pendingRow = existing as Record<string, unknown>;
+        const businessId = pendingRow.business_id as string;
+        const price = Number(pendingRow.price ?? 0);
 
         const { data: existingPayment } = await supabaseAdmin
           .from("payments")
           .select("id, status")
           .eq("appointment_id", id)
           .maybeSingle();
+
+        if (existingPayment) {
+          await supabaseAdmin
+            .from("payments")
+            .update({ method: submittedMethod })
+            .eq("id", (existingPayment as Record<string, unknown>).id as string);
+        } else if (price > 0) {
+          await supabaseAdmin.from("payments").insert({
+            business_id: businessId,
+            appointment_id: id,
+            amount: price,
+            status: "pending",
+            method: submittedMethod,
+          });
+        }
+
+        // Notify owner
+        (async () => {
+          try {
+            const apptRow = data as Record<string, unknown>;
+            const ownerEmail = await fetchOwnerEmail(businessId);
+            if (!ownerEmail) return;
+            const { data: bizRow } = await supabaseAdmin.from("businesses").select("name, logo_url").eq("id", businessId).single();
+            const biz = bizRow as Record<string, unknown> | null;
+            const client = apptRow.client as Record<string, string> | null;
+            const service = apptRow.service as Record<string, string> | null;
+            const staffDisplayName = (apptRow.staff as Record<string, string> | null)?.display_name ?? "Staff";
+            const startsAtDate = new Date(apptRow.starts_at as string);
+            const appUrl = Deno.env.get("APP_URL") ?? "https://kazionebooking.com";
+            const { subject, html } = ownerPendingCompletionEmail({
+              salonName: (biz?.name as string) ?? "KaziOne",
+              salonLogoUrl: biz?.logo_url as string | null ?? null,
+              staffName: staffDisplayName,
+              clientName: client ? `${client.first_name} ${client.last_name}` : "Client",
+              serviceName: service?.name ?? "Service",
+              date: startsAtDate.toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long", year: "numeric", timeZone: "UTC" }),
+              time: startsAtDate.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: "UTC" }),
+              reference: apptRow.booking_reference as string,
+              paymentMethod: submittedMethod,
+              dashboardUrl: `${appUrl}/owner/appointments`,
+            });
+            await sendEmail(ownerEmail, subject, html).catch((e) => console.warn("pending_completion owner email failed:", e));
+          } catch (e) { console.warn("pending_completion owner email error:", e); }
+        })();
+      }
+
+      // Settle payment when appointment is marked completed
+      if (status === "completed") {
+        const completedRow = existing as Record<string, unknown>;
+        const businessIdForPayment = completedRow.business_id as string;
+        const price = Number(completedRow.price ?? 0);
+
+        const { data: existingPayment } = await supabaseAdmin
+          .from("payments")
+          .select("id, status, method")
+          .eq("appointment_id", id)
+          .maybeSingle();
+
+        // Use body.payment_method if provided; otherwise fall back to what staff already saved
+        const method = paymentMethod ?? (existingPayment as Record<string, unknown> | null)?.method as string ?? "cash";
 
         if (existingPayment) {
           const pay = existingPayment as Record<string, unknown>;
@@ -1000,6 +1134,34 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
             method,
             paid_at: new Date().toISOString(),
           });
+        }
+
+        // Notify staff when owner confirms completion
+        const staffProfileIdForComplete = existingRow.staff_profile_id as string | null;
+        if (staffProfileIdForComplete) {
+          (async () => {
+            try {
+              const staffEmail = await fetchStaffEmail(staffProfileIdForComplete);
+              if (!staffEmail) return;
+              const apptRow = data as Record<string, unknown>;
+              const { data: bizRow } = await supabaseAdmin.from("businesses").select("name, logo_url").eq("id", existingRow.business_id).single();
+              const biz = bizRow as Record<string, unknown> | null;
+              const client = apptRow.client as Record<string, string> | null;
+              const service = apptRow.service as Record<string, string> | null;
+              const staffDisplayName = (apptRow.staff as Record<string, string> | null)?.display_name ?? "Team member";
+              const startsAtDate = new Date(apptRow.starts_at as string);
+              const { subject, html } = staffCompletionConfirmedEmail({
+                staffName: staffDisplayName,
+                salonName: (biz?.name as string) ?? "KaziOne",
+                salonLogoUrl: biz?.logo_url as string | null ?? null,
+                clientName: client ? `${client.first_name} ${client.last_name}` : "Client",
+                serviceName: service?.name ?? "Service",
+                date: startsAtDate.toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long", year: "numeric", timeZone: "UTC" }),
+                reference: apptRow.booking_reference as string,
+              });
+              await sendEmail(staffEmail, subject, html).catch((e) => console.warn("completion confirmed staff email failed:", e));
+            } catch (e) { console.warn("completion confirmed staff email error:", e); }
+          })();
         }
       }
 

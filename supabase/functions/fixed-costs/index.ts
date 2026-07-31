@@ -180,6 +180,8 @@ Deno.serve(withLogging("fixed-costs", async (req: Request) => {
       if (body.currency_code !== undefined) updatePayload.currency_code = body.currency_code;
       if (body.is_tax_deductible !== undefined) updatePayload.is_tax_deductible = Boolean(body.is_tax_deductible);
       if (body.notes !== undefined) updatePayload.notes = body.notes ? String(body.notes).trim() : null;
+      if (body.paid_at !== undefined) updatePayload.paid_at = body.paid_at ? String(body.paid_at) : null;
+      if (body.payment_method !== undefined) updatePayload.payment_method = body.payment_method ? String(body.payment_method).trim() : null;
 
       const { data, error } = await supabaseAdmin
         .from("fixed_costs")

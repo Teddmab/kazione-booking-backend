@@ -27,7 +27,7 @@ function json(data: unknown, status = 200): Response {
 const APPT_SELECT = `
   *,
   client:clients!inner(id, first_name, last_name, email, phone, avatar_url),
-  service:services!inner(id, name, duration_minutes, price, staff_commission_type, staff_commission_value),
+  service:services!inner(id, name, duration_minutes, price, staff_commission_type, staff_commission_value, service_product_usage(quantity_per_service, product:product_catalog(unit_cost))),
   staff:staff_profiles!staff_profile_id(id, display_name, avatar_url, commission_rate),
   referrer_staff:staff_profiles!referrer_staff_id(id, display_name, avatar_url),
   payment:payments(status, amount, method, paid_at)
@@ -421,7 +421,7 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
           internal_notes: body.internal_notes ?? null,
           status: body.staff_profile_id ? "confirmed" : "pending",
         })
-        .select(`*, client:clients!inner(id, first_name, last_name, email, phone, avatar_url), service:services!inner(id, name, duration_minutes, price, staff_commission_type, staff_commission_value), staff:staff_profiles!staff_profile_id(id, display_name, avatar_url)`)
+        .select(`*, client:clients!inner(id, first_name, last_name, email, phone, avatar_url), service:services!inner(id, name, duration_minutes, price, staff_commission_type, staff_commission_value, service_product_usage(quantity_per_service, product:product_catalog(unit_cost))), staff:staff_profiles!staff_profile_id(id, display_name, avatar_url)`)
         .single();
 
       if (error) return serverError(error.message);

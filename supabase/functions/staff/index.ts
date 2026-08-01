@@ -1363,7 +1363,66 @@ Deno.serve(withLogging("staff", async (req: Request) => {
       return json({ success: true });
     }
 
-    // ── DELETE /staff?id= (soft deactivate — NEVER hard delete) ───────────────
+    // ── DELETE /staff?action=force-delete&id= ────────────────────────────────
+    // Permanently removes an already-inactive staff member. Blocked if they have
+    // any future confirmed/pending/offered appointments still on record.
+    if (method === "DELETE" && action === "force-delete") {
+      if (!staffId) return badRequest("id query param is required");
+
+      const { data: existing, error: existingErr } = await supabaseAdmin
+        .from("staff_profiles")
+        .select("id, business_id, business_member_id, is_active, display_name")
+        .eq("id", staffId)
+        .maybeSingle();
+
+      if (existingErr) return serverError(existingErr.message);
+      if (!existing) return notFound("Staff member not found");
+
+      const sp = existing as Record<string, unknown>;
+      if (sp.is_active) {
+        return badRequest("Staff member must be deactivated before permanent deletion. Use the deactivate action first.");
+      }
+
+      const ctx = await requireOwnerOrManagerCtx(req, sp.business_id as string);
+      if (ctx instanceof Response) return ctx;
+
+      // Block deletion if any future appointments still reference this staff member
+      const now = new Date().toISOString();
+      const { count, error: apptErr } = await supabaseAdmin
+        .from("appointments")
+        .select("id", { count: "exact", head: true })
+        .eq("staff_profile_id", staffId)
+        .in("status", ["confirmed", "pending", "offered"])
+        .gte("starts_at", now)
+        .is("deleted_at", null);
+
+      if (apptErr) return serverError(apptErr.message);
+      if ((count ?? 0) > 0) {
+        return json(
+          { error: { code: "HAS_FUTURE_APPOINTMENTS", message: `Cannot delete: ${count} future appointment(s) still assigned to this staff member. Reassign them first.` } },
+          409,
+        );
+      }
+
+      const { error: deleteProfileErr } = await supabaseAdmin
+        .from("staff_profiles")
+        .delete()
+        .eq("id", staffId)
+        .eq("business_id", ctx.businessId);
+      if (deleteProfileErr) return serverError(deleteProfileErr.message);
+
+      const memberId = sp.business_member_id as string | null;
+      if (memberId) {
+        await supabaseAdmin
+          .from("business_members")
+          .delete()
+          .eq("id", memberId);
+      }
+
+      return json({ success: true });
+    }
+
+    // ── DELETE /staff?id= (soft deactivate) ──────────────────────────────────
     if (method === "DELETE" && !action) {
       if (!staffId) return badRequest("id query param is required");
 

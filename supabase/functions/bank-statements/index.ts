@@ -308,6 +308,65 @@ Deno.serve(withLogging("bank-statements", async (req: Request) => {
       return json({ batch_id: batch.id, row_count: rows.length, auto_reconciled_count: autoReconciledCount }, 201);
     }
 
+    // ── POST ?action=auto-create-expenses ─────────────────────────────────────
+    // For each unmatched debit in a batch, create an expense record and link it.
+    if (method === "POST" && action === "auto-create-expenses") {
+      let body: Record<string, unknown> = {};
+      try { body = await req.json(); } catch { return badRequest("Invalid JSON body"); }
+
+      const ctx = await requireOwnerOrManagerCtx(req, body.business_id as string);
+      if (ctx instanceof Response) return ctx;
+
+      const batchId = body.batch_id as string | undefined;
+      if (!batchId) return badRequest("batch_id is required");
+
+      // Fetch unmatched debits belonging to this batch
+      const { data: txs, error: txErr } = await supabaseAdmin
+        .from("bank_transactions")
+        .select("id, date, description, amount, currency_code")
+        .eq("import_batch_id", batchId)
+        .eq("business_id", ctx.businessId)
+        .lt("amount", 0)
+        .is("reconciled_payment_id", null)
+        .is("reconciled_expense_id", null)
+        .is("reconciled_fixed_cost_id", null)
+        .is("reconciled_debt_payment_id", null);
+
+      if (txErr) return serverError(txErr.message);
+
+      let createdCount = 0;
+      for (const rawTx of txs ?? []) {
+        const tx = rawTx as Record<string, unknown>;
+        const { data: expense, error: expErr } = await supabaseAdmin
+          .from("expenses")
+          .insert({
+            business_id: ctx.businessId,
+            category: "other",
+            description: String(tx.description ?? "").slice(0, 255),
+            amount: Math.abs(Number(tx.amount)),
+            currency_code: String(tx.currency_code ?? "EUR"),
+            tax_amount: 0,
+            tax_rate: 0,
+            date: String(tx.date).slice(0, 10),
+            is_recurring: false,
+            notes: "Auto-created from bank statement import",
+          })
+          .select("id")
+          .single();
+
+        if (expErr || !expense) continue;
+
+        await supabaseAdmin
+          .from("bank_transactions")
+          .update({ reconciled_expense_id: (expense as Record<string, unknown>).id })
+          .eq("id", String(tx.id));
+
+        createdCount++;
+      }
+
+      return json({ created_count: createdCount });
+    }
+
     // ── PATCH ?action=transaction&id= ─────────────────────────────────────────
     if (method === "PATCH" && action === "transaction") {
       if (!id) return badRequest("id is required");

@@ -129,7 +129,7 @@ Deno.serve(withLogging("finance", async (req: Request) => {
         const to = url.searchParams.get("to");
         if (!from || !to) return badRequest("from and to are required");
 
-        const [paymentsResult, expensesResult] = await Promise.all([
+        const [paymentsResult, expensesResult, fixedCostsResult, debtPaymentsResult] = await Promise.all([
           supabaseAdmin
             .from("payments")
             .select(`id, amount, tax_amount, paid_at, method, appointment:appointments!inner(booking_reference, service:services!inner(name))`)
@@ -143,10 +143,24 @@ Deno.serve(withLogging("finance", async (req: Request) => {
             .eq("business_id", businessId)
             .gte("date", from)
             .lte("date", to),
+          supabaseAdmin
+            .from("fixed_costs")
+            .select("id, amount, cost_date, name, category")
+            .eq("business_id", businessId)
+            .gte("cost_date", from)
+            .lte("cost_date", to),
+          supabaseAdmin
+            .from("debt_payments")
+            .select("id, amount, payment_date, notes, debt:business_debts(creditor_name)")
+            .eq("business_id", businessId)
+            .gte("payment_date", from)
+            .lte("payment_date", to),
         ]);
 
-        if (paymentsResult.error) return serverError(paymentsResult.error.message);
-        if (expensesResult.error) return serverError(expensesResult.error.message);
+        if (paymentsResult.error)     return serverError(paymentsResult.error.message);
+        if (expensesResult.error)     return serverError(expensesResult.error.message);
+        if (fixedCostsResult.error)   return serverError(fixedCostsResult.error.message);
+        if (debtPaymentsResult.error) return serverError(debtPaymentsResult.error.message);
 
         const incomeRows = (paymentsResult.data ?? []).map((p: Record<string, unknown>) => {
           const appt = p.appointment as Record<string, unknown> | null;
@@ -170,7 +184,28 @@ Deno.serve(withLogging("finance", async (req: Request) => {
           tax_amount: Number(e.tax_amount ?? 0),
         }));
 
-        const merged = [...incomeRows, ...expenseRows].sort(
+        const fixedCostRows = (fixedCostsResult.data ?? []).map((fc: Record<string, unknown>) => ({
+          date: fc.cost_date,
+          type: "expense" as const,
+          description: fc.name ?? "Fixed cost",
+          category: fc.category ?? "fixed_cost",
+          amount: Number(fc.amount),
+          tax_amount: 0,
+        }));
+
+        const debtPaymentRows = (debtPaymentsResult.data ?? []).map((dp: Record<string, unknown>) => {
+          const debt = dp.debt as Record<string, unknown> | null;
+          return {
+            date: dp.payment_date,
+            type: "expense" as const,
+            description: `Debt repayment – ${debt?.creditor_name ?? "Creditor"}`,
+            category: "debt_payment",
+            amount: Number(dp.amount),
+            tax_amount: 0,
+          };
+        });
+
+        const merged = [...incomeRows, ...expenseRows, ...fixedCostRows, ...debtPaymentRows].sort(
           (a, b) => new Date(a.date as string).getTime() - new Date(b.date as string).getTime(),
         );
 

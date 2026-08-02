@@ -1,6 +1,6 @@
 import { supabaseAdmin } from "../_shared/supabaseAdmin.ts";
 import { corsHeaders, handleCors } from "../_shared/cors.ts";
-import { badRequest, notFound, serverError } from "../_shared/errors.ts";
+import { badRequest, conflict, notFound, serverError } from "../_shared/errors.ts";
 import { withLogging } from "../_shared/logger.ts";
 import { requireOwnerOrManagerCtx } from "../_shared/auth.ts";
 
@@ -409,14 +409,15 @@ Deno.serve(withLogging("bank-statements", async (req: Request) => {
 
       const { data: existing, error: existErr } = await supabaseAdmin
         .from("bank_transactions")
-        .select("business_id")
+        .select("business_id, reconciled_payment_id, reconciled_expense_id, reconciled_fixed_cost_id, reconciled_debt_payment_id, reconciled_appointment_id")
         .eq("id", id)
         .maybeSingle();
 
       if (existErr) return serverError(existErr.message);
       if (!existing) return notFound("Transaction not found");
 
-      const ctx = await requireOwnerOrManagerCtx(req, (existing as Record<string, unknown>).business_id as string);
+      const ex = existing as Record<string, unknown>;
+      const ctx = await requireOwnerOrManagerCtx(req, ex.business_id as string);
       if (ctx instanceof Response) return ctx;
 
       const body = await req.json() as Record<string, unknown>;
@@ -431,6 +432,27 @@ Deno.serve(withLogging("bank-statements", async (req: Request) => {
       if (body.reconciled_appointment_id   !== undefined) update.reconciled_appointment_id   = body.reconciled_appointment_id   ?? null;
 
       if (Object.keys(update).length === 0) return badRequest("No valid fields to update");
+
+      // Guard: reject if trying to set a reconcile link on an already-reconciled transaction.
+      // Setting any reconcile field to null (unlink) is always allowed.
+      const settingReconcileLink =
+        (update.reconciled_payment_id      != null) ||
+        (update.reconciled_expense_id      != null) ||
+        (update.reconciled_fixed_cost_id   != null) ||
+        (update.reconciled_debt_payment_id != null) ||
+        (update.reconciled_appointment_id  != null);
+
+      if (settingReconcileLink) {
+        const alreadyReconciled =
+          ex.reconciled_payment_id      != null ||
+          ex.reconciled_expense_id      != null ||
+          ex.reconciled_fixed_cost_id   != null ||
+          ex.reconciled_debt_payment_id != null ||
+          ex.reconciled_appointment_id  != null;
+        if (alreadyReconciled) {
+          return conflict("Transaction is already reconciled — unlink it before linking to a different record");
+        }
+      }
 
       const { data: updated, error } = await supabaseAdmin
         .from("bank_transactions")

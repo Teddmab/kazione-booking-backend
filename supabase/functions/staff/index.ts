@@ -515,7 +515,7 @@ Deno.serve(withLogging("staff", async (req: Request) => {
         (async () => {
           try {
             const [profileRes, bizRes, svcRes] = await Promise.all([
-              supabaseAdmin.from("staff_profiles").select("display_name, business_member_id, business_id").eq("id", staffId).maybeSingle(),
+              supabaseAdmin.from("staff_profiles").select("display_name, business_member_id, invited_email, business_id").eq("id", staffId).maybeSingle(),
               supabaseAdmin.from("businesses").select("name, logo_url").eq("id", ctx.businessId).single(),
               supabaseAdmin.from("services").select("id, name").in("id", newlyOfferedServiceIds),
             ]);
@@ -524,14 +524,19 @@ Deno.serve(withLogging("staff", async (req: Request) => {
             const svcRows = (svcRes.data ?? []) as Record<string, unknown>[];
             if (!profile) return;
             const memberId = profile.business_member_id as string | null;
-            if (!memberId) return;
-            const { data: memberEmail } = await supabaseAdmin
-              .from("business_members")
-              .select("user:users(email)")
-              .eq("id", memberId)
-              .maybeSingle();
-            const userObj = (memberEmail as Record<string, unknown> | null)?.user as Record<string, unknown> | null;
-            const staffEmail = userObj?.email as string | null;
+            let staffEmail: string | null = null;
+            if (memberId) {
+              const { data: memberEmail } = await supabaseAdmin
+                .from("business_members")
+                .select("user:users(email)")
+                .eq("id", memberId)
+                .maybeSingle();
+              const userObj = (memberEmail as Record<string, unknown> | null)?.user as Record<string, unknown> | null;
+              staffEmail = userObj?.email as string | null;
+            } else {
+              // Staff hasn't accepted the invite yet — send notification to the invited email address
+              staffEmail = profile.invited_email as string | null;
+            }
             if (!staffEmail) return;
             const appUrl = Deno.env.get("APP_URL") ?? "https://kazionebooking.com";
             const { subject, html } = staffServiceOfferEmail({

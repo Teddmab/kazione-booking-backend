@@ -88,6 +88,13 @@ Deno.serve(withLogging("accept-staff-invite", async (req: Request) => {
         .single();
       if (memberErr) throw memberErr;
       memberRole = (updatedMember as Record<string, unknown>).role as string ?? "staff";
+
+      // Activate the existing staff profile (business_member_id was already set at invite time)
+      const { error: activateErr } = await supabaseAdmin
+        .from("staff_profiles")
+        .update({ is_active: true })
+        .eq("id", body.staff_profile_id);
+      if (activateErr) throw activateErr;
     } else {
       // User didn't exist at invite time — create the member row now
       const { data: newMember, error: memberErr } = await supabaseAdmin
@@ -106,19 +113,13 @@ Deno.serve(withLogging("accept-staff-invite", async (req: Request) => {
       memberId = (newMember as Record<string, unknown>).id as string;
       memberRole = (newMember as Record<string, unknown>).role as string ?? "staff";
 
-      // Link the staff profile to the new member row
-      await supabaseAdmin
+      // Link the staff profile and activate in one atomic call (no error handling existed before)
+      const { error: linkErr } = await supabaseAdmin
         .from("staff_profiles")
-        .update({ business_member_id: memberId })
+        .update({ business_member_id: memberId, is_active: true })
         .eq("id", body.staff_profile_id);
+      if (linkErr) throw linkErr;
     }
-
-    // Activate the staff profile
-    const { error: activateErr } = await supabaseAdmin
-      .from("staff_profiles")
-      .update({ is_active: true })
-      .eq("id", body.staff_profile_id);
-    if (activateErr) throw activateErr;
 
     return jsonCors(req, { success: true, business_id: businessId, role: memberRole });
   } catch (err) {

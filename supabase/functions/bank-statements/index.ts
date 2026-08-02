@@ -41,10 +41,11 @@ function dayOffset(dateStr: string, days: number): string {
  *       [&page=1&limit=50]                        → paginated transaction list
  * POST ?action=import
  *       body: { business_id, filename?, rows: [{date,description,amount,currency?,reference?}] }
- *       → { batch_id, row_count, auto_reconciled_count }
+ *       → { batch_id, row_count, auto_reconciled_count, skipped_count }
  * PATCH ?action=transaction&id=
  *       body: { category?, notes?, reconciled_payment_id?, reconciled_expense_id?,
- *               reconciled_fixed_cost_id?, reconciled_debt_payment_id? }
+ *               reconciled_fixed_cost_id?, reconciled_debt_payment_id?,
+ *               reconciled_appointment_id? }
  * DELETE ?id=                                     → delete single transaction
  * DELETE ?action=delete-batch&id=                 → delete entire batch + its transactions
  */
@@ -121,14 +122,16 @@ Deno.serve(withLogging("bank-statements", async (req: Request) => {
           "reconciled_payment_id.not.is.null," +
           "reconciled_expense_id.not.is.null," +
           "reconciled_fixed_cost_id.not.is.null," +
-          "reconciled_debt_payment_id.not.is.null"
+          "reconciled_debt_payment_id.not.is.null," +
+          "reconciled_appointment_id.not.is.null"
         );
       } else if (status === "unreconciled") {
         q = q
           .is("reconciled_payment_id", null)
           .is("reconciled_expense_id", null)
           .is("reconciled_fixed_cost_id", null)
-          .is("reconciled_debt_payment_id", null);
+          .is("reconciled_debt_payment_id", null)
+          .is("reconciled_appointment_id", null);
       }
 
       const { data, error, count } = await q;
@@ -140,7 +143,8 @@ Deno.serve(withLogging("bank-statements", async (req: Request) => {
           t.reconciled_payment_id      !== null ||
           t.reconciled_expense_id      !== null ||
           t.reconciled_fixed_cost_id   !== null ||
-          t.reconciled_debt_payment_id !== null
+          t.reconciled_debt_payment_id !== null ||
+          t.reconciled_appointment_id  !== null
         ),
       }));
 
@@ -158,7 +162,7 @@ Deno.serve(withLogging("bank-statements", async (req: Request) => {
         return badRequest("rows must be a non-empty array");
       }
 
-      // Create batch record first
+      // Create batch record first (row_count updated after dedup)
       const { data: batch, error: batchErr } = await supabaseAdmin
         .from("bank_import_batches")
         .insert({
@@ -170,6 +174,38 @@ Deno.serve(withLogging("bank-statements", async (req: Request) => {
         .single();
 
       if (batchErr) return serverError(batchErr.message);
+
+      // Dedup: check existing transactions for same business/date/amount/description
+      const importDates = [...new Set(rows.map((r) => String(r.date ?? "")))];
+      const { data: existingTxs } = await supabaseAdmin
+        .from("bank_transactions")
+        .select("date, amount, description")
+        .eq("business_id", ctx.businessId)
+        .in("date", importDates);
+
+      const existingKeys = new Set(
+        (existingTxs ?? []).map((t: Record<string, unknown>) =>
+          `${t.date}|${Number(t.amount).toFixed(2)}|${String(t.description ?? "").trim()}`
+        )
+      );
+
+      // Filter out duplicate rows before processing
+      const uniqueRows: Array<Record<string, unknown>> = [];
+      let skippedCount = 0;
+      for (const row of rows) {
+        const key = `${row.date}|${Number(row.amount ?? 0).toFixed(2)}|${String(row.description ?? "").trim()}`;
+        if (existingKeys.has(key)) {
+          skippedCount++;
+        } else {
+          uniqueRows.push(row);
+          existingKeys.add(key); // prevent intra-batch dupes too
+        }
+      }
+
+      if (uniqueRows.length === 0) {
+        await supabaseAdmin.from("bank_import_batches").delete().eq("id", batch.id);
+        return json({ batch_id: null, row_count: 0, auto_reconciled_count: 0, skipped_count: skippedCount }, 200);
+      }
 
       // Gather already-reconciled IDs from existing bank_transactions
       const [pIds, eIds, fcIds, dpIds] = await Promise.all([
@@ -184,11 +220,11 @@ Deno.serve(withLogging("bank-statements", async (req: Request) => {
       const usedFcIds       = new Set((fcIds.data ?? []).map((r) => r.reconciled_fixed_cost_id as string));
       const usedDpIds       = new Set((dpIds.data ?? []).map((r) => r.reconciled_debt_payment_id as string));
 
-      // Process rows and auto-reconcile
+      // Process unique rows and auto-reconcile
       const insertRows: Record<string, unknown>[] = [];
       let autoReconciledCount = 0;
 
-      for (const row of rows) {
+      for (const row of uniqueRows) {
         const amount   = Number(row.amount ?? 0);
         const dateStr  = String(row.date ?? "");
         const dayBefore = dayOffset(dateStr, -1);
@@ -299,13 +335,13 @@ Deno.serve(withLogging("bank-statements", async (req: Request) => {
         return serverError(insertErr.message);
       }
 
-      // Update batch with final auto-reconciled count
+      // Update batch with final counts
       await supabaseAdmin
         .from("bank_import_batches")
-        .update({ auto_reconciled_count: autoReconciledCount })
+        .update({ row_count: uniqueRows.length, auto_reconciled_count: autoReconciledCount })
         .eq("id", batch.id);
 
-      return json({ batch_id: batch.id, row_count: rows.length, auto_reconciled_count: autoReconciledCount }, 201);
+      return json({ batch_id: batch.id, row_count: uniqueRows.length, auto_reconciled_count: autoReconciledCount, skipped_count: skippedCount }, 201);
     }
 
     // ── POST ?action=auto-create-expenses ─────────────────────────────────────
@@ -388,10 +424,11 @@ Deno.serve(withLogging("bank-statements", async (req: Request) => {
 
       if (body.category  !== undefined) update.category  = body.category  ?? null;
       if (body.notes     !== undefined) update.notes     = body.notes     ?? null;
-      if (body.reconciled_payment_id      !== undefined) update.reconciled_payment_id      = body.reconciled_payment_id      ?? null;
-      if (body.reconciled_expense_id      !== undefined) update.reconciled_expense_id      = body.reconciled_expense_id      ?? null;
-      if (body.reconciled_fixed_cost_id   !== undefined) update.reconciled_fixed_cost_id   = body.reconciled_fixed_cost_id   ?? null;
-      if (body.reconciled_debt_payment_id !== undefined) update.reconciled_debt_payment_id = body.reconciled_debt_payment_id ?? null;
+      if (body.reconciled_payment_id       !== undefined) update.reconciled_payment_id       = body.reconciled_payment_id       ?? null;
+      if (body.reconciled_expense_id       !== undefined) update.reconciled_expense_id       = body.reconciled_expense_id       ?? null;
+      if (body.reconciled_fixed_cost_id    !== undefined) update.reconciled_fixed_cost_id    = body.reconciled_fixed_cost_id    ?? null;
+      if (body.reconciled_debt_payment_id  !== undefined) update.reconciled_debt_payment_id  = body.reconciled_debt_payment_id  ?? null;
+      if (body.reconciled_appointment_id   !== undefined) update.reconciled_appointment_id   = body.reconciled_appointment_id   ?? null;
 
       if (Object.keys(update).length === 0) return badRequest("No valid fields to update");
 
@@ -411,7 +448,8 @@ Deno.serve(withLogging("bank-statements", async (req: Request) => {
           t.reconciled_payment_id      !== null ||
           t.reconciled_expense_id      !== null ||
           t.reconciled_fixed_cost_id   !== null ||
-          t.reconciled_debt_payment_id !== null
+          t.reconciled_debt_payment_id !== null ||
+          t.reconciled_appointment_id  !== null
         ),
       });
     }

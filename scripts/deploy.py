@@ -59,20 +59,18 @@ def _access_token() -> str:
 
 
 def delete_function(slug: str) -> bool:
-    """Delete the function from the Management API so a fresh deploy can proceed."""
-    token = _access_token()
-    if not token:
-        print(f"  [warn] no access token — cannot delete {slug} for retry", flush=True)
-        return False
-    url = f"https://api.supabase.com/v1/projects/{PROJECT_REF}/functions/{slug}"
-    req = urllib.request.Request(url, method="DELETE",
-                                  headers={"Authorization": f"Bearer {token}"})
+    """Delete the function via Supabase CLI (uses its own auth, avoids token expiry)."""
     try:
-        with urllib.request.urlopen(req) as r:
-            ok = r.status == 200
-            if ok:
-                print(f"  [retry] deleted {slug} from production", flush=True)
-            return ok
+        result = subprocess.run(
+            ["npx", "supabase", "functions", "delete", slug, "--project-ref", PROJECT_REF],
+            cwd=PROJECT_DIR, capture_output=True, text=True, timeout=30,
+        )
+        ok = result.returncode == 0
+        if ok:
+            print(f"  [retry] deleted {slug} from production", flush=True)
+        else:
+            print(f"  [warn] delete failed: {result.stderr.strip() or result.stdout.strip()}", flush=True)
+        return ok
     except Exception as e:
         print(f"  [warn] delete failed: {e}", flush=True)
         return False

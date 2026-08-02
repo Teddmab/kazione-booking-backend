@@ -902,6 +902,8 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
       const reason = body.reason as string | undefined;
       const changedBy = (body.changed_by as string | undefined) ?? ctx.userId;
       const paymentMethod = body.payment_method as string | undefined;
+      // If provided (even as empty array), use explicit product overrides instead of auto-deducting all
+      const productOverrides = (body.product_overrides ?? null) as Array<{ product_id: string; quantity: number }> | null;
 
       // Staff-only: may only set pending_completion on their own confirmed/in_progress appointments.
       // Owners may set any status including completing a pending_completion.
@@ -1231,43 +1233,53 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
         const serviceId = existingRow.service_id as string | null;
         const businessId = existingRow.business_id as string;
 
-        if (serviceId) {
+        // Build the list of items to deduct:
+        // - If product_overrides is explicitly provided (even empty), use those
+        // - Otherwise fall back to all service_product_usage rows
+        const deductItems: { product_id: string; quantity: number }[] = [];
+
+        if (productOverrides !== null) {
+          for (const o of productOverrides) {
+            if (o.product_id && o.quantity > 0) deductItems.push(o);
+          }
+        } else if (serviceId) {
           const { data: usageRows } = await supabaseAdmin
             .from("service_product_usage")
             .select("product_id, quantity_per_service")
             .eq("service_id", serviceId);
+          for (const u of (usageRows ?? []) as Record<string, unknown>[]) {
+            deductItems.push({ product_id: u.product_id as string, quantity: Number(u.quantity_per_service) });
+          }
+        }
 
-          if (usageRows && usageRows.length > 0) {
-            const movements = usageRows.map((u: Record<string, unknown>) => ({
-              business_id: businessId,
-              product_id: u.product_id as string,
-              movement_type: "service_use",
-              quantity: -(Number(u.quantity_per_service)),
-              reference_id: id,
-              reference_type: "appointment",
-              created_by: changedBy ?? null,
-            }));
+        if (deductItems.length > 0) {
+          const movements = deductItems.map((u) => ({
+            business_id: businessId,
+            product_id: u.product_id,
+            movement_type: "service_use",
+            quantity: -u.quantity,
+            reference_id: id,
+            reference_type: "appointment",
+            created_by: changedBy ?? null,
+          }));
 
-            const { error: mvErr } = await supabaseAdmin.from("stock_movements").insert(movements);
-            if (mvErr) console.error("stock_movements insert error:", mvErr.message);
+          const { error: mvErr } = await supabaseAdmin.from("stock_movements").insert(movements);
+          if (mvErr) console.error("stock_movements insert error:", mvErr.message);
 
-            // Decrement current_stock for each product
-            for (const u of usageRows as Record<string, unknown>[]) {
-              const qty = Number(u.quantity_per_service);
-              const { data: prod } = await supabaseAdmin
+          for (const u of deductItems) {
+            const { data: prod } = await supabaseAdmin
+              .from("product_catalog")
+              .select("current_stock")
+              .eq("id", u.product_id)
+              .single();
+            if (prod) {
+              await supabaseAdmin
                 .from("product_catalog")
-                .select("current_stock")
-                .eq("id", u.product_id as string)
-                .single();
-              if (prod) {
-                await supabaseAdmin
-                  .from("product_catalog")
-                  .update({
-                    current_stock: (prod as Record<string, unknown>).current_stock as number - qty,
-                    updated_at: new Date().toISOString(),
-                  })
-                  .eq("id", u.product_id as string);
-              }
+                .update({
+                  current_stock: (prod as Record<string, unknown>).current_stock as number - u.quantity,
+                  updated_at: new Date().toISOString(),
+                })
+                .eq("id", u.product_id);
             }
           }
         }

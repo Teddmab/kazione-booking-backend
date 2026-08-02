@@ -182,6 +182,7 @@ Deno.serve(withLogging("fixed-costs", async (req: Request) => {
       if (body.notes !== undefined) updatePayload.notes = body.notes ? String(body.notes).trim() : null;
       if (body.paid_at !== undefined) updatePayload.paid_at = body.paid_at ? String(body.paid_at) : null;
       if (body.payment_method !== undefined) updatePayload.payment_method = body.payment_method ? String(body.payment_method).trim() : null;
+      if (body.payment_proof_url !== undefined) updatePayload.payment_proof_url = body.payment_proof_url ? String(body.payment_proof_url) : null;
 
       const { data, error } = await supabaseAdmin
         .from("fixed_costs")

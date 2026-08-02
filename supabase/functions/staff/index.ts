@@ -1574,6 +1574,59 @@ Deno.serve(withLogging("staff", async (req: Request) => {
       });
     }
 
+    // ── GET /staff?action=magic-link&staff_profile_id=xxx — owner generates a one-time login link ─
+    if (method === "GET" && action === "magic-link") {
+      const staffProfileId = url.searchParams.get("staff_profile_id");
+      const bodyBizId = url.searchParams.get("business_id") ?? "";
+      if (!staffProfileId) return badRequest("staff_profile_id is required");
+
+      const ctx = await requireOwnerOrManagerCtx(req, bodyBizId);
+      if (ctx instanceof Response) return ctx;
+
+      // Fetch the staff profile and verify it belongs to this business
+      const { data: profile, error: profErr } = await supabaseAdmin
+        .from("staff_profiles")
+        .select("display_name, business_member_id, invited_email, business_id, is_active")
+        .eq("id", staffProfileId)
+        .maybeSingle();
+
+      if (profErr) return serverError(profErr.message);
+      if (!profile) return notFound("Staff profile not found");
+      if ((profile.business_id as string) !== ctx.businessId) return forbidden("Staff not in this business");
+      if (!profile.is_active) return badRequest("Staff member is not yet active — invite must be accepted first");
+
+      // Resolve the staff member's email
+      let staffEmail: string | null = null;
+      if (profile.business_member_id) {
+        const { data: memberRow } = await supabaseAdmin
+          .from("business_members")
+          .select("user:users(email)")
+          .eq("id", profile.business_member_id as string)
+          .maybeSingle();
+        const userObj = (memberRow as Record<string, unknown> | null)?.user as Record<string, unknown> | null;
+        staffEmail = (userObj?.email as string) ?? null;
+      }
+      if (!staffEmail) staffEmail = profile.invited_email as string | null;
+      if (!staffEmail) return notFound("Staff email could not be resolved");
+
+      const siteUrl = Deno.env.get("SITE_URL") ?? "http://localhost:5173";
+      const { data: linkData, error: linkErr } = await supabaseAdmin.auth.admin.generateLink({
+        type: "magiclink",
+        email: staffEmail,
+        options: { redirectTo: `${siteUrl}/staff` },
+      });
+
+      if (linkErr) return serverError(linkErr.message);
+
+      return json({
+        url: (linkData as Record<string, unknown>).properties
+          ? ((linkData as Record<string, unknown>).properties as Record<string, unknown>).action_link
+          : null,
+        email: staffEmail,
+        display_name: profile.display_name,
+      });
+    }
+
     return badRequest(`Method ${method} is not supported`);
   } catch (err) {
     if (err instanceof Response) return err;

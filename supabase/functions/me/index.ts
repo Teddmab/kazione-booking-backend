@@ -37,7 +37,7 @@ Deno.serve(withLogging("me", async (req: Request) => {
       } | null;
 
       if (!body) {
-        return badRequest("Invalid JSON body");
+        return badRequest(req, "Invalid JSON body");
       }
 
       const normalize = (value: string | null | undefined, maxLen: number) => {
@@ -63,7 +63,7 @@ Deno.serve(withLogging("me", async (req: Request) => {
       if (phone !== undefined) updatePayload.phone = phone;
 
       if (Object.keys(updatePayload).length === 0) {
-        return badRequest("No profile fields provided");
+        return badRequest(req, "No profile fields provided");
       }
 
       const { data: updatedProfile, error: updateErr } = await supabaseAdmin
@@ -143,6 +143,6 @@ Deno.serve(withLogging("me", async (req: Request) => {
   } catch (e) {
     if (e instanceof Response) return e;
     console.error("me error:", e);
-    return serverError("Failed to load user data");
+    return serverError(req, "Failed to load user data");
   }
 }));

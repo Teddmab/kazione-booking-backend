@@ -272,14 +272,14 @@ Deno.serve(withLogging("get-storefront", async (req: Request) => {
   if (corsResp) return corsResp;
 
   if (req.method !== "GET") {
-    return badRequest("Only GET is allowed");
+    return badRequest(req, "Only GET is allowed");
   }
 
   try {
     // 1. Parse slug
     const url = new URL(req.url);
     const slug = url.searchParams.get("slug");
-    if (!slug) return badRequest("Missing required query parameter: slug");
+    if (!slug) return badRequest(req, "Missing required query parameter: slug");
 
     // 2. Locale will be resolved after fetching business_settings below
 
@@ -292,7 +292,7 @@ Deno.serve(withLogging("get-storefront", async (req: Request) => {
       .maybeSingle();
 
     if (sfErr) throw sfErr;
-    if (!storefront) return notFound("Storefront not found");
+    if (!storefront) return notFound(req, "Storefront not found");
 
     const businessId: string = storefront.business_id;
     const storefrontId: string = storefront.id;
@@ -643,6 +643,6 @@ Deno.serve(withLogging("get-storefront", async (req: Request) => {
     });
   } catch (err) {
     console.error("get-storefront error:", err);
-    return serverError("Failed to load storefront");
+    return serverError(req, "Failed to load storefront");
   }
 }));

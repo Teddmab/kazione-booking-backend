@@ -27,7 +27,7 @@ Deno.serve(withLogging("accept-staff-invite", async (req: Request) => {
 
   try {
     const body = await req.json() as { staff_profile_id?: string };
-    if (!body.staff_profile_id) return badRequest("staff_profile_id is required");
+    if (!body.staff_profile_id) return badRequest(req, "staff_profile_id is required");
 
     // Verify the caller — this is the just-logged-in staff member
     const user = await verifyAuth(req);
@@ -40,7 +40,7 @@ Deno.serve(withLogging("accept-staff-invite", async (req: Request) => {
       .maybeSingle();
 
     if (profileErr) throw profileErr;
-    if (!profile) return notFound("Staff invitation not found");
+    if (!profile) return notFound(req, "Staff invitation not found");
 
     const sp = profile as Record<string, unknown>;
 
@@ -65,7 +65,7 @@ Deno.serve(withLogging("accept-staff-invite", async (req: Request) => {
     const invitedEmail = (sp.invited_email as string | null)?.toLowerCase();
     const userEmail = user.email?.toLowerCase();
     if (!invitedEmail || !userEmail || invitedEmail !== userEmail) {
-      return forbidden("This invitation was not sent to your email address");
+      return forbidden(req, "This invitation was not sent to your email address");
     }
 
     const businessId = sp.business_id as string;
@@ -125,6 +125,6 @@ Deno.serve(withLogging("accept-staff-invite", async (req: Request) => {
   } catch (err) {
     if (err instanceof Response) return err;
     console.error("accept-staff-invite error:", err);
-    return serverError(err instanceof Error ? err.message : "Internal error");
+    return serverError(req, err instanceof Error ? err.message : "Internal error");
   }
 }));

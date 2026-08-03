@@ -61,7 +61,7 @@ Deno.serve(withLogging("get-availability", async (req: Request) => {
   if (corsResp) return corsResp;
 
   if (req.method !== "GET") {
-    return badRequest("Only GET is allowed");
+    return badRequest(req, "Only GET is allowed");
   }
 
   try {
@@ -80,22 +80,20 @@ Deno.serve(withLogging("get-availability", async (req: Request) => {
     if (!serviceId) missing.push("service_id");
     if (!dateStr) missing.push("date");
     if (missing.length > 0) {
-      return badRequest(
-        `Missing required query parameter(s): ${missing.join(", ")}`,
-      );
+      return badRequest(req, `Missing required query parameter(s): ${missing.join(", ")}`);
     }
 
     if (!DATE_RE.test(dateStr!)) {
-      return badRequest("Invalid date format. Expected YYYY-MM-DD.");
+      return badRequest(req, "Invalid date format. Expected YYYY-MM-DD.");
     }
 
     if (!["deposit", "full", "later"].includes(requestPaymentMethod)) {
-      return badRequest("Invalid payment_method. Expected deposit, full, or later.");
+      return badRequest(req, "Invalid payment_method. Expected deposit, full, or later.");
     }
 
     const requestedDate = new Date(dateStr! + "T00:00:00Z");
     if (isNaN(requestedDate.getTime())) {
-      return badRequest("Invalid date value.");
+      return badRequest(req, "Invalid date value.");
     }
 
     // 2. Validate date range — must be today or future
@@ -148,7 +146,7 @@ Deno.serve(withLogging("get-availability", async (req: Request) => {
 
     if (svcErr) throw svcErr;
     if (!service) {
-      return badRequest("Service not found or inactive.");
+      return badRequest(req, "Service not found or inactive.");
     }
 
     const serviceInfo: ServiceInfo = {
@@ -323,7 +321,7 @@ Deno.serve(withLogging("get-availability", async (req: Request) => {
     return jsonOk(req, response);
   } catch (err) {
     console.error("get-availability error:", err);
-    return serverError("Failed to fetch availability");
+    return serverError(req, "Failed to fetch availability");
   }
 }));
 

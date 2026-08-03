@@ -74,7 +74,7 @@ Deno.serve(withLogging("marketplace-storefronts", async (req: Request) => {
 
     const [{ data: storefrontsData, error, count }, { data: lockedRegionsData }] =
       await Promise.all([query, lockedRegionsPromise]);
-    if (error) return serverError(error.message);
+    if (error) return serverError(req, error.message);
 
     const locked_countries = (lockedRegionsData ?? []).map(
       (r: Record<string, unknown>) => r.country_code as string,
@@ -141,6 +141,6 @@ Deno.serve(withLogging("marketplace-storefronts", async (req: Request) => {
   } catch (err) {
     if (err instanceof Response) return err;
     console.error("marketplace-storefronts error:", err);
-    return serverError(err instanceof Error ? err.message : "Internal error");
+    return serverError(req, err instanceof Error ? err.message : "Internal error");
   }
 }));

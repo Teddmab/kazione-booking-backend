@@ -4,7 +4,7 @@ import { badRequest, conflict, notFound, serverError } from "../_shared/errors.t
 import { withLogging } from "../_shared/logger.ts";
 import { requireOwnerOrManagerCtx } from "../_shared/auth.ts";
 
-function csvResponse(text: string): Response {
+function csvResponse(req: Request, text: string): Response {
   return new Response(text, {
     status: 200,
     headers: {
@@ -63,7 +63,7 @@ Deno.serve(withLogging("bank-statements", async (req: Request) => {
           "2024-01-17,Supplier invoice — Products,-120.50,EUR,TXN003",
           "2024-01-18,Loan repayment,-250.00,EUR,TXN004",
         ].join("\n");
-        return csvResponse(csv);
+        return csvResponse(req, csv);
       }
 
       const businessId = url.searchParams.get("business_id");

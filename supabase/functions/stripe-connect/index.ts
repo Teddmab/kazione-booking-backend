@@ -1,6 +1,6 @@
 import { stripe } from "../_shared/stripe.ts";
 import { supabaseAdmin } from "../_shared/supabaseAdmin.ts";
-import { corsHeadersFor, handleCors, jsonCors } from "../_shared/cors.ts";
+import { handleCors, jsonCors } from "../_shared/cors.ts";
 import { badRequest, serverError } from "../_shared/errors.ts";
 import { withLogging } from "../_shared/logger.ts";
 import { requireOwnerOrManagerCtx } from "../_shared/auth.ts";
@@ -66,19 +66,19 @@ Deno.serve(
 
       switch (body.action) {
         case "create-account":
-          return handleCreateAccount(businessId, existingAccount, body);
+          return handleCreateAccount(req, businessId, existingAccount, body);
 
         case "get-onboarding-link":
           if (!existingAccount?.account_id) {
             return badRequest("No Stripe account found for this business");
           }
-          return handleGetOnboardingLink(existingAccount.account_id as string, body);
+          return handleGetOnboardingLink(req, existingAccount.account_id as string, body);
 
         case "get-dashboard-link":
           if (!existingAccount?.account_id) {
             return badRequest("No Stripe account found for this business");
           }
-          return handleGetDashboardLink(existingAccount.account_id as string);
+          return handleGetDashboardLink(req, existingAccount.account_id as string);
 
         case "get-status":
           if (!existingAccount?.account_id) {
@@ -91,19 +91,19 @@ Deno.serve(
               details_submitted: false,
             });
           }
-          return handleGetStatus(existingAccount.account_id as string, businessId);
+          return handleGetStatus(req, existingAccount.account_id as string, businessId);
 
         case "get-balance":
           if (!existingAccount?.account_id) {
             return badRequest("No Stripe account found for this business");
           }
-          return handleGetBalance(existingAccount.account_id as string);
+          return handleGetBalance(req, existingAccount.account_id as string);
 
         case "disconnect":
           if (!existingAccount?.account_id) {
             return badRequest("No Stripe account found for this business");
           }
-          return handleDisconnect(businessId, existingAccount.id as string);
+          return handleDisconnect(req, businessId, existingAccount.id as string);
 
         default:
           return badRequest(`Unknown action: ${body.action}`);
@@ -121,6 +121,7 @@ Deno.serve(
 // ────────────────────────────────────────────────────────────────────────────
 
 async function handleCreateAccount(
+  req: Request,
   businessId: string,
   existingAccount: { id: string; account_id: string | null; connected: boolean } | null,
   body: {
@@ -200,6 +201,7 @@ async function handleCreateAccount(
 }
 
 async function handleGetOnboardingLink(
+  req: Request,
   accountId: string,
   body: {
     return_url?: string;
@@ -223,7 +225,7 @@ async function handleGetOnboardingLink(
   }
 }
 
-async function handleGetDashboardLink(accountId: string): Promise<Response> {
+async function handleGetDashboardLink(req: Request, accountId: string): Promise<Response> {
   try {
     const loginLink = await stripe.accounts.createLoginLink(accountId);
 
@@ -237,6 +239,7 @@ async function handleGetDashboardLink(accountId: string): Promise<Response> {
 }
 
 async function handleGetStatus(
+  req: Request,
   accountId: string,
   _businessId: string,
 ): Promise<Response> {
@@ -271,7 +274,7 @@ async function handleGetStatus(
   }
 }
 
-async function handleGetBalance(accountId: string): Promise<Response> {
+async function handleGetBalance(req: Request, accountId: string): Promise<Response> {
   try {
     const balance = await stripe.balance.retrieve({ stripeAccount: accountId });
 
@@ -286,6 +289,7 @@ async function handleGetBalance(accountId: string): Promise<Response> {
 }
 
 async function handleDisconnect(
+  req: Request,
   _businessId: string,
   accountRecordId: string,
 ): Promise<Response> {

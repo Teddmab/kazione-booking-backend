@@ -1,5 +1,5 @@
 import { Resend } from "resend";
-import { corsHeadersFor, handleCors, jsonCors } from "../_shared/cors.ts";
+import { corsHeadersFor, handleCors } from "../_shared/cors.ts";
 import { badRequest, serverError, unauthorized } from "../_shared/errors.ts";
 import {
   bookingCancellationEmail,

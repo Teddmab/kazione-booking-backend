@@ -1,15 +1,8 @@
 import { supabaseAdmin } from "../_shared/supabaseAdmin.ts";
-import { corsHeaders, handleCors } from "../_shared/cors.ts";
+import { corsHeadersFor, handleCors, jsonCors } from "../_shared/cors.ts";
 import { badRequest, conflict, forbidden, notFound, serverError } from "../_shared/errors.ts";
 import { withLogging } from "../_shared/logger.ts";
 import { requireOwnerOrManagerCtx, verifyAuth } from "../_shared/auth.ts";
-
-function json(data: unknown, status = 200): Response {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: { ...corsHeaders, "Content-Type": "application/json" },
-  });
-}
 
 const REVIEW_SELECT = `*, client:clients(first_name, last_name, avatar_url)`;
 
@@ -54,7 +47,7 @@ Deno.serve(withLogging("reviews", async (req: Request) => {
 
         const r = review as Record<string, unknown>;
         if (r.token_used_at) {
-          return json({ error: { code: "TOKEN_USED", message: "This review link has already been used" } }, 409);
+          return jsonCors(req, { error: { code: "TOKEN_USED", message: "This review link has already been used" } }, 409);
         }
 
         const appt = r.appointment as Record<string, unknown> | null;
@@ -62,7 +55,7 @@ Deno.serve(withLogging("reviews", async (req: Request) => {
         const client = appt?.client as Record<string, string> | null;
         const service = appt?.service as Record<string, string> | null;
 
-        return json({
+        return jsonCors(req, {
           salonName: biz?.name ?? null,
           salonLogoUrl: biz?.logo_url ?? null,
           clientName: client ? `${client.first_name} ${client.last_name}`.trim() : null,
@@ -87,7 +80,7 @@ Deno.serve(withLogging("reviews", async (req: Request) => {
         .range(from, from + limit - 1);
 
       if (error) return serverError(error.message);
-      return json({ reviews: data ?? [], total: count ?? 0 });
+      return jsonCors(req, { reviews: data ?? [], total: count ?? 0 });
     }
 
     if (method === "POST") {
@@ -130,7 +123,7 @@ Deno.serve(withLogging("reviews", async (req: Request) => {
           .single();
 
         if (updateErr) return serverError(updateErr.message);
-        return json(updated, 200);
+        return jsonCors(req, updated, 200);
       }
 
       // ── Authenticated customer review submission ─────────────────────────────
@@ -178,7 +171,7 @@ Deno.serve(withLogging("reviews", async (req: Request) => {
             .select(REVIEW_SELECT)
             .single();
           if (updateErr) return serverError(updateErr.message);
-          return json(updated, 200);
+          return jsonCors(req, updated, 200);
         }
         return conflict("REVIEW_EXISTS", "A review already exists for this appointment");
       }
@@ -196,7 +189,7 @@ Deno.serve(withLogging("reviews", async (req: Request) => {
         .single();
 
       if (insertErr) return serverError(insertErr.message);
-      return json(review, 201);
+      return jsonCors(req, review, 201);
     }
 
     if (method === "PATCH") {
@@ -224,7 +217,7 @@ Deno.serve(withLogging("reviews", async (req: Request) => {
         .single();
 
       if (error) return serverError(error.message);
-      return json(data);
+      return jsonCors(req, data);
     }
 
     return badRequest("Method not allowed");

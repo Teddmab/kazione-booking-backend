@@ -1,5 +1,5 @@
 import { supabaseAdmin } from "../_shared/supabaseAdmin.ts";
-import { corsHeaders, handleCors } from "../_shared/cors.ts";
+import { corsHeadersFor, handleCors, jsonCors } from "../_shared/cors.ts";
 import { badRequest, notFound, serverError } from "../_shared/errors.ts";
 
 function unprocessableEntity(message: string): Response {
@@ -111,7 +111,7 @@ Deno.serve(withLogging("pawapay-payment", async (req: Request) => {
           status: "COMPLETED",
           message: "This appointment has already been paid",
         }),
-        { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+        { status: 200, headers: { ...corsHeadersFor(req), "Content-Type": "application/json" } },
       );
     }
 
@@ -155,7 +155,7 @@ Deno.serve(withLogging("pawapay-payment", async (req: Request) => {
         status: "INITIATED",
         message: "Confirm on your phone",
       }),
-      { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      { status: 200, headers: { ...corsHeadersFor(req), "Content-Type": "application/json" } },
     );
   } catch (err) {
     console.error("pawapay-payment error:", err);

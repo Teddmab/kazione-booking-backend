@@ -1,15 +1,8 @@
 import { supabaseAdmin } from "../_shared/supabaseAdmin.ts";
-import { corsHeaders, handleCors } from "../_shared/cors.ts";
+import { corsHeadersFor, handleCors, jsonCors } from "../_shared/cors.ts";
 import { badRequest, serverError } from "../_shared/errors.ts";
 import { withLogging } from "../_shared/logger.ts";
 import { requireOwnerOrManagerCtx } from "../_shared/auth.ts";
-
-function json(data: unknown, status = 200): Response {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: { ...corsHeaders, "Content-Type": "application/json" },
-  });
-}
 
 /**
  * /finance — finance analytics, expense CRUD, bookkeeping
@@ -51,7 +44,7 @@ Deno.serve(withLogging("finance", async (req: Request) => {
           p_business_id: businessId, p_start_date: from, p_end_date: to,
         });
         if (error) return serverError(error.message);
-        return json(data);
+        return jsonCors(req, data);
       }
 
       if (action === "income") {
@@ -63,7 +56,7 @@ Deno.serve(withLogging("finance", async (req: Request) => {
           p_business_id: businessId, p_start_date: from, p_end_date: to, p_group_by: groupBy,
         });
         if (error) return serverError(error.message);
-        return json(data ?? []);
+        return jsonCors(req, data ?? []);
       }
 
       if (action === "expenses" || !action) {
@@ -94,7 +87,7 @@ Deno.serve(withLogging("finance", async (req: Request) => {
         const { data, error, count } = await query;
         if (error) return serverError(error.message);
 
-        return json({
+        return jsonCors(req, {
           expenses: (data ?? []).map((row: Record<string, unknown>) => ({ ...row, supplier: row.supplier ?? null })),
           total: count ?? 0,
         });
@@ -108,7 +101,7 @@ Deno.serve(withLogging("finance", async (req: Request) => {
           p_business_id: businessId, p_start_date: from, p_end_date: to,
         });
         if (error) return serverError(error.message);
-        return json(data ?? []);
+        return jsonCors(req, data ?? []);
       }
 
       if (action === "tax-summary") {
@@ -121,7 +114,7 @@ Deno.serve(withLogging("finance", async (req: Request) => {
           p_quarter: quarter ? parseInt(quarter, 10) : null,
         });
         if (error) return serverError(error.message);
-        return json(data);
+        return jsonCors(req, data);
       }
 
       if (action === "bookkeeping") {
@@ -215,7 +208,7 @@ Deno.serve(withLogging("finance", async (req: Request) => {
           return { ...row, running_balance: Math.round(balance * 100) / 100 };
         });
 
-        return json(transactions);
+        return jsonCors(req, transactions);
       }
 
       if (action === "staff-performance") {
@@ -226,7 +219,7 @@ Deno.serve(withLogging("finance", async (req: Request) => {
           p_business_id: businessId, p_start_date: from, p_end_date: to,
         });
         if (error) return serverError(error.message);
-        return json(data ?? []);
+        return jsonCors(req, data ?? []);
       }
 
       if (action === "supplier-spend") {
@@ -237,7 +230,7 @@ Deno.serve(withLogging("finance", async (req: Request) => {
           p_business_id: businessId, p_start_date: from, p_end_date: to,
         });
         if (error) return serverError(error.message);
-        return json(data ?? []);
+        return jsonCors(req, data ?? []);
       }
 
       return badRequest(`Unknown action: ${action}`);
@@ -271,7 +264,7 @@ Deno.serve(withLogging("finance", async (req: Request) => {
         .single();
 
       if (error) return serverError(error.message);
-      return json({ ...expense, supplier: (expense as Record<string, unknown>).supplier ?? null }, 201);
+      return jsonCors(req, { ...expense, supplier: (expense as Record<string, unknown>).supplier ?? null }, 201);
     }
 
     // ── PATCH ──────────────────────────────────────────────────────────────
@@ -300,7 +293,7 @@ Deno.serve(withLogging("finance", async (req: Request) => {
         .single();
 
       if (error) return serverError(error.message);
-      return json({ ...expense, supplier: (expense as Record<string, unknown>).supplier ?? null });
+      return jsonCors(req, { ...expense, supplier: (expense as Record<string, unknown>).supplier ?? null });
     }
 
     // ── DELETE ─────────────────────────────────────────────────────────────
@@ -321,7 +314,7 @@ Deno.serve(withLogging("finance", async (req: Request) => {
 
       const { error } = await supabaseAdmin.from("expenses").delete().eq("id", id);
       if (error) return serverError(error.message);
-      return json(null, 204);
+      return jsonCors(req, null, 204);
     }
 
     return badRequest("Method not allowed");

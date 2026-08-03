@@ -1,15 +1,8 @@
 import { supabaseAdmin } from "../_shared/supabaseAdmin.ts";
-import { corsHeaders, handleCors } from "../_shared/cors.ts";
+import { corsHeadersFor, handleCors, jsonCors } from "../_shared/cors.ts";
 import { badRequest, notFound, serverError } from "../_shared/errors.ts";
 import { withLogging } from "../_shared/logger.ts";
 import { requireOwnerOrManagerCtx, verifyAuth } from "../_shared/auth.ts";
-
-function json(data: unknown, status = 200): Response {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: { ...corsHeaders, "Content-Type": "application/json" },
-  });
-}
 
 function parseMoney(value: unknown): number | null {
   if (value === null || value === undefined || value === "") return null;
@@ -103,7 +96,7 @@ Deno.serve(withLogging("services", async (req: Request) => {
           .maybeSingle();
         const staffProfileId = (sp as { id: string } | null)?.id ?? null;
 
-        if (!staffProfileId) return json([]);
+        if (!staffProfileId) return jsonCors(req, []);
 
         // Fetch only services assigned to this staff member (pending + accepted).
         const { data: assignments } = await supabaseAdmin
@@ -115,7 +108,7 @@ Deno.serve(withLogging("services", async (req: Request) => {
         const serviceIds = (assignments ?? []).map(
           (a: Record<string, unknown>) => a.service_id as string,
         );
-        if (serviceIds.length === 0) return json([]);
+        if (serviceIds.length === 0) return jsonCors(req, []);
 
         const { data, error } = await supabaseAdmin
           .from("services")
@@ -163,7 +156,7 @@ Deno.serve(withLogging("services", async (req: Request) => {
           return ap - bp;
         });
 
-        return json(staffRows);
+        return jsonCors(req, staffRows);
       }
 
       // Owner / manager path — full list with all columns including auto_show_to_staff.
@@ -195,7 +188,7 @@ Deno.serve(withLogging("services", async (req: Request) => {
         };
       });
 
-      return json(rows);
+      return jsonCors(req, rows);
     }
 
     if (method === "POST") {
@@ -315,7 +308,7 @@ Deno.serve(withLogging("services", async (req: Request) => {
       const category = (data as Record<string, unknown>).category as {
         name?: string;
       } | null;
-      return json({
+      return jsonCors(req, {
         ...(data as Record<string, unknown>),
         category_name: category?.name ?? null,
       }, 201);
@@ -477,7 +470,7 @@ Deno.serve(withLogging("services", async (req: Request) => {
       const category = (data as Record<string, unknown>).category as {
         name?: string;
       } | null;
-      return json({
+      return jsonCors(req, {
         ...(data as Record<string, unknown>),
         category_name: category?.name ?? null,
       });

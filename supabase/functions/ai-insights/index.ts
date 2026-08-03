@@ -1,5 +1,5 @@
 import { supabaseAdmin } from "../_shared/supabaseAdmin.ts";
-import { corsHeaders, handleCors } from "../_shared/cors.ts";
+import { corsHeadersFor, handleCors, jsonCors } from "../_shared/cors.ts";
 import { badRequest, serverError } from "../_shared/errors.ts";
 import { requireOwnerOrManagerCtx } from "../_shared/auth.ts";
 import { withLogging } from "../_shared/logger.ts";
@@ -412,7 +412,7 @@ Deno.serve(withLogging("ai-insights", async (req: Request) => {
       if (services.length === 0) {
         return new Response(
           JSON.stringify({ analysis: [], summary: "No active services found.", cached: false, cached_services: [] }),
-          { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+          { status: 200, headers: { ...corsHeadersFor(req), "Content-Type": "application/json" } },
         );
       }
 
@@ -454,7 +454,7 @@ Deno.serve(withLogging("ai-insights", async (req: Request) => {
             cached: true,
             cached_services: cachedServiceNames.map((name) => ({ name, analyzed_at: cachedAt })),
           }),
-          { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+          { status: 200, headers: { ...corsHeadersFor(req), "Content-Type": "application/json" } },
         );
       }
 
@@ -496,7 +496,7 @@ Deno.serve(withLogging("ai-insights", async (req: Request) => {
           cached: false,
           cached_services: cachedServiceNames.map((name) => ({ name, analyzed_at: cachedAt })),
         }),
-        { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+        { status: 200, headers: { ...corsHeadersFor(req), "Content-Type": "application/json" } },
       );
     }
 
@@ -532,7 +532,7 @@ Deno.serve(withLogging("ai-insights", async (req: Request) => {
         }),
         {
           status: 200,
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
+          headers: { ...corsHeadersFor(req), "Content-Type": "application/json" },
         },
       );
     }
@@ -560,7 +560,7 @@ Deno.serve(withLogging("ai-insights", async (req: Request) => {
       JSON.stringify({ insights, cached: false }),
       {
         status: 200,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
+        headers: { ...corsHeadersFor(req), "Content-Type": "application/json" },
       },
     );
   } catch (err) {

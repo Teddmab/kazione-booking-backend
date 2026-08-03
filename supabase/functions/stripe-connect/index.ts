@@ -1,16 +1,9 @@
 import { stripe } from "../_shared/stripe.ts";
 import { supabaseAdmin } from "../_shared/supabaseAdmin.ts";
-import { corsHeaders, handleCors } from "../_shared/cors.ts";
+import { corsHeadersFor, handleCors, jsonCors } from "../_shared/cors.ts";
 import { badRequest, serverError } from "../_shared/errors.ts";
 import { withLogging } from "../_shared/logger.ts";
 import { requireOwnerOrManagerCtx } from "../_shared/auth.ts";
-
-function json(data: unknown, status = 200): Response {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: { ...corsHeaders, "Content-Type": "application/json" },
-  });
-}
 
 /**
  * POST /stripe-connect
@@ -30,7 +23,7 @@ Deno.serve(
     if (corsResp) return corsResp;
 
     if (req.method !== "POST") {
-      return json({ error: { code: "METHOD_NOT_ALLOWED", message: "Only POST is allowed" } }, 405);
+      return jsonCors(req, { error: { code: "METHOD_NOT_ALLOWED", message: "Only POST is allowed" } }, 405);
     }
 
     try {
@@ -90,7 +83,7 @@ Deno.serve(
         case "get-status":
           if (!existingAccount?.account_id) {
             // No account yet, return disconnected status
-            return json({
+            return jsonCors(req, {
               connected: false,
               account_id: null,
               charges_enabled: false,
@@ -196,7 +189,7 @@ async function handleCreateAccount(
       refresh_url: body.refresh_url || "https://kazionebooking.com",
     });
 
-    return json({
+    return jsonCors(req, {
       account_id: account.id,
       onboarding_url: onboardingLink.url,
     });
@@ -221,7 +214,7 @@ async function handleGetOnboardingLink(
       refresh_url: body.refresh_url || "https://kazionebooking.com",
     });
 
-    return json({
+    return jsonCors(req, {
       onboarding_url: onboardingLink.url,
     });
   } catch (err) {
@@ -234,7 +227,7 @@ async function handleGetDashboardLink(accountId: string): Promise<Response> {
   try {
     const loginLink = await stripe.accounts.createLoginLink(accountId);
 
-    return json({
+    return jsonCors(req, {
       dashboard_url: loginLink.url,
     });
   } catch (err) {
@@ -264,7 +257,7 @@ async function handleGetStatus(
       // Don't fail the request, just log it
     }
 
-    return json({
+    return jsonCors(req, {
       connected: account.charges_enabled && account.payouts_enabled,
       account_id: accountId,
       charges_enabled: account.charges_enabled,
@@ -282,7 +275,7 @@ async function handleGetBalance(accountId: string): Promise<Response> {
   try {
     const balance = await stripe.balance.retrieve({ stripeAccount: accountId });
 
-    return json({
+    return jsonCors(req, {
       available: balance.available,
       pending: balance.pending,
     });
@@ -308,7 +301,7 @@ async function handleDisconnect(
       return serverError("Failed to disconnect account");
     }
 
-    return json({
+    return jsonCors(req, {
       connected: false,
     });
   } catch (err) {

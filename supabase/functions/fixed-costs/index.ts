@@ -1,15 +1,8 @@
 import { supabaseAdmin } from "../_shared/supabaseAdmin.ts";
-import { corsHeaders, handleCors } from "../_shared/cors.ts";
+import { corsHeadersFor, handleCors, jsonCors } from "../_shared/cors.ts";
 import { badRequest, notFound, serverError } from "../_shared/errors.ts";
 import { withLogging } from "../_shared/logger.ts";
 import { requireOwnerOrManagerCtx, verifyAuth, verifyBusinessMember } from "../_shared/auth.ts";
-
-function json(data: unknown, status = 200): Response {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: { ...corsHeaders, "Content-Type": "application/json" },
-  });
-}
 
 const VALID_CATEGORIES = ["rent", "electricity", "water", "internet_phone", "insurance", "maintenance", "other"];
 const VALID_FREQUENCIES = ["monthly", "quarterly", "annual", "one_off"];
@@ -76,7 +69,7 @@ Deno.serve(withLogging("fixed-costs", async (req: Request) => {
           .sort(([a], [b]) => a.localeCompare(b))
           .map(([month, total]) => ({ month, total }));
 
-        return json({ by_category: byCategory, monthly_series: monthlySeries });
+        return jsonCors(req, { by_category: byCategory, monthly_series: monthlySeries });
       }
 
       // Default: list
@@ -95,7 +88,7 @@ Deno.serve(withLogging("fixed-costs", async (req: Request) => {
 
       const { data, error } = await query;
       if (error) return serverError(error.message);
-      return json({ costs: data ?? [] });
+      return jsonCors(req, { costs: data ?? [] });
     }
 
     // ── POST ───────────────────────────────────────────────────────────────
@@ -142,7 +135,7 @@ Deno.serve(withLogging("fixed-costs", async (req: Request) => {
         .single();
 
       if (error) return serverError(error.message);
-      return json(data, 201);
+      return jsonCors(req, data, 201);
     }
 
     // ── PATCH ──────────────────────────────────────────────────────────────
@@ -192,7 +185,7 @@ Deno.serve(withLogging("fixed-costs", async (req: Request) => {
         .single();
 
       if (error) return serverError(error.message);
-      return json(data);
+      return jsonCors(req, data);
     }
 
     // ── DELETE ─────────────────────────────────────────────────────────────
@@ -215,7 +208,7 @@ Deno.serve(withLogging("fixed-costs", async (req: Request) => {
         .eq("id", id);
 
       if (error) return serverError(error.message);
-      return json({ ok: true });
+      return jsonCors(req, { ok: true });
     }
 
     return badRequest("Method not allowed");

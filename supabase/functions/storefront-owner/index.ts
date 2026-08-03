@@ -1,15 +1,8 @@
 import { supabaseAdmin } from "../_shared/supabaseAdmin.ts";
-import { corsHeaders, handleCors } from "../_shared/cors.ts";
+import { corsHeadersFor, handleCors, jsonCors } from "../_shared/cors.ts";
 import { badRequest, serverError } from "../_shared/errors.ts";
 import { withLogging } from "../_shared/logger.ts";
 import { requireOwnerOrManagerCtx } from "../_shared/auth.ts";
-
-function json(data: unknown, status = 200): Response {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: { ...corsHeaders, "Content-Type": "application/json" },
-  });
-}
 
 /**
  * /storefront-owner — owner storefront CRUD (no image uploads — use /storefront-upload)
@@ -50,7 +43,7 @@ Deno.serve(withLogging("storefront-owner", async (req: Request) => {
           .maybeSingle();
 
         if (sfErr) return serverError(sfErr.message);
-        if (!storefront) return json([]);
+        if (!storefront) return jsonCors(req, []);
 
         const { data, error } = await supabaseAdmin
           .from("storefront_gallery")
@@ -59,7 +52,7 @@ Deno.serve(withLogging("storefront-owner", async (req: Request) => {
           .order("display_order", { ascending: true });
 
         if (error) return serverError(error.message);
-        return json(data ?? []);
+        return jsonCors(req, data ?? []);
       }
 
       // GET ?action=promotions — list promotions for mobile M6
@@ -71,7 +64,7 @@ Deno.serve(withLogging("storefront-owner", async (req: Request) => {
           .order("created_at", { ascending: false });
 
         if (error) return serverError(error.message);
-        return json(data ?? []);
+        return jsonCors(req, data ?? []);
       }
 
 
@@ -82,7 +75,7 @@ Deno.serve(withLogging("storefront-owner", async (req: Request) => {
         .maybeSingle();
 
       if (error) return serverError(error.message);
-      return json(data);
+      return jsonCors(req, data);
     }
 
     // ── PATCH ──────────────────────────────────────────────────────────────
@@ -108,7 +101,7 @@ Deno.serve(withLogging("storefront-owner", async (req: Request) => {
           if (error) return serverError(error.message);
         }
 
-        return json({ ok: true });
+        return jsonCors(req, { ok: true });
       }
 
       // Upsert storefront fields
@@ -180,7 +173,7 @@ Deno.serve(withLogging("storefront-owner", async (req: Request) => {
       }
 
       if (error) return serverError(error.message);
-      return json(data);
+      return jsonCors(req, data);
     }
 
     // ── POST ───────────────────────────────────────────────────────────────
@@ -202,7 +195,7 @@ Deno.serve(withLogging("storefront-owner", async (req: Request) => {
           .eq("business_id", ctx.businessId);
 
         if (error) return serverError(error.message);
-        return json({ ok: true });
+        return jsonCors(req, { ok: true });
       }
 
       if (action === "unpublish") {
@@ -216,7 +209,7 @@ Deno.serve(withLogging("storefront-owner", async (req: Request) => {
           .eq("business_id", ctx.businessId);
 
         if (error) return serverError(error.message);
-        return json({ ok: true });
+        return jsonCors(req, { ok: true });
       }
 
       // Insert gallery image record (after client uploaded via presigned URL)
@@ -233,7 +226,7 @@ Deno.serve(withLogging("storefront-owner", async (req: Request) => {
           .single();
 
         if (error) return serverError(error.message);
-        return json(data, 201);
+        return jsonCors(req, data, 201);
       }
 
       if (action === "promotion") {
@@ -256,7 +249,7 @@ Deno.serve(withLogging("storefront-owner", async (req: Request) => {
           .single();
 
         if (error) return serverError(error.message);
-        return json(data, 201);
+        return jsonCors(req, data, 201);
       }
 
       return badRequest(`Unknown action: ${action}`);
@@ -312,7 +305,7 @@ Deno.serve(withLogging("storefront-owner", async (req: Request) => {
         .eq("id", galleryId);
 
       if (error) return serverError(error.message);
-      return json({ ok: true });
+      return jsonCors(req, { ok: true });
     }
 
     if (method === "DELETE" && action === "promotion") {
@@ -330,7 +323,7 @@ Deno.serve(withLogging("storefront-owner", async (req: Request) => {
         .eq("business_id", ctx.businessId);
 
       if (error) return serverError(error.message);
-      return json({ ok: true });
+      return jsonCors(req, { ok: true });
     }
 
     return badRequest("Method not allowed");

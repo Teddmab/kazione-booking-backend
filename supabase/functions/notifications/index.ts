@@ -1,15 +1,8 @@
 import { supabaseAdmin } from "../_shared/supabaseAdmin.ts";
-import { corsHeaders, handleCors } from "../_shared/cors.ts";
+import { corsHeadersFor, handleCors, jsonCors } from "../_shared/cors.ts";
 import { badRequest, serverError } from "../_shared/errors.ts";
 import { withLogging } from "../_shared/logger.ts";
 import { verifyAuth } from "../_shared/auth.ts";
-
-function json(data: unknown, status = 200): Response {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: { ...corsHeaders, "Content-Type": "application/json" },
-  });
-}
 
 /**
  * /notifications — notifications for the authenticated user
@@ -48,7 +41,7 @@ Deno.serve(withLogging("notifications", async (req: Request) => {
       const { data, error } = await query;
 
       if (error) return serverError(error.message);
-      return json(data ?? []);
+      return jsonCors(req, data ?? []);
     }
 
     if (method === "PATCH") {
@@ -61,7 +54,7 @@ Deno.serve(withLogging("notifications", async (req: Request) => {
         .eq("user_id", user.id); // ensure user can only mark their own
 
       if (error) return serverError(error.message);
-      return json({ ok: true });
+      return jsonCors(req, { ok: true });
     }
 
     if (method === "POST" && action === "mark-all-read") {
@@ -72,7 +65,7 @@ Deno.serve(withLogging("notifications", async (req: Request) => {
         .eq("is_read", false);
 
       if (error) return serverError(error.message);
-      return json({ ok: true });
+      return jsonCors(req, { ok: true });
     }
 
     return badRequest("Method not allowed");

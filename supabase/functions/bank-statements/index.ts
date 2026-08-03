@@ -1,21 +1,14 @@
 import { supabaseAdmin } from "../_shared/supabaseAdmin.ts";
-import { corsHeaders, handleCors } from "../_shared/cors.ts";
+import { corsHeadersFor, handleCors, jsonCors } from "../_shared/cors.ts";
 import { badRequest, conflict, notFound, serverError } from "../_shared/errors.ts";
 import { withLogging } from "../_shared/logger.ts";
 import { requireOwnerOrManagerCtx } from "../_shared/auth.ts";
-
-function json(data: unknown, status = 200): Response {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: { ...corsHeaders, "Content-Type": "application/json" },
-  });
-}
 
 function csvResponse(text: string): Response {
   return new Response(text, {
     status: 200,
     headers: {
-      ...corsHeaders,
+      ...corsHeadersFor(req),
       "Content-Type": "text/csv; charset=utf-8",
       "Content-Disposition": 'attachment; filename="bank_statement_template.csv"',
     },
@@ -88,7 +81,7 @@ Deno.serve(withLogging("bank-statements", async (req: Request) => {
           .order("imported_at", { ascending: false });
 
         if (error) return serverError(error.message);
-        return json({ batches: data ?? [] });
+        return jsonCors(req, { batches: data ?? [] });
       }
 
       // Transactions list
@@ -148,7 +141,7 @@ Deno.serve(withLogging("bank-statements", async (req: Request) => {
         ),
       }));
 
-      return json({ transactions, total: count ?? 0 });
+      return jsonCors(req, { transactions, total: count ?? 0 });
     }
 
     // ── POST ?action=import ───────────────────────────────────────────────────
@@ -204,7 +197,7 @@ Deno.serve(withLogging("bank-statements", async (req: Request) => {
 
       if (uniqueRows.length === 0) {
         await supabaseAdmin.from("bank_import_batches").delete().eq("id", batch.id);
-        return json({ batch_id: null, row_count: 0, auto_reconciled_count: 0, skipped_count: skippedCount }, 200);
+        return jsonCors(req, { batch_id: null, row_count: 0, auto_reconciled_count: 0, skipped_count: skippedCount }, 200);
       }
 
       // Gather already-reconciled IDs from existing bank_transactions
@@ -341,7 +334,7 @@ Deno.serve(withLogging("bank-statements", async (req: Request) => {
         .update({ row_count: uniqueRows.length, auto_reconciled_count: autoReconciledCount })
         .eq("id", batch.id);
 
-      return json({ batch_id: batch.id, row_count: uniqueRows.length, auto_reconciled_count: autoReconciledCount, skipped_count: skippedCount }, 201);
+      return jsonCors(req, { batch_id: batch.id, row_count: uniqueRows.length, auto_reconciled_count: autoReconciledCount, skipped_count: skippedCount }, 201);
     }
 
     // ── POST ?action=auto-create-expenses ─────────────────────────────────────
@@ -400,7 +393,7 @@ Deno.serve(withLogging("bank-statements", async (req: Request) => {
         createdCount++;
       }
 
-      return json({ created_count: createdCount });
+      return jsonCors(req, { created_count: createdCount });
     }
 
     // ── PATCH ?action=transaction&id= ─────────────────────────────────────────
@@ -464,7 +457,7 @@ Deno.serve(withLogging("bank-statements", async (req: Request) => {
       if (error) return serverError(error.message);
 
       const t = updated as Record<string, unknown>;
-      return json({
+      return jsonCors(req, {
         ...t,
         is_reconciled: (
           t.reconciled_payment_id      !== null ||
@@ -497,7 +490,7 @@ Deno.serve(withLogging("bank-statements", async (req: Request) => {
         // Cascade delete via FK (bank_transactions.import_batch_id ON DELETE CASCADE)
         const { error } = await supabaseAdmin.from("bank_import_batches").delete().eq("id", id);
         if (error) return serverError(error.message);
-        return json({ success: true });
+        return jsonCors(req, { success: true });
       }
 
       // Delete single transaction
@@ -517,7 +510,7 @@ Deno.serve(withLogging("bank-statements", async (req: Request) => {
 
       const { error } = await supabaseAdmin.from("bank_transactions").delete().eq("id", id);
       if (error) return serverError(error.message);
-      return json({ success: true });
+      return jsonCors(req, { success: true });
     }
 
     return badRequest("Method not allowed");

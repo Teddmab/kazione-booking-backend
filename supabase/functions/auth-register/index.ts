@@ -1,5 +1,5 @@
 import { supabaseAdmin } from "../_shared/supabaseAdmin.ts";
-import { corsHeaders, handleCors } from "../_shared/cors.ts";
+import { corsHeadersFor, handleCors, jsonCors } from "../_shared/cors.ts";
 import { badRequest, conflict, serverError } from "../_shared/errors.ts";
 import { withLogging } from "../_shared/logger.ts";
 import { checkRateLimit } from "../_shared/rateLimit.ts";
@@ -136,7 +136,7 @@ Deno.serve(withLogging("auth-register", async (req: Request) => {
         JSON.stringify({ message: "Business account created successfully" }),
         {
           status: 201,
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
+          headers: { ...corsHeadersFor(req), "Content-Type": "application/json" },
         },
       );
     }
@@ -161,7 +161,7 @@ Deno.serve(withLogging("auth-register", async (req: Request) => {
       JSON.stringify({ message: "Customer account created successfully" }),
       {
         status: 201,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
+        headers: { ...corsHeadersFor(req), "Content-Type": "application/json" },
       },
     );
   } catch (err) {

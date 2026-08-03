@@ -1,4 +1,4 @@
-import { corsHeaders } from "./cors.ts";
+import { corsHeadersFor } from "./cors.ts";
 
 /**
  * Simple in-memory sliding-window rate limiter keyed by client IP.
@@ -82,7 +82,7 @@ export function checkRateLimit(
       {
         status: 429,
         headers: {
-          ...corsHeaders,
+          ...corsHeadersFor(req),
           "Content-Type": "application/json",
           "Retry-After": String(retryAfter),
         },

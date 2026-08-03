@@ -1,15 +1,8 @@
 import { supabaseAdmin } from "../_shared/supabaseAdmin.ts";
-import { corsHeaders, handleCors } from "../_shared/cors.ts";
+import { corsHeadersFor, handleCors, jsonCors } from "../_shared/cors.ts";
 import { badRequest, forbidden, notFound, serverError } from "../_shared/errors.ts";
 import { withLogging } from "../_shared/logger.ts";
 import { requireOwnerOrManagerCtx, verifyAuth, verifyBusinessMember } from "../_shared/auth.ts";
-
-function json(data: unknown, status = 200): Response {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: { ...corsHeaders, "Content-Type": "application/json" },
-  });
-}
 
 const VALID_CATEGORIES = ["tax", "rent", "utilities", "bank_loan", "supplier", "equipment", "other"];
 const VALID_STATUSES   = ["active", "paid_off", "disputed", "restructured"];
@@ -66,7 +59,7 @@ Deno.serve(withLogging("debts", async (req: Request) => {
           .order("payment_date", { ascending: false });
 
         if (error) return serverError(error.message);
-        return json({ payments: payments ?? [] });
+        return jsonCors(req, { payments: payments ?? [] });
       }
 
       if (!businessId) return badRequest("business_id is required");
@@ -108,7 +101,7 @@ Deno.serve(withLogging("debts", async (req: Request) => {
           if (row.due_date && String(row.due_date) < today) overdue_count++;
         }
 
-        return json({
+        return jsonCors(req, {
           total_owed,
           monthly_minimum_total,
           overdue_count,
@@ -140,7 +133,7 @@ Deno.serve(withLogging("debts", async (req: Request) => {
         return (PRIORITY_ORDER[ar.priority as string] ?? 2) - (PRIORITY_ORDER[br.priority as string] ?? 2);
       });
 
-      return json({ debts: sorted });
+      return jsonCors(req, { debts: sorted });
     }
 
     // ── POST ─────────────────────────────────────────────────────────────────
@@ -192,7 +185,7 @@ Deno.serve(withLogging("debts", async (req: Request) => {
           .single();
 
         if (refetchErr) return serverError(refetchErr.message);
-        return json({ debt: updated, payment: { debt_id: debtId, amount, payment_date: payDate, notes } });
+        return jsonCors(req, { debt: updated, payment: { debt_id: debtId, amount, payment_date: payDate, notes } });
       }
 
       // Create debt
@@ -239,7 +232,7 @@ Deno.serve(withLogging("debts", async (req: Request) => {
         .single();
 
       if (createErr) return serverError(createErr.message);
-      return json(created, 201);
+      return jsonCors(req, created, 201);
     }
 
     // ── PATCH ─────────────────────────────────────────────────────────────────
@@ -295,7 +288,7 @@ Deno.serve(withLogging("debts", async (req: Request) => {
         .single();
 
       if (upErr) return serverError(upErr.message);
-      return json(updated);
+      return jsonCors(req, updated);
     }
 
     // ── DELETE ────────────────────────────────────────────────────────────────
@@ -321,10 +314,10 @@ Deno.serve(withLogging("debts", async (req: Request) => {
         .eq("id", id);
 
       if (delErr) return serverError(delErr.message);
-      return json({ success: true });
+      return jsonCors(req, { success: true });
     }
 
-    return new Response("Method not allowed", { status: 405, headers: corsHeaders });
+    return new Response("Method not allowed", { status: 405, headers: corsHeadersFor(req) });
 
   } catch (err) {
     console.error("[debts]", err);

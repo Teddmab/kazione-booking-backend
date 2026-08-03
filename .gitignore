@@ -46,3 +46,6 @@ supabase/functions/dep_analysis_cache_v2-*
 supabase/functions/fast_check_cache_v2
 supabase/functions/node_analysis_cache_v2
 supabase/functions/v8_code_cache_v2
+
+# ── Local dev router (edge runtime only, not for version control) ─────────────
+supabase/functions/_router/

@@ -52,7 +52,7 @@ Deno.serve(withLogging("staff", async (req: Request) => {
       try {
         user = await verifyAuth(req);
       } catch (e) {
-        return e instanceof Response ? e : forbidden("Authentication required");
+        return e instanceof Response ? e : forbidden(req, "Authentication required");
       }
 
       let businessId = url.searchParams.get("business_id") ?? undefined;
@@ -62,13 +62,26 @@ Deno.serve(withLogging("staff", async (req: Request) => {
         } | null;
         businessId = body?.business_id;
       }
-      if (!businessId) return badRequest("business_id is required");
+      // Auto-resolve business_id from the user's active membership when not provided
+      if (!businessId) {
+        const { data: membership, error: memErr } = await supabaseAdmin
+          .from("business_members")
+          .select("business_id")
+          .eq("user_id", user.id)
+          .eq("is_active", true)
+          .limit(1)
+          .maybeSingle();
+        if (memErr || !membership) {
+          return badRequest(req, "business_id is required");
+        }
+        businessId = membership.business_id as string;
+      }
 
       let member: { role: string; memberId: string };
       try {
         member = await verifyBusinessMember(user.id, businessId);
       } catch (e) {
-        return e instanceof Response ? e : forbidden("Not a member of this business");
+        return e instanceof Response ? e : forbidden(req, "Not a member of this business");
       }
 
       const { data: staffRow, error: staffErr } = await supabaseAdmin
@@ -91,9 +104,9 @@ Deno.serve(withLogging("staff", async (req: Request) => {
         .eq("business_member_id", member.memberId)
         .maybeSingle();
 
-      if (staffErr) return serverError(staffErr.message);
+      if (staffErr) return serverError(req, staffErr.message);
       if (!staffRow) {
-        return notFound("No staff profile linked to this membership");
+        return notFound(req, "No staff profile linked to this membership");
       }
 
       const { data: userProfile } = await supabaseAdmin

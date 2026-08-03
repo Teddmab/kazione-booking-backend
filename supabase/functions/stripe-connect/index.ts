@@ -1,16 +1,9 @@
 import { stripe } from "../_shared/stripe.ts";
 import { supabaseAdmin } from "../_shared/supabaseAdmin.ts";
-import { corsHeaders, handleCors } from "../_shared/cors.ts";
+import { handleCors, jsonCors } from "../_shared/cors.ts";
 import { badRequest, serverError } from "../_shared/errors.ts";
 import { withLogging } from "../_shared/logger.ts";
 import { requireOwnerOrManagerCtx } from "../_shared/auth.ts";
-
-function json(data: unknown, status = 200): Response {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: { ...corsHeaders, "Content-Type": "application/json" },
-  });
-}
 
 /**
  * POST /stripe-connect
@@ -30,7 +23,7 @@ Deno.serve(
     if (corsResp) return corsResp;
 
     if (req.method !== "POST") {
-      return json({ error: { code: "METHOD_NOT_ALLOWED", message: "Only POST is allowed" } }, 405);
+      return jsonCors(req, { error: { code: "METHOD_NOT_ALLOWED", message: "Only POST is allowed" } }, 405);
     }
 
     try {
@@ -73,24 +66,24 @@ Deno.serve(
 
       switch (body.action) {
         case "create-account":
-          return handleCreateAccount(businessId, existingAccount, body);
+          return handleCreateAccount(req, businessId, existingAccount, body);
 
         case "get-onboarding-link":
           if (!existingAccount?.account_id) {
             return badRequest("No Stripe account found for this business");
           }
-          return handleGetOnboardingLink(existingAccount.account_id as string, body);
+          return handleGetOnboardingLink(req, existingAccount.account_id as string, body);
 
         case "get-dashboard-link":
           if (!existingAccount?.account_id) {
             return badRequest("No Stripe account found for this business");
           }
-          return handleGetDashboardLink(existingAccount.account_id as string);
+          return handleGetDashboardLink(req, existingAccount.account_id as string);
 
         case "get-status":
           if (!existingAccount?.account_id) {
             // No account yet, return disconnected status
-            return json({
+            return jsonCors(req, {
               connected: false,
               account_id: null,
               charges_enabled: false,
@@ -98,19 +91,19 @@ Deno.serve(
               details_submitted: false,
             });
           }
-          return handleGetStatus(existingAccount.account_id as string, businessId);
+          return handleGetStatus(req, existingAccount.account_id as string, businessId);
 
         case "get-balance":
           if (!existingAccount?.account_id) {
             return badRequest("No Stripe account found for this business");
           }
-          return handleGetBalance(existingAccount.account_id as string);
+          return handleGetBalance(req, existingAccount.account_id as string);
 
         case "disconnect":
           if (!existingAccount?.account_id) {
             return badRequest("No Stripe account found for this business");
           }
-          return handleDisconnect(businessId, existingAccount.id as string);
+          return handleDisconnect(req, businessId, existingAccount.id as string);
 
         default:
           return badRequest(`Unknown action: ${body.action}`);
@@ -128,6 +121,7 @@ Deno.serve(
 // ────────────────────────────────────────────────────────────────────────────
 
 async function handleCreateAccount(
+  req: Request,
   businessId: string,
   existingAccount: { id: string; account_id: string | null; connected: boolean } | null,
   body: {
@@ -196,7 +190,7 @@ async function handleCreateAccount(
       refresh_url: body.refresh_url || "https://kazionebooking.com",
     });
 
-    return json({
+    return jsonCors(req, {
       account_id: account.id,
       onboarding_url: onboardingLink.url,
     });
@@ -207,6 +201,7 @@ async function handleCreateAccount(
 }
 
 async function handleGetOnboardingLink(
+  req: Request,
   accountId: string,
   body: {
     return_url?: string;
@@ -221,7 +216,7 @@ async function handleGetOnboardingLink(
       refresh_url: body.refresh_url || "https://kazionebooking.com",
     });
 
-    return json({
+    return jsonCors(req, {
       onboarding_url: onboardingLink.url,
     });
   } catch (err) {
@@ -230,11 +225,11 @@ async function handleGetOnboardingLink(
   }
 }
 
-async function handleGetDashboardLink(accountId: string): Promise<Response> {
+async function handleGetDashboardLink(req: Request, accountId: string): Promise<Response> {
   try {
     const loginLink = await stripe.accounts.createLoginLink(accountId);
 
-    return json({
+    return jsonCors(req, {
       dashboard_url: loginLink.url,
     });
   } catch (err) {
@@ -244,6 +239,7 @@ async function handleGetDashboardLink(accountId: string): Promise<Response> {
 }
 
 async function handleGetStatus(
+  req: Request,
   accountId: string,
   _businessId: string,
 ): Promise<Response> {
@@ -264,7 +260,7 @@ async function handleGetStatus(
       // Don't fail the request, just log it
     }
 
-    return json({
+    return jsonCors(req, {
       connected: account.charges_enabled && account.payouts_enabled,
       account_id: accountId,
       charges_enabled: account.charges_enabled,
@@ -278,11 +274,11 @@ async function handleGetStatus(
   }
 }
 
-async function handleGetBalance(accountId: string): Promise<Response> {
+async function handleGetBalance(req: Request, accountId: string): Promise<Response> {
   try {
     const balance = await stripe.balance.retrieve({ stripeAccount: accountId });
 
-    return json({
+    return jsonCors(req, {
       available: balance.available,
       pending: balance.pending,
     });
@@ -293,6 +289,7 @@ async function handleGetBalance(accountId: string): Promise<Response> {
 }
 
 async function handleDisconnect(
+  req: Request,
   _businessId: string,
   accountRecordId: string,
 ): Promise<Response> {
@@ -308,7 +305,7 @@ async function handleDisconnect(
       return serverError("Failed to disconnect account");
     }
 
-    return json({
+    return jsonCors(req, {
       connected: false,
     });
   } catch (err) {

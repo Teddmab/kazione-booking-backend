@@ -1,5 +1,5 @@
 import { supabaseAdmin } from "../_shared/supabaseAdmin.ts";
-import { corsHeaders, handleCors } from "../_shared/cors.ts";
+import { corsHeadersFor, handleCors } from "../_shared/cors.ts";
 import { badRequest, serverError } from "../_shared/errors.ts";
 import { requireOwnerOrManagerCtx } from "../_shared/auth.ts";
 import { withLogging } from "../_shared/logger.ts";
@@ -493,7 +493,7 @@ async function handleGet(req: Request): Promise<Response> {
       return new Response(csv, {
         status: 200,
         headers: {
-          ...corsHeaders,
+          ...corsHeadersFor(req),
           "Content-Type": "text/csv",
           "Content-Disposition": `attachment; filename="${type}-${from}-${to}.csv"`,
         },
@@ -507,7 +507,7 @@ async function handleGet(req: Request): Promise<Response> {
           meta: { type, from, to, count: result.rows.length },
         },
       }),
-      { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      { status: 200, headers: { ...corsHeadersFor(req), "Content-Type": "application/json" } },
     );
   } catch (err) {
     if (err instanceof Response) return err;
@@ -610,7 +610,7 @@ Deno.serve(withLogging("export-report", async (req: Request) => {
       }),
       {
         status: 200,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
+        headers: { ...corsHeadersFor(req), "Content-Type": "application/json" },
       },
     );
   } catch (err) {

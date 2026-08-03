@@ -1,5 +1,5 @@
 import { supabaseAdmin } from "../_shared/supabaseAdmin.ts";
-import { corsHeaders, handleCors } from "../_shared/cors.ts";
+import { corsHeadersFor, handleCors } from "../_shared/cors.ts";
 import { badRequest, unauthorized, forbidden, notFound, serverError } from "../_shared/errors.ts";
 import { verifyAuth } from "../_shared/auth.ts";
 import { withLogging } from "../_shared/logger.ts";
@@ -380,7 +380,7 @@ Deno.serve(withLogging("cancel-booking", async (req: Request) => {
       }),
       {
         status: 200,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
+        headers: { ...corsHeadersFor(req), "Content-Type": "application/json" },
       },
     );
   } catch (err) {

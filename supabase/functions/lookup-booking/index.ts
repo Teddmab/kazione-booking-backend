@@ -1,5 +1,5 @@
 import { supabaseAdmin } from "../_shared/supabaseAdmin.ts";
-import { corsHeaders, handleCors } from "../_shared/cors.ts";
+import { corsHeadersFor, handleCors } from "../_shared/cors.ts";
 import { badRequest, notFound, serverError } from "../_shared/errors.ts";
 import { withLogging } from "../_shared/logger.ts";
 
@@ -262,7 +262,7 @@ Deno.serve(withLogging("lookup-booking", async (req: Request) => {
 
     return new Response(JSON.stringify(response), {
       status: 200,
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
+      headers: { ...corsHeadersFor(req), "Content-Type": "application/json" },
     });
   } catch (err) {
     if (err instanceof Response) return err;

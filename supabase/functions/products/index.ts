@@ -1,15 +1,8 @@
 import { supabaseAdmin } from "../_shared/supabaseAdmin.ts";
-import { corsHeaders, handleCors } from "../_shared/cors.ts";
+import { handleCors, jsonCors } from "../_shared/cors.ts";
 import { badRequest, notFound, serverError } from "../_shared/errors.ts";
 import { withLogging } from "../_shared/logger.ts";
 import { requireOwnerOrManagerCtx, verifyAuth, verifyBusinessMember } from "../_shared/auth.ts";
-
-function json(data: unknown, status = 200): Response {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: { ...corsHeaders, "Content-Type": "application/json" },
-  });
-}
 
 /**
  * /products — product catalog CRUD + stock management + service-product usage
@@ -62,7 +55,7 @@ Deno.serve(withLogging("products", async (req: Request) => {
           .eq("service_id", serviceId);
 
         if (error) return serverError(error.message);
-        return json({ items: data ?? [] });
+        return jsonCors(req, { items: data ?? [] });
       }
 
       // GET /products?id=
@@ -90,7 +83,7 @@ Deno.serve(withLogging("products", async (req: Request) => {
           .order("created_at", { ascending: false })
           .limit(20);
 
-        return json({ ...product, movements: movements ?? [] });
+        return jsonCors(req, { ...product, movements: movements ?? [] });
       }
 
       // GET /products?business_id=
@@ -129,7 +122,7 @@ Deno.serve(withLogging("products", async (req: Request) => {
         };
       });
 
-      return json({ products, total: count ?? 0 });
+      return jsonCors(req, { products, total: count ?? 0 });
     }
 
     // ── POST ───────────────────────────────────────────────────────────────
@@ -152,7 +145,7 @@ Deno.serve(withLogging("products", async (req: Request) => {
           .single();
 
         if (error) return serverError(error.message);
-        return json(data, 201);
+        return jsonCors(req, data, 201);
       }
 
       // POST /products — create product
@@ -177,7 +170,7 @@ Deno.serve(withLogging("products", async (req: Request) => {
         .single();
 
       if (error) return serverError(error.message);
-      return json(data, 201);
+      return jsonCors(req, data, 201);
     }
 
     // ── PATCH ──────────────────────────────────────────────────────────────
@@ -228,7 +221,7 @@ Deno.serve(withLogging("products", async (req: Request) => {
           .single();
 
         if (updErr) return serverError(updErr.message);
-        return json(updated);
+        return jsonCors(req, updated);
       }
 
       // PATCH /products?action=deactivate&id=
@@ -249,7 +242,7 @@ Deno.serve(withLogging("products", async (req: Request) => {
           .eq("id", id);
 
         if (error) return serverError(error.message);
-        return json({ ok: true });
+        return jsonCors(req, { ok: true });
       }
 
       // PATCH /products?id= — general update
@@ -278,7 +271,7 @@ Deno.serve(withLogging("products", async (req: Request) => {
         .single();
 
       if (error) return serverError(error.message);
-      return json(data);
+      return jsonCors(req, data);
     }
 
     // ── DELETE ─────────────────────────────────────────────────────────────
@@ -304,7 +297,7 @@ Deno.serve(withLogging("products", async (req: Request) => {
           .eq("id", id);
 
         if (error) return serverError(error.message);
-        return json({ ok: true });
+        return jsonCors(req, { ok: true });
       }
 
       return badRequest("Method not allowed");

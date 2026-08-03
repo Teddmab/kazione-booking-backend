@@ -1,15 +1,8 @@
 import { supabaseAdmin } from "../_shared/supabaseAdmin.ts";
-import { corsHeaders, handleCors } from "../_shared/cors.ts";
+import { handleCors, jsonCors } from "../_shared/cors.ts";
 import { badRequest, notFound, serverError } from "../_shared/errors.ts";
 import { verifyAuth, requireOwnerOrManagerCtx } from "../_shared/auth.ts";
 import { withLogging } from "../_shared/logger.ts";
-
-function json(data: unknown, status = 200): Response {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: { ...corsHeaders, "Content-Type": "application/json" },
-  });
-}
 
 // ---------------------------------------------------------------------------
 // GDPR — Data Export + Erasure
@@ -110,7 +103,7 @@ Deno.serve(withLogging("gdpr", async (req: Request) => {
 
       const primaryClient = clients[0] as Record<string, unknown>;
 
-      return json({
+      return jsonCors(req, {
         exported_at: new Date().toISOString(),
         profile: {
           first_name: primaryClient.first_name,
@@ -193,7 +186,7 @@ Deno.serve(withLogging("gdpr", async (req: Request) => {
 
       console.log(`[gdpr] DELETION complete — user_id=${user.id}`);
 
-      return json({
+      return jsonCors(req, {
         deleted: true,
         message: "Your account and all associated data have been permanently deleted.",
       });
@@ -241,7 +234,7 @@ Deno.serve(withLogging("gdpr", async (req: Request) => {
 
       if (anonErr) return serverError(anonErr.message);
 
-      return json({ success: true, anonymised_at: now });
+      return jsonCors(req, { success: true, anonymised_at: now });
     }
 
     return badRequest(`Method ${req.method}${action ? ` with action=${action}` : ""} is not supported`);

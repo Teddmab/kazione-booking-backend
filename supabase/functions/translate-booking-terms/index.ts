@@ -10,7 +10,7 @@
  */
 
 import { supabaseAdmin } from "../_shared/supabaseAdmin.ts";
-import { corsHeaders, handleCors } from "../_shared/cors.ts";
+import { corsHeadersFor, handleCors } from "../_shared/cors.ts";
 import { badRequest, forbidden, serverError, unauthorized } from "../_shared/errors.ts";
 import { verifyAuth } from "../_shared/auth.ts";
 import { withLogging } from "../_shared/logger.ts";
@@ -135,6 +135,6 @@ Deno.serve(withLogging("translate-booking-terms", async (req: Request) => {
 
   return new Response(JSON.stringify({ translations: results }), {
     status: 200,
-    headers: { ...corsHeaders, "Content-Type": "application/json" },
+    headers: { ...corsHeadersFor(req), "Content-Type": "application/json" },
   });
 }));

@@ -1,5 +1,5 @@
 import { supabaseAdmin } from "../_shared/supabaseAdmin.ts";
-import { corsHeaders, handleCors } from "../_shared/cors.ts";
+import { corsHeadersFor, handleCors } from "../_shared/cors.ts";
 import { badRequest, conflict, serverError } from "../_shared/errors.ts";
 import { verifyAuth } from "../_shared/auth.ts";
 import { createPaymentIntent } from "../_shared/stripe.ts";
@@ -759,7 +759,7 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
         });
       }
 
-      return jsonOk({
+      return jsonOk(req, {
         booking_reference: bookingReference,
         appointment_id: appointmentId,
         cancel_token: cancelToken,
@@ -797,7 +797,7 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
           .update({ stripe_payment_intent_id: paymentIntent.id })
           .eq("id", payment.id);
 
-        return jsonOk({
+        return jsonOk(req, {
           booking_reference: bookingReference,
           appointment_id: appointmentId,
           cancel_token: cancelToken,
@@ -837,11 +837,11 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
 // Utility
 // ---------------------------------------------------------------------------
 
-function jsonOk(body: unknown): Response {
+function jsonOk(req: Request, body: unknown): Response {
   return new Response(JSON.stringify(body), {
     status: 201,
     headers: {
-      ...corsHeaders,
+      ...corsHeadersFor(req),
       "Content-Type": "application/json",
     },
   });

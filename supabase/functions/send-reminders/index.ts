@@ -1,5 +1,5 @@
 import { supabaseAdmin } from "../_shared/supabaseAdmin.ts";
-import { corsHeaders, handleCors } from "../_shared/cors.ts";
+import { corsHeadersFor, handleCors } from "../_shared/cors.ts";
 import { badRequest, unauthorized, serverError } from "../_shared/errors.ts";
 import { requireOwnerOrManagerCtx } from "../_shared/auth.ts";
 import { withLogging } from "../_shared/logger.ts";
@@ -450,7 +450,7 @@ Deno.serve(withLogging("send-reminders", async (req: Request) => {
       console.log("send-reminders (cron) completed:", JSON.stringify(result));
       return new Response(JSON.stringify(result), {
         status: 200,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
+        headers: { ...corsHeadersFor(req), "Content-Type": "application/json" },
       });
     } catch (err) {
       console.error("send-reminders fatal error:", err);
@@ -489,7 +489,7 @@ Deno.serve(withLogging("send-reminders", async (req: Request) => {
     console.log("send-reminders (manual) completed:", JSON.stringify(result));
     return new Response(JSON.stringify(result), {
       status: 200,
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
+      headers: { ...corsHeadersFor(req), "Content-Type": "application/json" },
     });
   } catch (err) {
     console.error("send-reminders fatal error:", err);

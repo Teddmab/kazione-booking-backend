@@ -1,5 +1,5 @@
 import { supabaseAdmin } from "../_shared/supabaseAdmin.ts";
-import { corsHeaders, handleCors } from "../_shared/cors.ts";
+import { corsHeadersFor, handleCors } from "../_shared/cors.ts";
 import { badRequest, serverError } from "../_shared/errors.ts";
 import { requireOwnerOrManagerCtx } from "../_shared/auth.ts";
 import { withLogging } from "../_shared/logger.ts";
@@ -385,7 +385,7 @@ Deno.serve(withLogging("ai-finance", async (req: Request) => {
             insights: (fastCached.metadata as Record<string, unknown>).insights,
             cached: true,
           }),
-          { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+          { status: 200, headers: { ...corsHeadersFor(req), "Content-Type": "application/json" } },
         );
       }
 
@@ -405,7 +405,7 @@ Deno.serve(withLogging("ai-finance", async (req: Request) => {
 
       return new Response(
         JSON.stringify({ insights: fastInsights, cached: false }),
-        { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+        { status: 200, headers: { ...corsHeadersFor(req), "Content-Type": "application/json" } },
       );
     }
 
@@ -438,7 +438,7 @@ Deno.serve(withLogging("ai-finance", async (req: Request) => {
         }),
         {
           status: 200,
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
+          headers: { ...corsHeadersFor(req), "Content-Type": "application/json" },
         },
       );
     }
@@ -466,7 +466,7 @@ Deno.serve(withLogging("ai-finance", async (req: Request) => {
       JSON.stringify({ insights, cached: false }),
       {
         status: 200,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
+        headers: { ...corsHeadersFor(req), "Content-Type": "application/json" },
       },
     );
   } catch (err) {

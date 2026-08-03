@@ -1,15 +1,8 @@
 import { supabaseAdmin } from "../_shared/supabaseAdmin.ts";
-import { corsHeaders, handleCors } from "../_shared/cors.ts";
+import { handleCors, jsonCors } from "../_shared/cors.ts";
 import { badRequest, notFound, serverError } from "../_shared/errors.ts";
 import { withLogging } from "../_shared/logger.ts";
 import { requireOwnerOrManagerCtx, verifyAuth, verifyBusinessMember } from "../_shared/auth.ts";
-
-function json(data: unknown, status = 200): Response {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: { ...corsHeaders, "Content-Type": "application/json" },
-  });
-}
 
 /**
  * /suppliers — suppliers CRUD + supplier order management
@@ -68,7 +61,7 @@ Deno.serve(withLogging("suppliers", async (req: Request) => {
 
         const { data, error, count } = await query;
         if (error) return serverError(error.message);
-        return json({ orders: data ?? [], total: count ?? 0 });
+        return jsonCors(req, { orders: data ?? [], total: count ?? 0 });
       }
 
       if (id) {
@@ -107,7 +100,7 @@ Deno.serve(withLogging("suppliers", async (req: Request) => {
           .map(([month, amount]) => ({ month, amount }))
           .sort((a, b) => a.month.localeCompare(b.month));
 
-        return json({ ...data, recent_expenses: expRows.data ?? [], open_orders: orderRows.data ?? [], monthly_spend });
+        return jsonCors(req, { ...data, recent_expenses: expRows.data ?? [], open_orders: orderRows.data ?? [], monthly_spend });
       }
 
       const businessId = url.searchParams.get("business_id");
@@ -151,7 +144,7 @@ Deno.serve(withLogging("suppliers", async (req: Request) => {
         return { ...supplier, total_spent, open_orders };
       });
 
-      return json({ suppliers, total: count ?? 0 });
+      return jsonCors(req, { suppliers, total: count ?? 0 });
     }
 
     // ── POST ───────────────────────────────────────────────────────────────
@@ -202,7 +195,7 @@ Deno.serve(withLogging("suppliers", async (req: Request) => {
           .single();
 
         if (fetchErr) return serverError(fetchErr.message);
-        return json(full, 201);
+        return jsonCors(req, full, 201);
       }
 
       // Create supplier
@@ -217,7 +210,7 @@ Deno.serve(withLogging("suppliers", async (req: Request) => {
         .single();
 
       if (error) return serverError(error.message);
-      return json(data, 201);
+      return jsonCors(req, data, 201);
     }
 
     // ── PATCH ──────────────────────────────────────────────────────────────
@@ -344,7 +337,7 @@ Deno.serve(withLogging("suppliers", async (req: Request) => {
           }
         }
 
-        return json(data);
+        return jsonCors(req, data);
       }
 
       if (action === "deactivate") {
@@ -359,7 +352,7 @@ Deno.serve(withLogging("suppliers", async (req: Request) => {
           .eq("id", id);
 
         if (error) return serverError(error.message);
-        return json({ ok: true });
+        return jsonCors(req, { ok: true });
       }
 
       // General update
@@ -378,7 +371,7 @@ Deno.serve(withLogging("suppliers", async (req: Request) => {
         .single();
 
       if (error) return serverError(error.message);
-      return json(data);
+      return jsonCors(req, data);
     }
 
     return badRequest("Method not allowed");

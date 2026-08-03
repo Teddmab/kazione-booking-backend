@@ -1,15 +1,8 @@
 import { supabaseAdmin } from "../_shared/supabaseAdmin.ts";
-import { corsHeaders, handleCors } from "../_shared/cors.ts";
+import { handleCors, jsonCors } from "../_shared/cors.ts";
 import { badRequest, serverError } from "../_shared/errors.ts";
 import { withLogging } from "../_shared/logger.ts";
 import { requireOwnerOrManagerCtx } from "../_shared/auth.ts";
-
-function json(data: unknown, status = 200): Response {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: { ...corsHeaders, "Content-Type": "application/json" },
-  });
-}
 
 /**
  * POST /storefront-upload
@@ -31,7 +24,7 @@ Deno.serve(withLogging("storefront-upload", async (req: Request) => {
   if (corsResp) return corsResp;
 
   if (req.method !== "POST") {
-    return json({ error: { code: "METHOD_NOT_ALLOWED", message: "Only POST is allowed" } }, 405);
+    return jsonCors(req, { error: { code: "METHOD_NOT_ALLOWED", message: "Only POST is allowed" } }, 405);
   }
 
   try {
@@ -84,7 +77,7 @@ Deno.serve(withLogging("storefront-upload", async (req: Request) => {
     const rewrite = (u: string) =>
       u.replace(/^https?:\/\/[^/]+(?=\/storage\/)/, publicBase);
 
-    return json({
+    return jsonCors(req, {
       upload_url: rewrite(data.signedUrl),
       public_url: rewrite(urlData.publicUrl),
       path: storagePath,

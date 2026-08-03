@@ -1,5 +1,5 @@
 import { supabaseAdmin } from "../_shared/supabaseAdmin.ts";
-import { corsHeaders, handleCors } from "../_shared/cors.ts";
+import { corsHeadersFor, handleCors, jsonCors } from "../_shared/cors.ts";
 import { badRequest, forbidden, notFound, serverError } from "../_shared/errors.ts";
 import { withLogging } from "../_shared/logger.ts";
 import { requireOwnerOrManagerCtx, verifyAuth, verifyBusinessMember } from "../_shared/auth.ts";
@@ -16,13 +16,6 @@ import {
   sendEmail,
 } from "../_shared/resend.ts";
 import { generateIcs, icsToBase64, googleCalendarUrl } from "../_shared/ics.ts";
-
-function json(data: unknown, status = 200): Response {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: { ...corsHeaders, "Content-Type": "application/json" },
-  });
-}
 
 const APPT_SELECT = `
   *,
@@ -115,7 +108,7 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
           .select("id")
           .eq("user_id", user.id);
 
-        if (!clients?.length) return json([]);
+        if (!clients?.length) return jsonCors(req, []);
         const clientIds = (clients as { id: string }[]).map((c) => c.id);
 
         const { data, error } = await supabaseAdmin
@@ -126,7 +119,7 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
           .order("starts_at", { ascending: false });
 
         if (error) return serverError(error.message);
-        return json((data ?? []).map(normalizePayment));
+        return jsonCors(req, (data ?? []).map(normalizePayment));
       }
 
       // Single appointment lookup by id (no business_id param required).
@@ -163,7 +156,7 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
           .eq("appointment_id", id)
           .order("created_at", { ascending: true });
 
-        return json({ ...normalizePayment(data), status_log: statusLog ?? [] });
+        return jsonCors(req, { ...normalizePayment(data), status_log: statusLog ?? [] });
       }
 
       const businessId = url.searchParams.get("business_id");
@@ -185,7 +178,7 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
         if (memberErr || !memberRow) {
           return new Response(
             JSON.stringify({ error: { code: "FORBIDDEN", message: "Not a member of this business" } }),
-            { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+            { status: 403, headers: { ...corsHeadersFor(req), "Content-Type": "application/json" } },
           );
         }
         const callerRole = (memberRow as { id: string; role: string }).role;
@@ -208,7 +201,7 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
           p_business_id: businessId,
         });
         if (error) return serverError(error.message);
-        return json(data);
+        return jsonCors(req, data);
       }
 
       if (action === "calendar") {
@@ -224,7 +217,7 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
           p_staff_id: staffId ?? null,
         });
         if (error) return serverError(error.message);
-        return json(data ?? []);
+        return jsonCors(req, data ?? []);
       }
 
       if (action === "staff-summary") {
@@ -316,7 +309,7 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
         });
 
         rows.sort((a, b) => a.display_name.localeCompare(b.display_name));
-        return json(rows);
+        return jsonCors(req, rows);
       }
 
       // Paginated list
@@ -383,7 +376,7 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
         return { ...normalized, commission_earned: commissionEarned };
       });
 
-      return json({ appointments, total: count ?? 0 });
+      return jsonCors(req, { appointments, total: count ?? 0 });
     }
 
     // ── POST ───────────────────────────────────────────────────────────────
@@ -531,7 +524,7 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
         }
       }
 
-      return json({ ...appointment, payment: null }, 201);
+      return jsonCors(req, { ...appointment, payment: null }, 201);
     }
 
     // ── PATCH ?action=assign-staff ──────────────────────────────────────────
@@ -596,7 +589,7 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
         } catch (e) { console.warn("assign-staff offer email error:", e); }
       })();
 
-      return json(normalizePayment(updated as Record<string, unknown>));
+      return jsonCors(req, normalizePayment(updated as Record<string, unknown>));
     }
 
     // ── PATCH ?action=respond-offer ────────────────────────────────────────────
@@ -715,7 +708,7 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
         } catch (e) { console.warn("respond-offer owner email error:", e); }
       })();
 
-      return json(normalizePayment(updated as Record<string, unknown>));
+      return jsonCors(req, normalizePayment(updated as Record<string, unknown>));
     }
 
     // ── PATCH ?action=reschedule ────────────────────────────────────────────
@@ -835,7 +828,7 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
         console.warn("reschedule email notification failed:", emailErr);
       }
 
-      return json(normalizePayment(updated));
+      return jsonCors(req, normalizePayment(updated));
     }
 
     // ── PATCH ──────────────────────────────────────────────────────────────
@@ -1285,7 +1278,7 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
         }
       }
 
-      return json(normalizePayment(data));
+      return jsonCors(req, normalizePayment(data));
     }
 
     // ── DELETE ?id= — soft delete (cancelled only) ─────────────────────────
@@ -1303,7 +1296,7 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
 
       const appt = existing as Record<string, unknown>;
       if (appt.status !== "cancelled") {
-        return json(
+        return jsonCors(req, 
           { error: { code: "INVALID_STATE", message: "Only cancelled appointments can be deleted" } },
           409,
         );
@@ -1318,7 +1311,7 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
         .eq("id", id);
       if (error) return serverError(error.message);
 
-      return json({ success: true });
+      return jsonCors(req, { success: true });
     }
 
     return badRequest("Method not allowed");

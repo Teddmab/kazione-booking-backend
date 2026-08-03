@@ -1,14 +1,7 @@
-import { corsHeaders, handleCors } from "../_shared/cors.ts";
+import { handleCors, jsonCors } from "../_shared/cors.ts";
 import { requireOwnerOrManagerCtx } from "../_shared/auth.ts";
 import { badRequest, serverError } from "../_shared/errors.ts";
 import { withLogging } from "../_shared/logger.ts";
-
-function json(data: unknown, status = 200): Response {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: { ...corsHeaders, "Content-Type": "application/json" },
-  });
-}
 
 // ---------------------------------------------------------------------------
 // Stub — PayPal Connect is not yet implemented.
@@ -39,7 +32,7 @@ Deno.serve(withLogging("paypal-connect", async (req: Request) => {
     const ctx = await requireOwnerOrManagerCtx(req, businessId);
     if (ctx instanceof Response) return ctx;
 
-    return json({
+    return jsonCors(req, {
       status: "coming_soon",
       connected: false,
       paypal_email: null,

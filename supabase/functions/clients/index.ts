@@ -1,15 +1,8 @@
 import { supabaseAdmin } from "../_shared/supabaseAdmin.ts";
-import { corsHeaders, handleCors } from "../_shared/cors.ts";
+import { handleCors, jsonCors } from "../_shared/cors.ts";
 import { badRequest, conflict, notFound, serverError } from "../_shared/errors.ts";
 import { withLogging } from "../_shared/logger.ts";
 import { requireOwnerOrManagerCtx, verifyAuth, verifyBusinessMember } from "../_shared/auth.ts";
-
-function json(data: unknown, status = 200): Response {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: { ...corsHeaders, "Content-Type": "application/json" },
-  });
-}
 
 /**
  * /clients — clients CRUD + bulk import
@@ -68,7 +61,7 @@ Deno.serve(withLogging("clients", async (req: Request) => {
           payment: (row.payment as unknown[])?.[0] ?? null,
         }));
 
-        return json({ ...client, recent_appointments: recentAppointments });
+        return jsonCors(req, { ...client, recent_appointments: recentAppointments });
       }
 
       const businessId = url.searchParams.get("business_id");
@@ -124,7 +117,7 @@ Deno.serve(withLogging("clients", async (req: Request) => {
         };
       });
 
-      return json({ clients, total: count ?? 0 });
+      return jsonCors(req, { clients, total: count ?? 0 });
     }
 
     // ── POST ───────────────────────────────────────────────────────────────
@@ -188,7 +181,7 @@ Deno.serve(withLogging("clients", async (req: Request) => {
           }
         }
 
-        return json({ imported, updated, skipped, errors });
+        return jsonCors(req, { imported, updated, skipped, errors });
       }
 
       // Create client
@@ -227,7 +220,7 @@ Deno.serve(withLogging("clients", async (req: Request) => {
         .single();
 
       if (error) return serverError(error.message);
-      return json(client, 201);
+      return jsonCors(req, client, 201);
     }
 
     // ── PATCH ──────────────────────────────────────────────────────────────
@@ -255,7 +248,7 @@ Deno.serve(withLogging("clients", async (req: Request) => {
         .single();
 
       if (error) return serverError(error.message);
-      return json(client);
+      return jsonCors(req, client);
     }
 
     return badRequest("Method not allowed");

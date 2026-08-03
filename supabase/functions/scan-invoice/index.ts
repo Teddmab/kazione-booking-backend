@@ -1,17 +1,10 @@
 import { supabaseAdmin } from "../_shared/supabaseAdmin.ts";
-import { corsHeaders, handleCors } from "../_shared/cors.ts";
+import { handleCors, jsonCors } from "../_shared/cors.ts";
 import { badRequest, serverError } from "../_shared/errors.ts";
 import { withLogging } from "../_shared/logger.ts";
 import { requireOwnerOrManagerCtx } from "../_shared/auth.ts";
 
 const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
-
-function json(data: unknown, status = 200): Response {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: { ...corsHeaders, "Content-Type": "application/json" },
-  });
-}
 
 interface ScannedItem {
   product_name: string;
@@ -130,7 +123,7 @@ Deno.serve(withLogging("scan-invoice", async (req: Request) => {
   if (corsResp) return corsResp;
 
   if (req.method !== "POST") {
-    return json({ error: { code: "METHOD_NOT_ALLOWED", message: "POST only" } }, 405);
+    return jsonCors(req, { error: { code: "METHOD_NOT_ALLOWED", message: "POST only" } }, 405);
   }
 
   try {
@@ -173,7 +166,7 @@ Deno.serve(withLogging("scan-invoice", async (req: Request) => {
       }
     }
 
-    return json({
+    return jsonCors(req, {
       supplier_hint: scanned.supplier_hint,
       supplier_type_hint: scanned.supplier_type_hint ?? "product",
       items: scanned.items ?? [],

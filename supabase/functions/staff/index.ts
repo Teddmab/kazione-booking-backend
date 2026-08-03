@@ -1,16 +1,9 @@
 import { supabaseAdmin } from "../_shared/supabaseAdmin.ts";
-import { corsHeaders, handleCors } from "../_shared/cors.ts";
+import { handleCors, jsonCors } from "../_shared/cors.ts";
 import { badRequest, forbidden, notFound, serverError } from "../_shared/errors.ts";
 import { requireOwnerOrManagerCtx, verifyAuth, verifyBusinessMember } from "../_shared/auth.ts";
 import { withLogging } from "../_shared/logger.ts";
 import { sendEmail, staffInviteEmail, staffServiceOfferAcceptedEmail, staffServiceOfferEmail } from "../_shared/resend.ts";
-
-function json(data: unknown, status = 200): Response {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: { ...corsHeaders, "Content-Type": "application/json" },
-  });
-}
 
 /**
  * Resolve the caller's primary owner/manager business from their JWT.
@@ -127,7 +120,7 @@ Deno.serve(withLogging("staff", async (req: Request) => {
         avatar_url: string | null;
       } | null;
 
-      return json({
+      return jsonCors(req, {
         staff_profile_id: row.id as string,
         user_id: user.id,
         first_name: profileRow?.first_name?.trim() || firstFromDisplay,
@@ -272,7 +265,7 @@ Deno.serve(withLogging("staff", async (req: Request) => {
         };
       });
 
-      return json(result);
+      return jsonCors(req, result);
     }
 
     // ── POST /staff (add staff member) ───────────────────────────────────────
@@ -363,7 +356,7 @@ Deno.serve(withLogging("staff", async (req: Request) => {
       if (staffErr) return serverError(staffErr.message);
 
       const sp = staffProfile as Record<string, unknown>;
-      return json(
+      return jsonCors(req, 
         {
           id: sp.id,
           display_name: sp.display_name,
@@ -551,7 +544,7 @@ Deno.serve(withLogging("staff", async (req: Request) => {
         })();
       }
 
-      return json({ success: true, offered_count: offeredIds.length });
+      return jsonCors(req, { success: true, offered_count: offeredIds.length });
     }
 
     // ── PATCH /staff?action=respond-service-offer (staff accepts/declines) ────────
@@ -677,7 +670,7 @@ Deno.serve(withLogging("staff", async (req: Request) => {
         })();
       }
 
-      return json({ success: true, service_id: serviceId, status: response });
+      return jsonCors(req, { success: true, service_id: serviceId, status: response });
     }
 
     // ── Self-service schedule override endpoints ──────────────────────────────
@@ -720,7 +713,7 @@ Deno.serve(withLogging("staff", async (req: Request) => {
 
       const { data: overrides, error: ovErr } = await query;
       if (ovErr) return serverError(ovErr.message);
-      return json(overrides ?? []);
+      return jsonCors(req, overrides ?? []);
     }
 
     // POST /staff?action=self-override — upsert caller's own override
@@ -780,7 +773,7 @@ Deno.serve(withLogging("staff", async (req: Request) => {
         .single();
 
       if (upsertErr) return serverError(upsertErr.message);
-      return json(upserted, 201);
+      return jsonCors(req, upserted, 201);
     }
 
     // DELETE /staff?action=self-override&date= — delete caller's own override
@@ -818,7 +811,7 @@ Deno.serve(withLogging("staff", async (req: Request) => {
         .eq("override_date", overrideDate);
 
       if (delErr) return serverError(delErr.message);
-      return json({ success: true });
+      return jsonCors(req, { success: true });
     }
 
     // ── PATCH /staff?action=update-self ──────────────────────────────────────────
@@ -865,7 +858,7 @@ Deno.serve(withLogging("staff", async (req: Request) => {
         .single();
 
       if (upErr) return serverError(upErr.message);
-      return json(updated);
+      return jsonCors(req, updated);
     }
 
     // ── GET /staff?action=services&id= (get current service assignments) ────────
@@ -896,7 +889,7 @@ Deno.serve(withLogging("staff", async (req: Request) => {
       if (svcErr) return serverError(svcErr.message);
 
       const typedRows = (rows ?? []) as Array<Record<string, unknown>>;
-      return json({
+      return jsonCors(req, {
         service_ids: typedRows.map((r) => r.service_id),
         assignments: typedRows.map((r) => ({
           service_id: r.service_id,
@@ -1009,7 +1002,7 @@ Deno.serve(withLogging("staff", async (req: Request) => {
         console.error("staff resend-invite email failed:", err);
       }
 
-      return json({ invite_sent: inviteSent, email: toEmail, email_error: emailError });
+      return jsonCors(req, { invite_sent: inviteSent, email: toEmail, email_error: emailError });
     }
 
     // ── PATCH /staff?id= (update profile / role) ──────────────────────────────
@@ -1108,7 +1101,7 @@ Deno.serve(withLogging("staff", async (req: Request) => {
         .single();
 
       if (fetchErr) return serverError(fetchErr.message);
-      return json(updated);
+      return jsonCors(req, updated);
     }
 
     // ── PUT /staff?action=schedule&id= (set working hours) ────────────────────
@@ -1187,7 +1180,7 @@ Deno.serve(withLogging("staff", async (req: Request) => {
         .select("id, day_of_week, is_working, start_time, end_time");
       if (insertErr) return serverError(insertErr.message);
 
-      return json({
+      return jsonCors(req, {
         success: true,
         schedule: (inserted ?? []).map((r: Record<string, unknown>) => ({
           day: r.day_of_week,
@@ -1232,7 +1225,7 @@ Deno.serve(withLogging("staff", async (req: Request) => {
 
       const { data: overrides, error: overridesErr } = await query;
       if (overridesErr) return serverError(overridesErr.message);
-      return json(overrides ?? []);
+      return jsonCors(req, overrides ?? []);
     }
 
     // ── POST /staff?action=override&id= ──────────────────────────────────────
@@ -1290,7 +1283,7 @@ Deno.serve(withLogging("staff", async (req: Request) => {
         .single();
 
       if (upsertErr) return serverError(upsertErr.message);
-      return json(upserted, 201);
+      return jsonCors(req, upserted, 201);
     }
 
     // ── DELETE /staff?action=override&id=&date= ───────────────────────────────
@@ -1322,7 +1315,7 @@ Deno.serve(withLogging("staff", async (req: Request) => {
         .eq("override_date", overrideDate);
 
       if (delErr) return serverError(delErr.message);
-      return json({ success: true });
+      return jsonCors(req, { success: true });
     }
 
     // ── DELETE /staff?action=cancel-invite&id= ───────────────────────────────
@@ -1365,7 +1358,7 @@ Deno.serve(withLogging("staff", async (req: Request) => {
           .eq("id", memberId);
       }
 
-      return json({ success: true });
+      return jsonCors(req, { success: true });
     }
 
     // ── DELETE /staff?action=force-delete&id= ────────────────────────────────
@@ -1403,7 +1396,7 @@ Deno.serve(withLogging("staff", async (req: Request) => {
 
       if (apptErr) return serverError(apptErr.message);
       if ((count ?? 0) > 0) {
-        return json(
+        return jsonCors(req, 
           { error: { code: "HAS_FUTURE_APPOINTMENTS", message: `Cannot delete: ${count} future appointment(s) still assigned to this staff member. Reassign them first.` } },
           409,
         );
@@ -1424,7 +1417,7 @@ Deno.serve(withLogging("staff", async (req: Request) => {
           .eq("id", memberId);
       }
 
-      return json({ success: true });
+      return jsonCors(req, { success: true });
     }
 
     // ── DELETE /staff?id= (soft deactivate) ──────────────────────────────────
@@ -1463,7 +1456,7 @@ Deno.serve(withLogging("staff", async (req: Request) => {
           .eq("id", memberId);
       }
 
-      return json({ success: true });
+      return jsonCors(req, { success: true });
     }
 
     // ── GET /staff?action=my-performance&business_id=&from=&to= ─────────────
@@ -1557,7 +1550,7 @@ Deno.serve(withLogging("staff", async (req: Request) => {
       );
       const referralRevenue = refConverted.reduce((s, a) => s + Number(a.price ?? 0), 0);
 
-      return json({
+      return jsonCors(req, {
         performance: {
           staff_profile_id: myStaffId,
           display_name: sp.display_name as string,
@@ -1618,7 +1611,7 @@ Deno.serve(withLogging("staff", async (req: Request) => {
 
       if (linkErr) return serverError(linkErr.message);
 
-      return json({
+      return jsonCors(req, {
         url: (linkData as Record<string, unknown>).properties
           ? ((linkData as Record<string, unknown>).properties as Record<string, unknown>).action_link
           : null,

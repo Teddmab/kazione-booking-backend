@@ -98,7 +98,7 @@ Deno.serve(withLogging("offers", async (req: Request) => {
         .from("offer_redemptions")
         .select(`
           *,
-          business_offers ( id, type, title, description, sessions_total, price, currency_code ),
+          business_offers ( id, type, title, description, sessions_total, price, currency_code, discount_type, discount_value ),
           clients ( id, first_name, last_name, email, phone )
         `)
         .eq("business_id", businessId)

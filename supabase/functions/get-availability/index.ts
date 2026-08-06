@@ -36,6 +36,33 @@ interface AvailabilityResponse {
   reason?: string;
 }
 
+interface FallbackStaffRow {
+  id: string;
+  display_name: string;
+  avatar_url?: string | null;
+  custom_price?: number | string | null;
+}
+
+interface FallbackWorkingHourRow {
+  staff_profile_id: string;
+  start_time: string | null;
+  end_time: string | null;
+  is_working: boolean;
+}
+
+interface FallbackAppointmentRow {
+  staff_profile_id?: string | null;
+  starts_at: string;
+  ends_at: string;
+  status: string;
+}
+
+interface FallbackTimeOffRow {
+  staff_profile_id: string;
+  starts_at: string;
+  ends_at: string;
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -165,7 +192,6 @@ Deno.serve(withLogging("get-availability", async (req: Request) => {
         .select("custom_price")
         .eq("staff_profile_id", staffId)
         .eq("service_id", serviceId!)
-        .eq("status", "accepted")
         .maybeSingle();
       if (staffSvcErr) throw staffSvcErr;
 
@@ -174,63 +200,128 @@ Deno.serve(withLogging("get-availability", async (req: Request) => {
       }
     }
 
-    // 3. Call get_available_slots RPC
-    const { data: rawSlots, error: rpcErr } = await supabaseAdmin.rpc(
-      "get_available_slots",
-      {
-        p_business_id: businessId!,
-        p_service_id: serviceId!,
-        p_staff_id: staffId,
-        p_date: dateStr!,
-      },
-    );
+    // 3. Try the RPC first; fall back to a direct working-hours-based implementation
+    // if the database function is missing or errors on this environment.
+    let slots: Slot[] = [];
+    try {
+      const { data: rawSlots, error: rpcErr } = await supabaseAdmin.rpc(
+        "get_available_slots",
+        {
+          p_business_id: businessId!,
+          p_service_id: serviceId!,
+          p_staff_id: staffId,
+          p_date: dateStr!,
+        },
+      );
 
-    if (rpcErr) throw rpcErr;
+      if (rpcErr) throw rpcErr;
 
-    // Fetch avatar URLs for all returned staff
-    const staffIds = [
-      ...new Set(
-        (rawSlots ?? []).map(
-          (s: { staff_profile_id: string }) => s.staff_profile_id,
+      // Fetch avatar URLs for all returned staff
+      const staffIds = [
+        ...new Set(
+          (rawSlots ?? []).map(
+            (s: { staff_profile_id: string }) => s.staff_profile_id,
+          ),
         ),
-      ),
-    ] as string[];
+      ] as string[];
 
-    let avatarMap: Record<string, string | null> = {};
-    if (staffIds.length > 0) {
-      const { data: profiles, error: profilesErr } = await supabaseAdmin
-        .from("staff_profiles")
-        .select("id, avatar_url")
-        .in("id", staffIds);
-      if (profilesErr) throw profilesErr;
+      let avatarMap: Record<string, string | null> = {};
+      if (staffIds.length > 0) {
+        const { data: profiles, error: profilesErr } = await supabaseAdmin
+          .from("staff_profiles")
+          .select("id, avatar_url")
+          .in("id", staffIds);
+        if (profilesErr) throw profilesErr;
 
-      if (profiles) {
-        avatarMap = Object.fromEntries(
-          profiles.map((p: { id: string; avatar_url: string | null }) => [
-            p.id,
-            p.avatar_url,
-          ]),
-        );
+        if (profiles) {
+          avatarMap = Object.fromEntries(
+            profiles.map((p: { id: string; avatar_url: string | null }) => [
+              p.id,
+              p.avatar_url,
+            ]),
+          );
+        }
       }
-    }
 
-    // 5. Group by slot_time
-    const hideNames = settings?.hide_staff_names === true;
-    const slotMap = new Map<string, SlotStaff[]>();
-    for (const row of rawSlots ?? []) {
-      const time = (row.slot_time as string).slice(0, 5); // "HH:MM"
-      if (!slotMap.has(time)) slotMap.set(time, []);
-      slotMap.get(time)!.push({
-        id: row.staff_profile_id,
-        name: hideNames ? "Professional" : row.staff_name,
-        avatarUrl: hideNames ? null : (avatarMap[row.staff_profile_id] ?? null),
-        price: +(row.custom_price ?? service.price),
-      });
-    }
+      // 5. Group by slot_time
+      const hideNames = settings?.hide_staff_names === true;
+      const slotMap = new Map<string, SlotStaff[]>();
+      for (const row of rawSlots ?? []) {
+        const time = (row.slot_time as string).slice(0, 5); // "HH:MM"
+        if (!slotMap.has(time)) slotMap.set(time, []);
+        slotMap.get(time)!.push({
+          id: row.staff_profile_id,
+          name: hideNames ? "Professional" : row.staff_name,
+          avatarUrl: hideNames ? null : (avatarMap[row.staff_profile_id] ?? null),
+          price: +(row.custom_price ?? service.price),
+        });
+      }
 
-    const slots: Slot[] = Array.from(slotMap.entries())
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([time, staff]) => ({ time, staff }));
+      slots = Array.from(slotMap.entries())
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([time, staff]) => ({ time, staff }));
+    } catch (rpcErr) {
+      console.warn("get_available_slots RPC failed, using fallback availability generation", rpcErr);
+      const dayOfWeek = requestedDate.getUTCDay();
+      const { data: staffProfiles, error: staffProfilesErr } = await supabaseAdmin
+        .from("staff_profiles")
+        .select("id, display_name, avatar_url")
+        .eq("business_id", businessId!)
+        .eq("is_active", true);
+      if (staffProfilesErr) throw staffProfilesErr;
+
+      const { data: staffServices, error: staffServicesErr } = await supabaseAdmin
+        .from("staff_services")
+        .select("staff_profile_id, custom_price")
+        .eq("service_id", serviceId!);
+      if (staffServicesErr) throw staffServicesErr;
+
+      const { data: workingHoursRows, error: workingHoursErr } = await supabaseAdmin
+        .from("staff_working_hours")
+        .select("staff_profile_id, start_time, end_time, is_working")
+        .eq("business_id", businessId!)
+        .eq("day_of_week", dayOfWeek)
+        .eq("is_working", true);
+      if (workingHoursErr) throw workingHoursErr;
+
+      const dayStart = `${dateStr!}T00:00:00`;
+      const nextDay = new Date(`${dateStr!}T00:00:00Z`);
+      nextDay.setUTCDate(nextDay.getUTCDate() + 1);
+      const nextDayString = nextDay.toISOString().slice(0, 19).replace("T", " ");
+      const { data: appointments, error: appointmentsErr } = await supabaseAdmin
+        .from("appointments")
+        .select("staff_profile_id, starts_at, ends_at, status")
+        .eq("business_id", businessId!)
+        .gte("starts_at", dayStart)
+        .lt("starts_at", nextDayString);
+      if (appointmentsErr) throw appointmentsErr;
+
+      const { data: timeOffRows, error: timeOffErr } = await supabaseAdmin
+        .from("staff_time_off")
+        .select("staff_profile_id, starts_at, ends_at")
+        .eq("business_id", businessId!);
+      if (timeOffErr) throw timeOffErr;
+
+      slots = buildFallbackAvailability({
+        dateStr: dateStr!,
+        requestedDate,
+        durationMinutes: service.duration_minutes,
+        slotIntervalMinutes: 30,
+        leadHours: 2,
+        serviceInfo,
+        staffRows: (staffProfiles ?? []).map((row: FallbackStaffRow) => ({
+          id: row.id,
+          display_name: row.display_name,
+          avatar_url: row.avatar_url ?? null,
+          custom_price: (staffServices ?? []).find((svc) => svc.staff_profile_id === row.id)?.custom_price ?? null,
+        })),
+        workingHoursRows: (workingHoursRows ?? []) as FallbackWorkingHourRow[],
+        appointmentRows: (appointments ?? []) as FallbackAppointmentRow[],
+        timeOffRows: (timeOffRows ?? []) as FallbackTimeOffRow[],
+        hideStaffNames: settings?.hide_staff_names === true,
+        requestedStaffId: staffId,
+      }).slots;
+    }
 
     // Highlight reserved starts for the date so UI can show occupied times.
     const dayStart = `${dateStr!}T00:00:00`;
@@ -330,6 +421,107 @@ Deno.serve(withLogging("get-availability", async (req: Request) => {
 // ---------------------------------------------------------------------------
 // Utility
 // ---------------------------------------------------------------------------
+
+export function buildFallbackAvailability(input: {
+  dateStr: string;
+  requestedDate: Date;
+  durationMinutes: number;
+  slotIntervalMinutes: number;
+  leadHours: number;
+  serviceInfo: ServiceInfo;
+  staffRows: FallbackStaffRow[];
+  workingHoursRows: FallbackWorkingHourRow[];
+  appointmentRows: FallbackAppointmentRow[];
+  timeOffRows: FallbackTimeOffRow[];
+  hideStaffNames: boolean;
+  requestedStaffId: string | null;
+}): AvailabilityResponse {
+  const { dateStr, serviceInfo, staffRows, workingHoursRows, appointmentRows, timeOffRows, hideStaffNames, requestedStaffId } = input;
+  const slotMap = new Map<string, SlotStaff[]>();
+  const eligibleStaff = (staffRows ?? []).filter((staff) => {
+    if (requestedStaffId && staff.id !== requestedStaffId) return false;
+    return true;
+  });
+
+  const slotIntervalMinutes = input.slotIntervalMinutes ?? 30;
+  const durationMinutes = input.durationMinutes ?? serviceInfo.durationMinutes;
+  const startOfDay = new Date(`${dateStr}T00:00:00Z`);
+  const endOfDay = new Date(`${dateStr}T23:59:59Z`);
+
+  for (const staff of eligibleStaff) {
+    const hours = (workingHoursRows ?? []).find(
+      (row) => row.staff_profile_id === staff.id && row.is_working,
+    );
+    if (!hours?.start_time || !hours?.end_time) continue;
+
+    const startMinutes = parseHHMM(hours.start_time);
+    const endMinutes = parseHHMM(hours.end_time);
+    if (startMinutes < 0 || endMinutes < 0 || endMinutes <= startMinutes) continue;
+
+    for (let slotStart = startMinutes; slotStart + durationMinutes <= endMinutes; slotStart += slotIntervalMinutes) {
+      const slotTime = formatHHMM(slotStart);
+      const slotStartTime = new Date(`${dateStr}T${slotTime}:00Z`);
+      const slotEndTime = new Date(slotStartTime.getTime() + durationMinutes * 60_000);
+
+      const overlapsAppointment = (appointmentRows ?? []).some((row) => {
+        if (!row.staff_profile_id || row.staff_profile_id !== staff.id) return false;
+        if (["cancelled", "no_show"].includes(row.status)) return false;
+        const startsAt = new Date(row.starts_at);
+        const endsAt = new Date(row.ends_at);
+        return slotStartTime < endsAt && slotEndTime > startsAt;
+      });
+      if (overlapsAppointment) continue;
+
+      const overlapsTimeOff = (timeOffRows ?? []).some((row) => {
+        if (row.staff_profile_id !== staff.id) return false;
+        const startsAt = new Date(row.starts_at);
+        const endsAt = new Date(row.ends_at);
+        return slotStartTime < endsAt && slotEndTime > startsAt;
+      });
+      if (overlapsTimeOff) continue;
+
+      const now = new Date();
+      if (slotStartTime < now) continue;
+      if (slotStartTime < new Date(now.getTime() + input.leadHours * 60 * 60 * 1000)) continue;
+      if (slotStartTime < startOfDay || slotStartTime > endOfDay) continue;
+
+      const existing = slotMap.get(slotTime) ?? [];
+      existing.push({
+        id: staff.id,
+        name: hideStaffNames ? "Professional" : staff.display_name,
+        avatarUrl: hideStaffNames ? null : (staff.avatar_url ?? null),
+        price: +(staff.custom_price ?? serviceInfo.price),
+      });
+      slotMap.set(slotTime, existing);
+    }
+  }
+
+  const slots: Slot[] = Array.from(slotMap.entries())
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([time, staff]) => ({ time, staff }));
+
+  return {
+    date: dateStr,
+    dayName: DAY_NAMES[input.requestedDate.getUTCDay()],
+    service: serviceInfo,
+    slots,
+    reserved_slots: [],
+    isAvailable: slots.length > 0,
+  };
+}
+
+function parseHHMM(value: string | null): number {
+  if (!value) return -1;
+  const [hours, minutes] = value.split(":").map((part) => Number(part));
+  if (Number.isNaN(hours) || Number.isNaN(minutes)) return -1;
+  return hours * 60 + minutes;
+}
+
+function formatHHMM(value: number): string {
+  const hours = Math.floor(value / 60).toString().padStart(2, "0");
+  const minutes = (value % 60).toString().padStart(2, "0");
+  return `${hours}:${minutes}`;
+}
 
 function jsonOk(req: Request, body: unknown): Response {
   return new Response(JSON.stringify(body), {

@@ -1,9 +1,10 @@
-name: Daily Appointment Reminders
+name: Hourly Appointment Reminders
 
 on:
   schedule:
-    # Fire at 08:00 UTC every day — catches appointments starting 24h from now
-    - cron: "0 8 * * *"
+    # Fire every hour — the edge function uses reminder_sent_at to prevent duplicate sends.
+    # Running hourly ensures every appointment time-slot (not just 07:00–09:00 UTC) is covered.
+    - cron: "0 * * * *"
   # Allow manual trigger for testing
   workflow_dispatch:
 

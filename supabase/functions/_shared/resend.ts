@@ -1244,3 +1244,46 @@ export function bookingReceivedOwnerEmail(data: OwnerBookingNotificationData): {
     }),
   };
 }
+
+// ---------------------------------------------------------------------------
+// Overdue appointment completion reminder (sent to owner every 6 hours, max 5×)
+// ---------------------------------------------------------------------------
+
+interface OverdueCompletionReminderData {
+  salonName: string;
+  salonLogoUrl?: string | null;
+  clientName: string;
+  serviceName: string;
+  date: string;
+  time: string;
+  reference: string;
+  staffName: string | null;
+  reminderNumber: number;
+  dashboardUrl: string;
+}
+
+export function overdueCompletionReminderEmail(data: OverdueCompletionReminderData): { subject: string; html: string } {
+  const subject = `[Reminder ${data.reminderNumber}/5] Appointment not yet completed — ${data.reference}`;
+  return {
+    subject,
+    html: renderEmail({
+      salonName: data.salonName,
+      salonLogoUrl: data.salonLogoUrl ?? undefined,
+      subject,
+      body: `
+        ${heading("Appointment completion overdue")}
+        ${paragraph(`The following appointment has passed its scheduled end time and has not been marked as completed yet. Please update the status in your dashboard.`)}
+        ${detailTable([
+          ["Client", `<strong>${data.clientName}</strong>`],
+          ["Service", `<strong>${data.serviceName}</strong>`],
+          ["Staff", data.staffName ?? "Unassigned"],
+          ["Date", data.date],
+          ["Time", data.time],
+          ["Reference", referenceChip(data.reference)],
+        ])}
+        ${ctaButton("Mark as Completed", data.dashboardUrl)}
+        ${paragraph(`This is reminder ${data.reminderNumber} of 5. Reminders are sent every 6 hours until the appointment is marked complete.`)}
+      `,
+    }),
+  };
+}

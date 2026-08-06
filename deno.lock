@@ -44,18 +44,6 @@
   "workspace": {
     "packageJson": {
       "dependencies": [
-        "npm:@fullcalendar/daygrid@^6.1.20",
-        "npm:@fullcalendar/interaction@^6.1.20",
-        "npm:@fullcalendar/react@^6.1.20",
-        "npm:@fullcalendar/timegrid@^6.1.20",
-        "npm:@hookform/devtools@^4.4.0",
-        "npm:@sentry/node@^10.48.0",
-        "npm:@sentry/react@^10.48.0",
-        "npm:@tanstack/react-query-devtools@^5.99.0",
-        "npm:date-fns-tz@^3.2.0",
-        "npm:posthog-js@^1.367.0",
-        "npm:resend@^6.10.0",
-        "npm:stripe@^22.0.1",
         "npm:typescript@^5.4.5"
       ]
     }

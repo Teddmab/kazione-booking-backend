@@ -89,6 +89,7 @@ interface StorefrontService {
   imageUrl3: string | null;
   displayOrder: number;
   useIntakeForm: boolean;
+  requiresTwoStaff: boolean;
 }
 
 interface StaffMember {
@@ -328,7 +329,7 @@ Deno.serve(withLogging("get-storefront", async (req: Request) => {
         .select(`
           id, name, description, duration_minutes, buffer_minutes, price, currency_code,
           is_active, is_public, image_url, image_url_2, image_url_3, display_order,
-          category_id, use_intake_form,
+          category_id, use_intake_form, requires_two_staff,
           service_categories ( name ),
           service_translations ( locale, field, value )
         `)
@@ -467,6 +468,7 @@ Deno.serve(withLogging("get-storefront", async (req: Request) => {
           imageUrl3: (svc.image_url_3 as string) ?? null,
           displayOrder: svc.display_order as number,
           useIntakeForm: Boolean(svc.use_intake_form),
+          requiresTwoStaff: Boolean(svc.requires_two_staff),
         };
       },
     );

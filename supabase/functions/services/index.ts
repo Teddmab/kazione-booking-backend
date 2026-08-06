@@ -118,7 +118,8 @@ Deno.serve(withLogging("services", async (req: Request) => {
             deposit_amount, is_active, is_public, image_url,
             image_url_2, image_url_3, display_order,
             staff_commission_type, staff_commission_value,
-            use_intake_form, created_at, updated_at,
+            use_intake_form, requires_two_staff, commission_split_pct,
+            created_at, updated_at,
             category:service_categories(name)
           `)
           .in("id", serviceIds)
@@ -168,7 +169,9 @@ Deno.serve(withLogging("services", async (req: Request) => {
           deposit_amount, is_active, is_public, image_url,
           image_url_2, image_url_3, display_order,
           staff_commission_type, staff_commission_value,
-          use_intake_form, auto_show_to_staff, created_at, updated_at,
+          use_intake_form, auto_show_to_staff,
+          requires_two_staff, commission_split_pct,
+          created_at, updated_at,
           category:service_categories(name)
         `)
         .eq("business_id", businessId)
@@ -253,6 +256,10 @@ Deno.serve(withLogging("services", async (req: Request) => {
           auto_show_to_staff: body.auto_show_to_staff !== undefined
             ? Boolean(body.auto_show_to_staff)
             : true,
+          requires_two_staff: Boolean(body.requires_two_staff ?? false),
+          commission_split_pct: body.requires_two_staff
+            ? Math.min(100, Math.max(0, Number(body.commission_split_pct ?? 50)))
+            : 50,
         })
         .select(`
           id,
@@ -275,6 +282,8 @@ Deno.serve(withLogging("services", async (req: Request) => {
           staff_commission_value,
           use_intake_form,
           auto_show_to_staff,
+          requires_two_staff,
+          commission_split_pct,
           created_at,
           updated_at,
           category:service_categories(name)
@@ -429,6 +438,18 @@ Deno.serve(withLogging("services", async (req: Request) => {
         updatePayload.auto_show_to_staff = Boolean(body.auto_show_to_staff);
       }
 
+      if (body.requires_two_staff !== undefined) {
+        updatePayload.requires_two_staff = Boolean(body.requires_two_staff);
+      }
+
+      if (body.commission_split_pct !== undefined) {
+        const split = Number(body.commission_split_pct);
+        if (!Number.isFinite(split) || split < 0 || split > 100) {
+          return badRequest("commission_split_pct must be between 0 and 100");
+        }
+        updatePayload.commission_split_pct = Math.round(split * 100) / 100;
+      }
+
       if (Object.keys(updatePayload).length === 0) {
         return badRequest("No valid fields provided for update");
       }
@@ -459,6 +480,8 @@ Deno.serve(withLogging("services", async (req: Request) => {
           staff_commission_value,
           use_intake_form,
           auto_show_to_staff,
+          requires_two_staff,
+          commission_split_pct,
           created_at,
           updated_at,
           category:service_categories(name)

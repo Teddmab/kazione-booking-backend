@@ -257,7 +257,7 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
     const { data: service, error: svcErr } = await supabaseAdmin
       .from("services")
       .select(
-        "id, name, duration_minutes, buffer_minutes, price, currency_code, deposit_amount",
+        "id, name, duration_minutes, buffer_minutes, price, currency_code, deposit_amount, requires_two_staff, commission_split_pct",
       )
       .eq("id", service_id)
       .eq("business_id", business_id)
@@ -498,6 +498,14 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
     const endsDate = new Date(startsDate.getTime() + durationMinutes * 60_000);
     const endsAt = endsDate.toISOString();
 
+    // Snapshot commission_split_pct from service for dual-staff appointments
+    // (owner assigns both staff members after booking; split is snapshotted now
+    // so retroactive service edits don't affect historical commission payouts).
+    const requiresTwoStaff = Boolean((service as Record<string, unknown>).requires_two_staff);
+    const splitPct = requiresTwoStaff
+      ? Number((service as Record<string, unknown>).commission_split_pct ?? 50)
+      : null;
+
     // STEP 6: Atomically insert appointment with advisory lock.
     // create_booking_atomic acquires pg_advisory_xact_lock on
     // (business_id, staff_id, slot) before re-checking availability and
@@ -520,6 +528,7 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
         p_notes: client.notes ?? null,
         p_payment_method: payment_method,
         p_payment_status: "pending",
+        p_commission_split_pct: splitPct,
       },
     );
 
@@ -594,7 +603,7 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
       })();
     } else if (!staff_profile_id) {
       // Non-referral booking with no explicit staff preference: clear the slot-lock staff
-      // so the appointment appears unassigned until the owner manually assigns a staff member.
+      // so the appointment appears unassigned until the owner manually assigns staff members.
       apptExtra.staff_profile_id = null;
     }
 

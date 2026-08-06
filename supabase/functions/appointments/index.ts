@@ -20,8 +20,9 @@ import { generateIcs, icsToBase64, googleCalendarUrl } from "../_shared/ics.ts";
 const APPT_SELECT = `
   *,
   client:clients!inner(id, first_name, last_name, email, phone, avatar_url),
-  service:services!inner(id, name, duration_minutes, price, staff_commission_type, staff_commission_value, service_product_usage(quantity_per_service, product:product_catalog(unit_cost))),
+  service:services!inner(id, name, duration_minutes, price, staff_commission_type, staff_commission_value, requires_two_staff, commission_split_pct, service_product_usage(quantity_per_service, product:product_catalog(unit_cost))),
   staff:staff_profiles!staff_profile_id(id, display_name, avatar_url, commission_rate),
+  staff2:staff_profiles!staff_profile_id_2(id, display_name, avatar_url, commission_rate),
   referrer_staff:staff_profiles!referrer_staff_id(id, display_name, avatar_url),
   payment:payments(status, amount, method, paid_at)
 `;
@@ -333,9 +334,12 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
       if (dateFrom) query = query.gte("starts_at", `${dateFrom}T00:00:00`);
       if (dateTo)   query = query.lte("starts_at", `${dateTo}T23:59:59`);
       if (statusParams?.length) query = query.in("status", statusParams);
-      // Staff callers: restrict to their own appointments; owner/manager: respect optional staffId param
+      // Staff callers: restrict to their own appointments (primary or secondary role)
+      // Owner/manager: respect optional staffId param
       if (callerStaffProfileId) {
-        query = query.eq("staff_profile_id", callerStaffProfileId);
+        query = query.or(
+          `staff_profile_id.eq.${callerStaffProfileId},staff_profile_id_2.eq.${callerStaffProfileId}`,
+        );
       } else if (staffId) {
         query = query.eq("staff_profile_id", staffId);
       }
@@ -357,20 +361,28 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
         if (!callerStaffProfileId) return normalized;
 
         // Calculate commission_earned for staff view
-        const svc = (row as Record<string, unknown>).service as Record<string, unknown> | null;
-        const staffRow = (row as Record<string, unknown>).staff as Record<string, unknown> | null;
-        const price = Number((row as Record<string, unknown>).price ?? 0);
+        const rowData = row as Record<string, unknown>;
+        const svc = rowData.service as Record<string, unknown> | null;
+        const staffRow = rowData.staff as Record<string, unknown> | null;
+        const staff2Row = rowData.staff2 as Record<string, unknown> | null;
+        const price = Number(rowData.price ?? 0);
         const commType = (svc?.staff_commission_type as string) ?? "none";
         const commValue = Number(svc?.staff_commission_value ?? 0);
         const staffRate = Number(staffRow?.commission_rate ?? 0);
+        const staff2Rate = Number(staff2Row?.commission_rate ?? staffRate);
+        const splitPct = Number(rowData.commission_split_pct ?? 100);
+        const isPrimary = rowData.staff_profile_id === callerStaffProfileId;
+        const myRate = isPrimary ? staffRate : staff2Rate;
+        // Fraction of total commission this caller earns
+        const myFraction = isPrimary ? splitPct / 100 : (100 - splitPct) / 100;
 
         let commissionEarned: number | null = null;
         if (commType === "percentage" && commValue > 0) {
-          commissionEarned = Math.round(price * commValue / 100 * 100) / 100;
+          commissionEarned = Math.round(price * commValue / 100 * myFraction * 100) / 100;
         } else if (commType === "fixed" && commValue > 0) {
-          commissionEarned = commValue;
-        } else if (staffRate > 0) {
-          commissionEarned = Math.round(price * staffRate / 100 * 100) / 100;
+          commissionEarned = Math.round(commValue * myFraction * 100) / 100;
+        } else if (myRate > 0) {
+          commissionEarned = Math.round(price * myRate / 100 * myFraction * 100) / 100;
         }
 
         return { ...normalized, commission_earned: commissionEarned };
@@ -590,6 +602,60 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
       })();
 
       return jsonCors(req, normalizePayment(updated as Record<string, unknown>));
+    }
+
+    // ── PATCH ?action=assign-staff-2 ──────────────────────────────────────────
+    // Owner assigns (or clears) the secondary staff member on a dual-staff appointment.
+    // Body: { staff_profile_id_2: string | null }
+    if (method === "PATCH" && action === "assign-staff-2") {
+      if (!id) return badRequest("id is required");
+      const body = await req.json() as Record<string, unknown>;
+      const staffProfileId2 = (body.staff_profile_id_2 as string | null | undefined) ?? null;
+
+      const { data: existing, error: fetchErr } = await supabaseAdmin
+        .from("appointments")
+        .select("business_id, status, service_id")
+        .eq("id", id)
+        .single();
+
+      if (fetchErr || !existing) return notFound("Appointment not found");
+
+      const ctx = await requireOwnerOrManagerCtx(req, (existing as Record<string, unknown>).business_id as string);
+      if (ctx instanceof Response) return ctx;
+
+      // Verify the service requires two staff
+      const serviceId2 = (existing as Record<string, unknown>).service_id as string;
+      const { data: svcRow } = await supabaseAdmin
+        .from("services")
+        .select("requires_two_staff, commission_split_pct")
+        .eq("id", serviceId2)
+        .single();
+
+      if (!svcRow || !(svcRow as Record<string, unknown>).requires_two_staff) {
+        return badRequest("Service does not support dual staff assignment");
+      }
+
+      const updateFields: Record<string, unknown> = {
+        staff_profile_id_2: staffProfileId2,
+      };
+      // Keep commission_split_pct in sync with the service snapshot
+      if (staffProfileId2) {
+        updateFields.commission_split_pct = Number(
+          (svcRow as Record<string, unknown>).commission_split_pct ?? 50,
+        );
+      } else {
+        updateFields.commission_split_pct = null;
+      }
+
+      const { data: updated2, error: updateErr2 } = await supabaseAdmin
+        .from("appointments")
+        .update(updateFields)
+        .eq("id", id)
+        .select(APPT_SELECT)
+        .single();
+
+      if (updateErr2) return serverError(updateErr2.message);
+      return jsonCors(req, normalizePayment(updated2 as Record<string, unknown>));
     }
 
     // ── PATCH ?action=respond-offer ────────────────────────────────────────────

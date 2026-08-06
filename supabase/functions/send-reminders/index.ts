@@ -163,14 +163,16 @@ async function sendReminders(
   )] as string[];
 
   const staffPhoneMap = new Map<string, string>(); // business_member_id → phone
+  const staffEmailMap = new Map<string, string>(); // business_member_id → email (authoritative user email)
   if (staffMemberIds.length > 0) {
     const { data: memberRows } = await supabaseAdmin
       .from("business_members")
-      .select("id, users(phone)")
+      .select("id, users(phone, email)")
       .in("id", staffMemberIds);
     for (const m of memberRows ?? []) {
-      const phone = (m as unknown as { id: string; users: { phone: string | null } | null }).users?.phone;
-      if (phone) staffPhoneMap.set((m as unknown as { id: string }).id, phone);
+      const user = (m as unknown as { id: string; users: { phone: string | null; email: string | null } | null }).users;
+      if (user?.phone) staffPhoneMap.set((m as unknown as { id: string }).id, user.phone);
+      if (user?.email) staffEmailMap.set((m as unknown as { id: string }).id, user.email);
     }
   }
 
@@ -240,9 +242,12 @@ async function sendReminders(
         continue;
       }
 
-      // Staff email reminder
-      if (staff?.invited_email) {
-        await sendEmailInternal(staff.invited_email, "staff_appointment_reminder", {
+      // Staff email reminder — prefer the user's registered email over the invite address
+      const staffEmail = (staff?.business_member_id
+        ? staffEmailMap.get(staff.business_member_id) ?? staff.invited_email
+        : staff?.invited_email) ?? null;
+      if (staff && staffEmail) {
+        await sendEmailInternal(staffEmail, "staff_appointment_reminder", {
           staffName: staff.display_name,
           salonName: business.name,
           clientName: `${client.first_name} ${client.last_name}`,

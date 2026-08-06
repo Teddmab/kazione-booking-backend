@@ -558,10 +558,12 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
       if (ctx instanceof Response) return ctx;
 
       const oldStatus = (existing as Record<string, unknown>).status as string;
+      // Completed appointments keep their status; others move to "offered" awaiting staff confirmation
+      const newStatus = oldStatus === "completed" ? "completed" : "offered";
 
       const { data: updated, error: updateErr } = await supabaseAdmin
         .from("appointments")
-        .update({ staff_profile_id: staffProfileId, status: "offered" })
+        .update({ staff_profile_id: staffProfileId, status: newStatus })
         .eq("id", id)
         .select(APPT_SELECT)
         .single();
@@ -571,35 +573,39 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
       await supabaseAdmin.from("appointment_status_log").insert({
         appointment_id: id,
         old_status: oldStatus,
-        new_status: "offered",
-        reason: "Staff offered appointment — awaiting confirmation",
+        new_status: newStatus,
+        reason: oldStatus === "completed"
+          ? "Staff reassigned on completed appointment — commission records updated"
+          : "Staff offered appointment — awaiting confirmation",
       });
 
-      // Notify the offered staff member by email
-      (async () => {
-        try {
-          const apptRow = updated as Record<string, unknown>;
-          const client = apptRow.client as Record<string, string> | null;
-          const service = apptRow.service as Record<string, string> | null;
-          const staffEmail = await fetchStaffEmail(staffProfileId);
-          if (!staffEmail) return;
-          const { data: bizRow } = await supabaseAdmin.from("businesses").select("name, logo_url").eq("id", apptRow.business_id as string).single();
-          const biz = bizRow as Record<string, unknown> | null;
-          const startsAtDate = new Date(apptRow.starts_at as string);
-          const { subject, html } = staffAppointmentOfferEmail({
-            staffName: (apptRow.staff as Record<string, string> | null)?.display_name ?? "Team member",
-            salonName: (biz?.name as string) ?? "KaziOne",
-            salonLogoUrl: biz?.logo_url as string | null ?? null,
-            clientName: client ? `${client.first_name} ${client.last_name}` : "Client",
-            serviceName: service?.name ?? "Service",
-            date: startsAtDate.toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long", year: "numeric", timeZone: "UTC" }),
-            time: startsAtDate.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: "UTC" }),
-            reference: apptRow.booking_reference as string,
-            dashboardUrl: `${Deno.env.get("APP_URL") ?? "https://kazionebooking.com"}/staff`,
-          });
-          await sendEmail(staffEmail, subject, html).catch((e) => console.warn("assign-staff offer email failed:", e));
-        } catch (e) { console.warn("assign-staff offer email error:", e); }
-      })();
+      // Notify the offered staff member by email (only for non-completed reassignments)
+      if (newStatus === "offered") {
+        (async () => {
+          try {
+            const apptRow = updated as Record<string, unknown>;
+            const client = apptRow.client as Record<string, string> | null;
+            const service = apptRow.service as Record<string, string> | null;
+            const staffEmail = await fetchStaffEmail(staffProfileId);
+            if (!staffEmail) return;
+            const { data: bizRow } = await supabaseAdmin.from("businesses").select("name, logo_url").eq("id", apptRow.business_id as string).single();
+            const biz = bizRow as Record<string, unknown> | null;
+            const startsAtDate = new Date(apptRow.starts_at as string);
+            const { subject, html } = staffAppointmentOfferEmail({
+              staffName: (apptRow.staff as Record<string, string> | null)?.display_name ?? "Team member",
+              salonName: (biz?.name as string) ?? "KaziOne",
+              salonLogoUrl: biz?.logo_url as string | null ?? null,
+              clientName: client ? `${client.first_name} ${client.last_name}` : "Client",
+              serviceName: service?.name ?? "Service",
+              date: startsAtDate.toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long", year: "numeric", timeZone: "UTC" }),
+              time: startsAtDate.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: "UTC" }),
+              reference: apptRow.booking_reference as string,
+              dashboardUrl: `${Deno.env.get("APP_URL") ?? "https://kazionebooking.com"}/staff`,
+            });
+            await sendEmail(staffEmail, subject, html).catch((e) => console.warn("assign-staff offer email failed:", e));
+          } catch (e) { console.warn("assign-staff offer email error:", e); }
+        })();
+      }
 
       return jsonCors(req, normalizePayment(updated as Record<string, unknown>));
     }

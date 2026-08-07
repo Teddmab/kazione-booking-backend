@@ -383,7 +383,8 @@ Deno.serve(withLogging("offers", async (req: Request) => {
 
       const allowed = [
         "title", "description", "is_active", "valid_from", "valid_until",
-        "max_redemptions", "price", "discount_value", "applies_to_services",
+        "max_redemptions", "price", "discount_value", "discount_type",
+        "sessions_total", "applies_to_services",
       ];
       const patch: Record<string, unknown> = {};
       for (const key of allowed) {

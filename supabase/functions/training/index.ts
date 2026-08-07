@@ -594,7 +594,269 @@ Deno.serve(withLogging("training", async (req: Request) => {
       return jsonCors(req, { success: true, course_complete: courseComplete });
     }
 
-    return badRequest(req, "Unknown route. Expected action: course|player|chapter|section|upload-url|progress");
+    // ── GET ?action=slots — list practice session slots for an offer (public) ──
+    if (method === "GET" && action === "slots") {
+      const offerId = url.searchParams.get("offer_id");
+      if (!offerId) return badRequest(req, "offer_id is required");
+
+      const { data, error } = await supabaseAdmin
+        .from("training_session_slots")
+        .select("id, offer_id, business_id, staff_profile_id, starts_at, ends_at, max_registrants, notes, created_at")
+        .eq("offer_id", offerId)
+        .gte("starts_at", new Date().toISOString())
+        .order("starts_at", { ascending: true });
+
+      if (error) return serverError(req, error.message);
+
+      // Count bookings per slot so client can see remaining capacity
+      const slotIds = (data ?? []).map((s) => s.id);
+      const { data: bookingCounts } = slotIds.length > 0
+        ? await supabaseAdmin
+            .from("training_slot_bookings")
+            .select("slot_id")
+            .in("slot_id", slotIds)
+            .eq("status", "confirmed")
+        : { data: [] };
+
+      const countBySlot = new Map<string, number>();
+      for (const b of bookingCounts ?? []) {
+        countBySlot.set(b.slot_id, (countBySlot.get(b.slot_id) ?? 0) + 1);
+      }
+
+      const slots = (data ?? []).map((s) => ({
+        ...s,
+        booked_count: countBySlot.get(s.id) ?? 0,
+        available: (countBySlot.get(s.id) ?? 0) < s.max_registrants,
+      }));
+
+      return jsonCors(req, { slots });
+    }
+
+    // ── POST ?action=slots — owner: create a practice session slot ────────────
+    if (method === "POST" && action === "slots") {
+      const body = await req.json().catch(() => null) as {
+        business_id: string; offer_id: string; starts_at: string; ends_at: string;
+        staff_profile_id?: string; max_registrants?: number; notes?: string;
+      } | null;
+      if (!body) return badRequest(req, "Invalid JSON body");
+
+      const { business_id, offer_id, starts_at, ends_at } = body;
+      if (!business_id) return badRequest(req, "business_id is required");
+      if (!offer_id)    return badRequest(req, "offer_id is required");
+      if (!starts_at)   return badRequest(req, "starts_at is required");
+      if (!ends_at)     return badRequest(req, "ends_at is required");
+
+      const ctx = await requireOwnerOrManagerCtx(req, business_id);
+      if (ctx instanceof Response) return ctx;
+
+      const { data, error } = await supabaseAdmin
+        .from("training_session_slots")
+        .insert({
+          offer_id,
+          business_id,
+          starts_at,
+          ends_at,
+          staff_profile_id: body.staff_profile_id ?? null,
+          max_registrants:  body.max_registrants ?? 1,
+          notes:            body.notes ?? null,
+        })
+        .select()
+        .single();
+
+      if (error) return serverError(req, error.message);
+      return jsonCors(req, { slot: data }, 201);
+    }
+
+    // ── DELETE ?action=slots&id= — owner: delete a slot ──────────────────────
+    if (method === "DELETE" && action === "slots" && id) {
+      const businessId = url.searchParams.get("business_id");
+      if (!businessId) return badRequest(req, "business_id is required");
+
+      const ctx = await requireOwnerOrManagerCtx(req, businessId);
+      if (ctx instanceof Response) return ctx;
+
+      const { error } = await supabaseAdmin
+        .from("training_session_slots")
+        .delete()
+        .eq("id", id)
+        .eq("business_id", businessId);
+
+      if (error) return serverError(req, error.message);
+      return jsonCors(req, { success: true });
+    }
+
+    // ── POST ?action=register — client: self-register for a training offer ────
+    // Creates an offer_redemption and optionally books practice session slots.
+    if (method === "POST" && action === "register") {
+      const body = await req.json().catch(() => null) as {
+        offer_id: string; slot_ids?: string[];
+      } | null;
+      if (!body) return badRequest(req, "Invalid JSON body");
+
+      const { offer_id, slot_ids = [] } = body;
+      if (!offer_id) return badRequest(req, "offer_id is required");
+
+      const user = await verifyAuth(req);
+
+      // Resolve client record
+      const { data: clientRow } = await supabaseAdmin
+        .from("clients")
+        .select("id")
+        .eq("user_id", user.id)
+        .maybeSingle();
+
+      if (!clientRow) return badRequest(req, "Client profile not found. Please complete signup first.");
+
+      // Resolve offer
+      const { data: offer } = await supabaseAdmin
+        .from("business_offers")
+        .select("id, type, business_id, sessions_total, price")
+        .eq("id", offer_id)
+        .eq("is_active", true)
+        .single();
+
+      if (!offer) return notFound(req, "Training offer not found or not active");
+      if (offer.type !== "training") return badRequest(req, "Offer is not a training");
+
+      // Check for existing redemption
+      const { data: existing } = await supabaseAdmin
+        .from("offer_redemptions")
+        .select("id")
+        .eq("offer_id", offer_id)
+        .eq("client_id", clientRow.id)
+        .maybeSingle();
+
+      if (existing) return jsonCors(req, { redemption_id: existing.id, already_registered: true });
+
+      // Create redemption (free registration or pending payment)
+      const status = (offer.price === null || offer.price === 0) ? "active" : "pending";
+      const { data: redemption, error: rErr } = await supabaseAdmin
+        .from("offer_redemptions")
+        .insert({
+          offer_id,
+          client_id:      clientRow.id,
+          business_id:    offer.business_id,
+          status,
+          sessions_total: offer.sessions_total,
+          sessions_used:  0,
+        })
+        .select("id")
+        .single();
+
+      if (rErr) return serverError(req, rErr.message);
+
+      // Book selected slots
+      if (slot_ids.length > 0) {
+        const slotBookings = slot_ids.map((slotId) => ({
+          slot_id:       slotId,
+          redemption_id: redemption.id,
+          client_id:     clientRow.id,
+          business_id:   offer.business_id,
+          status:        "confirmed",
+        }));
+
+        const { error: sbErr } = await supabaseAdmin
+          .from("training_slot_bookings")
+          .insert(slotBookings);
+
+        if (sbErr) return serverError(req, sbErr.message);
+      }
+
+      return jsonCors(req, {
+        redemption_id:     redemption.id,
+        status,
+        booked_slot_count: slot_ids.length,
+        already_registered: false,
+      }, 201);
+    }
+
+    // ── POST ?action=review — client: submit a review after course completion ──
+    if (method === "POST" && action === "review") {
+      const body = await req.json().catch(() => null) as {
+        redemption_id: string; rating: number; comment?: string;
+      } | null;
+      if (!body) return badRequest(req, "Invalid JSON body");
+
+      const { redemption_id, rating, comment } = body;
+      if (!redemption_id) return badRequest(req, "redemption_id is required");
+      if (!rating || rating < 1 || rating > 5) return badRequest(req, "rating must be 1–5");
+
+      const auth = await verifyClientAccess(req, redemption_id);
+      if (auth instanceof Response) return auth;
+      const { redemption } = auth;
+
+      // Find the course
+      const { data: course } = await supabaseAdmin
+        .from("training_courses")
+        .select("id")
+        .eq("offer_id", redemption.offer_id)
+        .maybeSingle();
+
+      if (!course) return notFound(req, "Course not found");
+
+      const { data, error } = await supabaseAdmin
+        .from("training_reviews")
+        .upsert({
+          course_id:   course.id,
+          client_id:   redemption.client_id,
+          business_id: redemption.business_id,
+          rating,
+          comment: comment?.trim() ?? null,
+        }, { onConflict: "course_id,client_id" })
+        .select()
+        .single();
+
+      if (error) return serverError(req, error.message);
+      return jsonCors(req, { review: data }, 201);
+    }
+
+    // ── GET ?action=reviews — get reviews for a course (public) ──────────────
+    if (method === "GET" && action === "reviews") {
+      const courseId = url.searchParams.get("course_id");
+      if (!courseId) return badRequest(req, "course_id is required");
+
+      const { data, error } = await supabaseAdmin
+        .from("training_reviews")
+        .select("id, rating, comment, created_at")
+        .eq("course_id", courseId)
+        .order("created_at", { ascending: false });
+
+      if (error) return serverError(req, error.message);
+
+      const reviews = data ?? [];
+      const avg = reviews.length > 0
+        ? reviews.reduce((s, r) => s + r.rating, 0) / reviews.length
+        : null;
+
+      return jsonCors(req, { reviews, average_rating: avg, count: reviews.length });
+    }
+
+    // ── GET ?action=my-slots — client: list my booked practice session slots ──
+    if (method === "GET" && action === "my-slots") {
+      const user = await verifyAuth(req);
+
+      const { data: clientRow } = await supabaseAdmin
+        .from("clients")
+        .select("id")
+        .eq("user_id", user.id)
+        .maybeSingle();
+
+      if (!clientRow) return jsonCors(req, { bookings: [] });
+
+      const { data, error } = await supabaseAdmin
+        .from("training_slot_bookings")
+        .select(`
+          id, status, created_at,
+          slot:training_session_slots ( id, starts_at, ends_at, notes, offer_id )
+        `)
+        .eq("client_id", clientRow.id)
+        .order("created_at", { ascending: false });
+
+      if (error) return serverError(req, error.message);
+      return jsonCors(req, { bookings: data ?? [] });
+    }
+
+    return badRequest(req, "Unknown route. Expected action: course|player|chapter|section|upload-url|progress|slots|register|review|reviews|my-slots");
   } catch (err) {
     console.error("training error:", err);
     return serverError(req, "An unexpected error occurred");

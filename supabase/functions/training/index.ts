@@ -91,9 +91,9 @@ Deno.serve(withLogging("training", async (req: Request) => {
         .from("training_courses")
         .select(`
           id, title, description, offer_id, business_id, created_at, updated_at,
-          training_chapters (
+          chapters:training_chapters (
             id, title, position, created_at,
-            training_sections ( id, title, content_type, content_text, video_url, position, created_at )
+            sections:training_sections ( id, title, content_type, content_text, video_url, position, created_at )
           )
         `)
         .eq("offer_id", offerId)
@@ -117,9 +117,9 @@ Deno.serve(withLogging("training", async (req: Request) => {
         .from("training_courses")
         .select(`
           id, title, description,
-          training_chapters (
+          chapters:training_chapters (
             id, title, position,
-            training_sections ( id, title, content_type, content_text, video_url, position )
+            sections:training_sections ( id, title, content_type, content_text, video_url, position )
           )
         `)
         .eq("offer_id", redemption.offer_id)
@@ -129,9 +129,10 @@ Deno.serve(withLogging("training", async (req: Request) => {
       if (!course) return notFound(req, "No course found for this training");
 
       // Sign video URLs so the client browser can stream directly
-      if (course.training_chapters) {
-        for (const chapter of course.training_chapters as Record<string, unknown>[]) {
-          const sections = chapter.training_sections as Record<string, unknown>[] | null;
+      const chapters = (course as Record<string, unknown>).chapters as Record<string, unknown>[] | null;
+      if (chapters) {
+        for (const chapter of chapters) {
+          const sections = chapter.sections as Record<string, unknown>[] | null;
           if (!sections) continue;
           for (const section of sections) {
             if (section.content_type === "video" && section.video_url) {
@@ -143,12 +144,16 @@ Deno.serve(withLogging("training", async (req: Request) => {
 
       const { data: progress } = await supabaseAdmin
         .from("training_progress")
-        .select("section_id, completed_at")
+        .select("section_id")
         .eq("redemption_id", redemptionId);
 
+      const playerCourse = {
+        ...course,
+        completed_sections: (progress ?? []).map((p) => p.section_id),
+      };
+
       return jsonCors(req, {
-        course,
-        progress: progress ?? [],
+        course: playerCourse,
         redemption: { id: redemption.id, status: redemption.status },
       });
     }

@@ -892,7 +892,123 @@ Deno.serve(withLogging("training", async (req: Request) => {
       return jsonCors(req, { bookings: data ?? [] });
     }
 
-    return badRequest(req, "Unknown route. Expected action: course|player|chapter|section|upload-url|progress|slots|register|review|reviews|my-slots");
+    // ── POST ?action=ai-generate — owner: AI-generated course structure ──────
+    if (method === "POST" && action === "ai-generate") {
+      const body = await req.json().catch(() => null) as {
+        business_id: string; offer_id: string;
+        instructions?: string;
+        tone?: "beginner" | "intermediate" | "professional";
+        language?: string;
+      } | null;
+      if (!body) return badRequest(req, "Invalid JSON body");
+
+      const { business_id, offer_id } = body;
+      if (!business_id) return badRequest(req, "business_id is required");
+      if (!offer_id)    return badRequest(req, "offer_id is required");
+
+      const ctx = await requireOwnerOrManagerCtx(req, business_id);
+      if (ctx instanceof Response) return ctx;
+
+      const apiKey = Deno.env.get("ANTHROPIC_API_KEY");
+      if (!apiKey) return serverError(req, "AI generation is not configured on this server");
+
+      const [{ data: offer }, { data: services }, { data: business }] = await Promise.all([
+        supabaseAdmin
+          .from("business_offers")
+          .select("id, title, description, type, sessions_total")
+          .eq("id", offer_id)
+          .eq("business_id", business_id)
+          .single(),
+        supabaseAdmin
+          .from("services")
+          .select("name, description, duration_minutes, price")
+          .eq("business_id", business_id)
+          .eq("is_active", true)
+          .order("name"),
+        supabaseAdmin
+          .from("businesses")
+          .select("name, city, country")
+          .eq("id", business_id)
+          .single(),
+      ]);
+
+      if (!offer) return notFound(req, "Offer not found");
+      if (offer.type !== "training") return badRequest(req, "Offer must be type 'training'");
+
+      const tone = body.tone ?? "intermediate";
+      const language = body.language ?? "en";
+      const serviceList = (services ?? [])
+        .map((s: { name: string; description?: string | null; duration_minutes?: number | null; price?: number | null }) =>
+          `- ${s.name}${s.duration_minutes ? ` (${s.duration_minutes} min)` : ""}${s.price ? `, €${s.price}` : ""}${s.description ? ` — ${s.description}` : ""}`
+        )
+        .join("\n");
+
+      const toneMap: Record<string, string> = {
+        beginner: "Assume learners are completely new. Avoid jargon. Use simple language, analogies, and step-by-step breakdowns.",
+        intermediate: "Assume learners have some experience but are developing their professional skills. Balance theory with hands-on tips.",
+        professional: "Write peer-to-peer, like a senior practitioner sharing advanced technique knowledge. Dense, specific, no hand-holding.",
+      };
+
+      const systemPrompt =
+        "You are a professional beauty education content writer for KaziOne. " +
+        "You create training courses that sound natural and written by an experienced practitioner — not AI-generated. " +
+        "Your writing draws on real salon workflows, specific service knowledge, and hands-on expertise. " +
+        "Always respond with valid JSON only — no text, no markdown, no code fences outside the JSON.";
+
+      const userPrompt = [
+        `Business: ${business?.name ?? "the salon"} (${business?.city ?? ""}, ${business?.country ?? ""})`,
+        `Training offer: "${offer.title}"`,
+        offer.description ? `Offer description: ${offer.description}` : "",
+        offer.sessions_total ? `Total sessions: ${offer.sessions_total}` : "",
+        serviceList ? `\nServices offered at this business:\n${serviceList}` : "",
+        body.instructions ? `\nOwner instructions: ${body.instructions}` : "",
+        `\nTone: ${toneMap[tone]}`,
+        `Language: ${language === "fr" ? "French" : language === "et" ? "Estonian" : "English"}`,
+        "\nCreate a complete training course with 2–4 chapters, each with 2–4 sections.",
+        'Sections should alternate between text explanations and practical notes. Set content_type to "video" for 1–2 sections per chapter where filming a demonstration would be ideal.',
+        "Keep each content_text between 150–400 words. Use real examples from the business's services.",
+        "",
+        'Respond with exactly this JSON shape:',
+        '{ "course": { "title": "string", "description": "string", "chapters": [{ "title": "string", "sections": [{ "title": "string", "content_type": "text"|"video", "content_text": "string" }] }] } }',
+      ].filter(Boolean).join("\n");
+
+      const anthropicRes = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": apiKey,
+          "anthropic-version": "2023-06-01",
+        },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-6",
+          max_tokens: 4000,
+          system: systemPrompt,
+          messages: [{ role: "user", content: userPrompt }],
+        }),
+      });
+
+      if (!anthropicRes.ok) {
+        const errText = await anthropicRes.text();
+        console.error("[training/ai-generate] Anthropic error", anthropicRes.status, errText.slice(0, 300));
+        return serverError(req, `AI generation failed (${anthropicRes.status})`);
+      }
+
+      const aiData = await anthropicRes.json();
+      const rawText: string = aiData.content?.[0]?.text ?? "";
+      const jsonMatch = rawText.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) return serverError(req, "AI returned unexpected format — try again");
+
+      let parsed: { course?: unknown };
+      try {
+        parsed = JSON.parse(jsonMatch[0]);
+      } catch {
+        return serverError(req, "AI returned invalid JSON — try again");
+      }
+
+      return jsonCors(req, { course: parsed.course ?? null });
+    }
+
+    return badRequest(req, "Unknown route. Expected action: course|player|chapter|section|upload-url|progress|slots|register|review|reviews|my-slots|ai-generate");
   } catch (err) {
     console.error("training error:", err);
     return serverError(req, "An unexpected error occurred");

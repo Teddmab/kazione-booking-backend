@@ -90,10 +90,10 @@ Deno.serve(withLogging("training", async (req: Request) => {
       const { data: course, error } = await supabaseAdmin
         .from("training_courses")
         .select(`
-          id, title, description, offer_id, business_id, created_at, updated_at,
+          id, title, title_i18n, description, description_i18n, offer_id, business_id, created_at, updated_at,
           chapters:training_chapters (
-            id, title, position, created_at,
-            sections:training_sections ( id, title, content_type, content_text, video_url, position, created_at )
+            id, title, title_i18n, position, created_at,
+            sections:training_sections ( id, title, title_i18n, content_type, content_text, content_text_i18n, video_url, position, created_at )
           )
         `)
         .eq("offer_id", offerId)
@@ -116,10 +116,10 @@ Deno.serve(withLogging("training", async (req: Request) => {
       const { data: course, error: cErr } = await supabaseAdmin
         .from("training_courses")
         .select(`
-          id, title, description,
+          id, title, title_i18n, description, description_i18n,
           chapters:training_chapters (
-            id, title, position,
-            sections:training_sections ( id, title, content_type, content_text, video_url, position )
+            id, title, title_i18n, position,
+            sections:training_sections ( id, title, title_i18n, content_type, content_text, content_text_i18n, video_url, position )
           )
         `)
         .eq("offer_id", redemption.offer_id)
@@ -162,6 +162,7 @@ Deno.serve(withLogging("training", async (req: Request) => {
     if (method === "POST" && action === "course") {
       const body = await req.json().catch(() => null) as {
         business_id: string; offer_id: string; title: string; description?: string;
+        title_i18n?: Record<string, string>; description_i18n?: Record<string, string>;
       } | null;
       if (!body) return badRequest(req, "Invalid JSON body");
 
@@ -186,7 +187,13 @@ Deno.serve(withLogging("training", async (req: Request) => {
       const { data, error } = await supabaseAdmin
         .from("training_courses")
         .upsert(
-          { business_id, offer_id, title: title.trim(), description: body.description?.trim() ?? null },
+          {
+            business_id, offer_id,
+            title: title.trim(),
+            description:       body.description?.trim() ?? null,
+            title_i18n:        body.title_i18n        ?? null,
+            description_i18n:  body.description_i18n  ?? null,
+          },
           { onConflict: "offer_id" },
         )
         .select()
@@ -207,8 +214,10 @@ Deno.serve(withLogging("training", async (req: Request) => {
       if (ctx instanceof Response) return ctx;
 
       const patch: Record<string, unknown> = {};
-      if ("title"       in body) patch.title       = (body.title as string)?.trim();
-      if ("description" in body) patch.description = body.description ?? null;
+      if ("title"            in body) patch.title            = (body.title as string)?.trim();
+      if ("description"      in body) patch.description      = body.description ?? null;
+      if ("title_i18n"       in body) patch.title_i18n       = body.title_i18n ?? null;
+      if ("description_i18n" in body) patch.description_i18n = body.description_i18n ?? null;
       if (Object.keys(patch).length === 0) return badRequest(req, "No updatable fields");
 
       const { data, error } = await supabaseAdmin
@@ -228,6 +237,7 @@ Deno.serve(withLogging("training", async (req: Request) => {
     if (method === "POST" && action === "chapter") {
       const body = await req.json().catch(() => null) as {
         business_id: string; course_id: string; title: string; position?: number;
+        title_i18n?: Record<string, string>;
       } | null;
       if (!body) return badRequest(req, "Invalid JSON body");
 
@@ -250,7 +260,7 @@ Deno.serve(withLogging("training", async (req: Request) => {
 
       const { data, error } = await supabaseAdmin
         .from("training_chapters")
-        .insert({ course_id, title: title.trim(), position: body.position ?? 0 })
+        .insert({ course_id, title: title.trim(), position: body.position ?? 0, title_i18n: body.title_i18n ?? null })
         .select()
         .single();
 
@@ -281,8 +291,9 @@ Deno.serve(withLogging("training", async (req: Request) => {
         return forbidden(req, "Access denied");
 
       const patch: Record<string, unknown> = {};
-      if ("title"    in body) patch.title    = (body.title as string)?.trim();
-      if ("position" in body) patch.position = body.position;
+      if ("title"      in body) patch.title      = (body.title as string)?.trim();
+      if ("position"   in body) patch.position   = body.position;
+      if ("title_i18n" in body) patch.title_i18n = body.title_i18n ?? null;
       if (Object.keys(patch).length === 0) return badRequest(req, "No updatable fields");
 
       const { data, error } = await supabaseAdmin
@@ -325,6 +336,7 @@ Deno.serve(withLogging("training", async (req: Request) => {
       const body = await req.json().catch(() => null) as {
         business_id: string; chapter_id: string; title: string;
         content_type: string; content_text?: string; video_url?: string; position?: number;
+        title_i18n?: Record<string, string>; content_text_i18n?: Record<string, string>;
       } | null;
       if (!body) return badRequest(req, "Invalid JSON body");
 
@@ -353,11 +365,13 @@ Deno.serve(withLogging("training", async (req: Request) => {
         .from("training_sections")
         .insert({
           chapter_id,
-          title:        title.trim(),
+          title:             title.trim(),
           content_type,
-          content_text: body.content_text ?? null,
-          video_url:    body.video_url    ?? null,
-          position:     body.position     ?? 0,
+          content_text:      body.content_text          ?? null,
+          video_url:         body.video_url             ?? null,
+          position:          body.position              ?? 0,
+          title_i18n:        body.title_i18n            ?? null,
+          content_text_i18n: body.content_text_i18n     ?? null,
         })
         .select()
         .single();
@@ -388,11 +402,13 @@ Deno.serve(withLogging("training", async (req: Request) => {
         return forbidden(req, "Access denied");
 
       const patch: Record<string, unknown> = {};
-      if ("title"        in body) patch.title        = (body.title as string)?.trim();
-      if ("content_type" in body) patch.content_type = body.content_type;
-      if ("content_text" in body) patch.content_text = body.content_text ?? null;
-      if ("video_url"    in body) patch.video_url    = body.video_url    ?? null;
-      if ("position"     in body) patch.position     = body.position;
+      if ("title"             in body) patch.title             = (body.title as string)?.trim();
+      if ("content_type"      in body) patch.content_type      = body.content_type;
+      if ("content_text"      in body) patch.content_text      = body.content_text      ?? null;
+      if ("video_url"         in body) patch.video_url         = body.video_url         ?? null;
+      if ("position"          in body) patch.position          = body.position;
+      if ("title_i18n"        in body) patch.title_i18n        = body.title_i18n        ?? null;
+      if ("content_text_i18n" in body) patch.content_text_i18n = body.content_text_i18n ?? null;
       if (Object.keys(patch).length === 0) return badRequest(req, "No updatable fields");
 
       const { data, error } = await supabaseAdmin
@@ -898,7 +914,6 @@ Deno.serve(withLogging("training", async (req: Request) => {
         business_id: string; offer_id: string;
         instructions?: string;
         tone?: "beginner" | "intermediate" | "professional";
-        language?: string;
       } | null;
       if (!body) return badRequest(req, "Invalid JSON body");
 
@@ -936,7 +951,6 @@ Deno.serve(withLogging("training", async (req: Request) => {
       if (offer.type !== "training") return badRequest(req, "Offer must be type 'training'");
 
       const tone = body.tone ?? "intermediate";
-      const language = body.language ?? "en";
       const serviceList = (services ?? [])
         .map((s: { name: string; description?: string | null; duration_minutes?: number | null; price?: number | null }) =>
           `- ${s.name}${s.duration_minutes ? ` (${s.duration_minutes} min)` : ""}${s.price ? `, €${s.price}` : ""}${s.description ? ` — ${s.description}` : ""}`
@@ -953,6 +967,8 @@ Deno.serve(withLogging("training", async (req: Request) => {
         "You are a professional beauty education content writer for KaziOne. " +
         "You create training courses that sound natural and written by an experienced practitioner — not AI-generated. " +
         "Your writing draws on real salon workflows, specific service knowledge, and hands-on expertise. " +
+        "You must produce the complete course in FOUR languages simultaneously: English (en), Estonian (et), French (fr), and Russian (ru). " +
+        "All text fields (title, description, content_text) must be objects with keys en/et/fr/ru — never plain strings. " +
         "Always respond with valid JSON only — no text, no markdown, no code fences outside the JSON.";
 
       const userPrompt = [
@@ -963,13 +979,13 @@ Deno.serve(withLogging("training", async (req: Request) => {
         serviceList ? `\nServices offered at this business:\n${serviceList}` : "",
         body.instructions ? `\nOwner instructions: ${body.instructions}` : "",
         `\nTone: ${toneMap[tone]}`,
-        `Language: ${language === "fr" ? "French" : language === "et" ? "Estonian" : "English"}`,
         "\nCreate a complete training course with 2–4 chapters, each with 2–4 sections.",
         'Sections should alternate between text explanations and practical notes. Set content_type to "video" for 1–2 sections per chapter where filming a demonstration would be ideal.',
-        "Keep each content_text between 150–400 words. Use real examples from the business's services.",
+        "Keep each content_text between 150–400 words per language. Use real examples from the business's services.",
+        "Every text value MUST be an object with keys: en, et, fr, ru.",
         "",
-        'Respond with exactly this JSON shape:',
-        '{ "course": { "title": "string", "description": "string", "chapters": [{ "title": "string", "sections": [{ "title": "string", "content_type": "text"|"video", "content_text": "string" }] }] } }',
+        "Respond with exactly this JSON shape (all leaf strings replaced by {en,et,fr,ru} objects):",
+        '{ "course": { "title": {"en":"","et":"","fr":"","ru":""}, "description": {"en":"","et":"","fr":"","ru":""}, "chapters": [{ "title": {"en":"","et":"","fr":"","ru":""}, "sections": [{ "title": {"en":"","et":"","fr":"","ru":""}, "content_type": "text"|"video", "content_text": {"en":"","et":"","fr":"","ru":""} }] }] } }',
       ].filter(Boolean).join("\n");
 
       const anthropicRes = await fetch("https://api.anthropic.com/v1/messages", {
@@ -981,7 +997,7 @@ Deno.serve(withLogging("training", async (req: Request) => {
         },
         body: JSON.stringify({
           model: "claude-sonnet-4-6",
-          max_tokens: 4000,
+          max_tokens: 8000,
           system: systemPrompt,
           messages: [{ role: "user", content: userPrompt }],
         }),

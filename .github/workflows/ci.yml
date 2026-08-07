@@ -2,7 +2,7 @@ name: CI — Backend (kazione-booking-backend)
 
 on:
   push:
-    branches: [master, main, dev]
+    branches: [master, main, dev, 'feat/**', 'fix/**', 'chore/**']
   pull_request:
     branches: [master, main]
   workflow_dispatch:

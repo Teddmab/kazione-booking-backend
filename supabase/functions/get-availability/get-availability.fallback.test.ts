@@ -3,8 +3,8 @@ import { buildFallbackAvailability } from "./index.ts";
 
 Deno.test("buildFallbackAvailability generates slots from working hours", () => {
   const result = buildFallbackAvailability({
-    dateStr: "2026-08-07",
-    requestedDate: new Date("2026-08-07T00:00:00Z"),
+    dateStr: "2030-06-15",
+    requestedDate: new Date("2030-06-15T00:00:00Z"),
     durationMinutes: 60,
     slotIntervalMinutes: 30,
     leadHours: 2,

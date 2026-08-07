@@ -209,8 +209,9 @@ Deno.serve(withLogging("get-availability", async (req: Request) => {
         {
           p_business_id: businessId!,
           p_service_id: serviceId!,
-          p_staff_id: staffId,
+          p_staff_id: staffId ?? null,
           p_date: dateStr!,
+          p_min_staff: 1,
         },
       );
 

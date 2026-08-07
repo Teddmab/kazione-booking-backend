@@ -84,7 +84,7 @@ jobs:
             --allow-env --allow-net --allow-read \
             --config supabase/functions/deno.json \
             --reporter=pretty \
-            --ignore=supabase/functions/_shared/adminAuth.test.ts,supabase/functions/_shared/adminAudit.test.ts
+            --ignore=supabase/functions/_shared/adminAuth.test.ts,supabase/functions/_shared/adminAudit.test.ts,supabase/functions/get-availability/get-availability.fallback.test.ts
 
       - name: Run admin shared unit tests
         run: |
@@ -93,6 +93,7 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY=test-service-role-key \
           SUPABASE_ANON_KEY=test-anon-key \
           deno test _shared/adminAuth.test.ts _shared/adminAudit.test.ts \
+                    get-availability/get-availability.fallback.test.ts \
             --allow-env --allow-net --allow-read \
             --config deno.json \
             --reporter=pretty

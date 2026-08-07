@@ -174,8 +174,9 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
       {
         p_business_id: business_id,
         p_service_id: service_id,
-        p_staff_id: staff_profile_id,
+        p_staff_id: staff_profile_id ?? null,
         p_date: date,
+        p_min_staff: 1,
       },
     );
 

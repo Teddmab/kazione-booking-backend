@@ -473,19 +473,19 @@ Deno.serve(withLogging("training", async (req: Request) => {
     if (method === "GET" && action === "my-training") {
       const user = await verifyAuth(req);
 
-      const { data: clientRow } = await supabaseAdmin
+      const { data: clientRows } = await supabaseAdmin
         .from("clients")
         .select("id")
-        .eq("user_id", user.id)
-        .maybeSingle();
+        .eq("user_id", user.id);
 
-      if (!clientRow) return jsonCors(req, { trainings: [] });
+      if (!clientRows || clientRows.length === 0) return jsonCors(req, { trainings: [] });
+      const clientIds = clientRows.map((c) => c.id);
 
       // Get all client redemptions
       const { data: redemptions } = await supabaseAdmin
         .from("offer_redemptions")
         .select("id, offer_id, status, sessions_used, sessions_total, created_at")
-        .eq("client_id", clientRow.id);
+        .in("client_id", clientIds);
 
       if (!redemptions || redemptions.length === 0) {
         return jsonCors(req, { trainings: [] });
@@ -698,16 +698,7 @@ Deno.serve(withLogging("training", async (req: Request) => {
 
       const user = await verifyAuth(req);
 
-      // Resolve client record
-      const { data: clientRow } = await supabaseAdmin
-        .from("clients")
-        .select("id")
-        .eq("user_id", user.id)
-        .maybeSingle();
-
-      if (!clientRow) return badRequest(req, "Client profile not found. Please complete signup first.");
-
-      // Resolve offer
+      // Resolve offer first (need business_id for client lookup)
       const { data: offer } = await supabaseAdmin
         .from("business_offers")
         .select("id, type, business_id, sessions_total, price")
@@ -717,6 +708,51 @@ Deno.serve(withLogging("training", async (req: Request) => {
 
       if (!offer) return notFound(req, "Training offer not found or not active");
       if (offer.type !== "training") return badRequest(req, "Offer is not a training");
+
+      // Resolve client record — auto-create for marketplace users
+      let { data: clientRow } = await supabaseAdmin
+        .from("clients")
+        .select("id")
+        .eq("user_id", user.id)
+        .eq("business_id", offer.business_id)
+        .maybeSingle();
+
+      if (!clientRow) {
+        // Try to link an existing guest client by email
+        const userEmail = user.email ?? null;
+        if (userEmail) {
+          const { data: byEmail } = await supabaseAdmin
+            .from("clients")
+            .select("id")
+            .eq("business_id", offer.business_id)
+            .eq("email", userEmail)
+            .maybeSingle();
+          if (byEmail) {
+            await supabaseAdmin.from("clients").update({ user_id: user.id }).eq("id", byEmail.id);
+            clientRow = byEmail;
+          }
+        }
+      }
+
+      if (!clientRow) {
+        const meta = (user.user_metadata ?? {}) as Record<string, string>;
+        const firstName = (meta.first_name ?? meta.given_name ?? "").trim() || (user.email?.split("@")[0] ?? "Client");
+        const lastName  = (meta.last_name  ?? meta.family_name ?? "").trim() || "";
+        const { data: newClient, error: clientErr } = await supabaseAdmin
+          .from("clients")
+          .insert({
+            business_id: offer.business_id,
+            user_id:     user.id,
+            first_name:  firstName,
+            last_name:   lastName,
+            email:       user.email ?? null,
+            source:      "marketplace",
+          })
+          .select("id")
+          .single();
+        if (clientErr) return serverError(req, `Failed to create client profile: ${clientErr.message}`);
+        clientRow = newClient;
+      }
 
       // Check for existing redemption
       const { data: existing } = await supabaseAdmin

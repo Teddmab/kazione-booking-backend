@@ -81,13 +81,13 @@ Deno.serve(withLogging("offers", async (req: Request) => {
     if (method === "GET" && action === "my-redemptions") {
       const user = await verifyAuth(req);
 
-      const { data: clientRow } = await supabaseAdmin
+      const { data: clientRows } = await supabaseAdmin
         .from("clients")
         .select("id")
-        .eq("user_id", user.id)
-        .maybeSingle();
+        .eq("user_id", user.id);
 
-      if (!clientRow) return jsonCors(req, { redemptions: [] });
+      if (!clientRows || clientRows.length === 0) return jsonCors(req, { redemptions: [] });
+      const clientIds = clientRows.map((c) => c.id);
 
       const { data, error } = await supabaseAdmin
         .from("offer_redemptions")
@@ -96,7 +96,7 @@ Deno.serve(withLogging("offers", async (req: Request) => {
           amount_paid, currency_code, expires_at, created_at,
           offer:business_offers ( id, type, title, description, price, currency_code, sessions_total, discount_type, discount_value )
         `)
-        .eq("client_id", clientRow.id)
+        .in("client_id", clientIds)
         .order("created_at", { ascending: false });
 
       if (error) return serverError(req, error.message);

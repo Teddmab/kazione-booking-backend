@@ -347,33 +347,38 @@ async function sendReminders(
 }
 
 // ---------------------------------------------------------------------------
-// TASK B — Mark no-shows (confirmed appointments 30+ min past start)
-// Optional businessId scopes to a single business (owner manual trigger).
+// TASK B — Create "please resolve this appointment" tasks for owner + staff
+//
+// Fires once per overdue confirmed appointment (tracked via pending_status_task_at).
+// Never changes appointment status — that decision belongs to the owner/staff.
 // ---------------------------------------------------------------------------
 
-async function markNoShows(
+async function createPendingStatusTasks(
   businessId?: string,
-): Promise<{ marked: number; errors: number }> {
-  const cutoff = new Date(Date.now() - 30 * 60 * 1000).toISOString();
-
+): Promise<{ created: number; skipped: number; errors: number }> {
+  // Confirmed appointments whose slot has fully ended and no task has been sent yet
   let query = supabaseAdmin
     .from("appointments")
-    .select("id, business_id")
+    .select(`
+      id, business_id, booking_reference, starts_at, ends_at,
+      staff_profile_id, staff_profile_id_2,
+      client:clients(first_name, last_name),
+      service:services(name)
+    `)
     .eq("status", "confirmed")
-    .lt("starts_at", cutoff);
+    .lt("ends_at", new Date().toISOString())
+    .is("pending_status_task_at", null);
 
   if (businessId) query = query.eq("business_id", businessId);
 
   const { data: appointments, error } = await query;
-
   if (error) {
-    console.error("Failed to query no-show appointments:", error.message);
-    return { marked: 0, errors: 1 };
+    console.error("Failed to query overdue appointments:", error.message);
+    return { created: 0, skipped: 0, errors: 1 };
   }
+  if (!appointments || appointments.length === 0) return { created: 0, skipped: 0, errors: 0 };
 
-  if (!appointments || appointments.length === 0) return { marked: 0, errors: 0 };
-
-  // Fetch owner user_ids for all distinct businesses in one query
+  // Batch-fetch owner user_ids
   const businessIds = [...new Set(appointments.map((a) => a.business_id as string))];
   const { data: ownerMembers } = await supabaseAdmin
     .from("business_members")
@@ -381,55 +386,140 @@ async function markNoShows(
     .in("business_id", businessIds)
     .eq("role", "owner")
     .eq("is_active", true);
-
   const ownerMap = new Map<string, string>(
     (ownerMembers ?? []).map((m) => [m.business_id as string, m.user_id as string]),
   );
 
-  let marked = 0;
+  // Batch-fetch staff user_ids via staff_profiles → business_members
+  const allStaffIds = [
+    ...new Set([
+      ...appointments.map((a) => a.staff_profile_id as string | null),
+      ...appointments.map((a) => a.staff_profile_id_2 as string | null),
+    ].filter(Boolean) as string[]),
+  ];
+  const staffUserMap = new Map<string, string>(); // staff_profile_id → user_id
+  if (allStaffIds.length > 0) {
+    const { data: staffProfiles } = await supabaseAdmin
+      .from("staff_profiles")
+      .select("id, business_member_id")
+      .in("id", allStaffIds)
+      .not("business_member_id", "is", null);
+    const memberIds = (staffProfiles ?? [])
+      .map((s) => s.business_member_id as string)
+      .filter(Boolean);
+    if (memberIds.length > 0) {
+      const { data: members } = await supabaseAdmin
+        .from("business_members")
+        .select("id, user_id")
+        .in("id", memberIds)
+        .eq("is_active", true);
+      const memberUserMap = new Map<string, string>(
+        (members ?? []).map((m) => [m.id as string, m.user_id as string]),
+      );
+      for (const sp of staffProfiles ?? []) {
+        const userId = memberUserMap.get(sp.business_member_id as string);
+        if (userId) staffUserMap.set(sp.id as string, userId);
+      }
+    }
+  }
+
+  let created = 0;
+  let skipped = 0;
   let errors = 0;
 
   for (const appt of appointments) {
     try {
-      const { error: updateErr } = await supabaseAdmin
-        .from("appointments")
-        .update({
-          status: "no_show",
-          no_show_marked_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
-        })
-        .eq("id", appt.id);
-
-      if (updateErr) throw updateErr;
-
-      const { error: logErr } = await supabaseAdmin.from("appointment_status_log").insert({
-        appointment_id: appt.id,
-        old_status: "confirmed",
-        new_status: "no_show",
-        reason: "Automatically marked as no-show (30 min past start time)",
+      const client = appt.client as unknown as Record<string, string> | null;
+      const service = appt.service as unknown as Record<string, string> | null;
+      const clientName = client ? `${client.first_name} ${client.last_name}`.trim() : "the client";
+      const serviceName = service?.name ?? "the appointment";
+      const startsAt = new Date(appt.starts_at as string);
+      const dateStr = startsAt.toLocaleDateString("en-GB", {
+        weekday: "short", day: "numeric", month: "short", timeZone: "UTC",
       });
-      if (logErr) throw logErr;
+      const timeStr = startsAt.toLocaleTimeString("en-GB", {
+        hour: "2-digit", minute: "2-digit", timeZone: "UTC",
+      });
+
+      const notifTitle = "Action required: appointment outcome";
+      const notifBody =
+        `${serviceName} with ${clientName} on ${dateStr} at ${timeStr} has ended. ` +
+        `Please update its status — mark as completed (and select products used), no-show, or cancelled.`;
+      const meta = {
+        appointment_id: appt.id,
+        action: "resolve_appointment",
+        booking_reference: appt.booking_reference,
+        client_name: clientName,
+        service_name: serviceName,
+        starts_at: appt.starts_at,
+      };
+
+      const notifications: { business_id: string; user_id: string; type: string; title: string; body: string; metadata: Record<string, unknown> }[] = [];
 
       const ownerUserId = ownerMap.get(appt.business_id as string);
       if (ownerUserId) {
-        await supabaseAdmin.from("notifications").insert({
-          business_id: appt.business_id,
+        notifications.push({
+          business_id: appt.business_id as string,
           user_id: ownerUserId,
-          type: "no_show",
-          title: "No-Show Detected",
-          body: `Appointment ${appt.id} was marked as no-show (30+ minutes past start time).`,
-          metadata: { appointment_id: appt.id },
+          type: "action_required",
+          title: notifTitle,
+          body: notifBody,
+          metadata: meta,
         });
       }
 
-      marked++;
+      // Primary staff
+      if (appt.staff_profile_id) {
+        const staffUserId = staffUserMap.get(appt.staff_profile_id as string);
+        if (staffUserId && staffUserId !== ownerUserId) {
+          notifications.push({
+            business_id: appt.business_id as string,
+            user_id: staffUserId,
+            type: "action_required",
+            title: notifTitle,
+            body: notifBody,
+            metadata: meta,
+          });
+        }
+      }
+      // Second staff (dual-stylist)
+      if (appt.staff_profile_id_2) {
+        const staffUserId2 = staffUserMap.get(appt.staff_profile_id_2 as string);
+        if (staffUserId2 && staffUserId2 !== ownerUserId &&
+            staffUserId2 !== staffUserMap.get(appt.staff_profile_id as string ?? "")) {
+          notifications.push({
+            business_id: appt.business_id as string,
+            user_id: staffUserId2,
+            type: "action_required",
+            title: notifTitle,
+            body: notifBody,
+            metadata: meta,
+          });
+        }
+      }
+
+      if (notifications.length === 0) { skipped++; continue; }
+
+      const { error: notifErr } = await supabaseAdmin
+        .from("notifications")
+        .insert(notifications);
+      if (notifErr) throw notifErr;
+
+      // Mark task as sent — appointment status is NOT changed
+      const { error: updateErr } = await supabaseAdmin
+        .from("appointments")
+        .update({ pending_status_task_at: new Date().toISOString() })
+        .eq("id", appt.id as string);
+      if (updateErr) throw updateErr;
+
+      created++;
     } catch (err) {
-      console.error(`No-show error for appointment ${appt.id}:`, err);
+      console.error(`Task creation error for appointment ${appt.id}:`, err);
       errors++;
     }
   }
 
-  return { marked, errors };
+  return { created, skipped, errors };
 }
 
 // ---------------------------------------------------------------------------
@@ -447,11 +537,11 @@ Deno.serve(withLogging("send-reminders", async (req: Request) => {
   // ── Path 1: CRON_SECRET — runs across all businesses ──────────────────
   if (verifyCronAuth(req)) {
     try {
-      const [reminders, noShows] = await Promise.all([
+      const [reminders, tasks] = await Promise.all([
         sendReminders(),
-        markNoShows(),
+        createPendingStatusTasks(),
       ]);
-      const result = { ok: true, timestamp: new Date().toISOString(), reminders, no_shows: noShows };
+      const result = { ok: true, timestamp: new Date().toISOString(), reminders, tasks };
       console.log("send-reminders (cron) completed:", JSON.stringify(result));
       return new Response(JSON.stringify(result), {
         status: 200,
@@ -480,15 +570,15 @@ Deno.serve(withLogging("send-reminders", async (req: Request) => {
 
   try {
     const reminders = await sendReminders(ctx.businessId, body.appointment_id);
-    // Skip no-show detection for single-appointment triggers
-    const noShows = body.appointment_id
-      ? { marked: 0, errors: 0 }
-      : await markNoShows(ctx.businessId);
+    // Skip task creation for single-appointment reminder triggers
+    const tasks = body.appointment_id
+      ? { created: 0, skipped: 0, errors: 0 }
+      : await createPendingStatusTasks(ctx.businessId);
     const result = {
       ok: true,
       timestamp: new Date().toISOString(),
       reminders,
-      no_shows: noShows,
+      tasks,
       triggered_by: ctx.userId,
     };
     console.log("send-reminders (manual) completed:", JSON.stringify(result));

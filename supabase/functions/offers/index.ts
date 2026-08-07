@@ -1,7 +1,7 @@
 import { supabaseAdmin } from "../_shared/supabaseAdmin.ts";
 import { handleCors, jsonCors } from "../_shared/cors.ts";
 import { badRequest, notFound, serverError } from "../_shared/errors.ts";
-import { requireOwnerOrManagerCtx } from "../_shared/auth.ts";
+import { requireOwnerOrManagerCtx, verifyAuth } from "../_shared/auth.ts";
 import { withLogging } from "../_shared/logger.ts";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -60,6 +60,49 @@ Deno.serve(withLogging("offers", async (req: Request) => {
   const id     = url.searchParams.get("id") ?? undefined;
 
   try {
+    // ── GET /offers?action=catalog&business_id= — public: active offers for a business ──
+    // No auth required — used by the client storefront page.
+    if (method === "GET" && action === "catalog") {
+      const businessId = url.searchParams.get("business_id");
+      if (!businessId) return badRequest(req, "business_id is required");
+
+      const { data, error } = await supabaseAdmin
+        .from("business_offers")
+        .select("id, type, title, description, price, currency_code, sessions_total, discount_type, discount_value, valid_from, valid_until")
+        .eq("business_id", businessId)
+        .eq("is_active", true)
+        .order("created_at", { ascending: false });
+
+      if (error) return serverError(req, error.message);
+      return jsonCors(req, { offers: data ?? [] });
+    }
+
+    // ── GET /offers?action=my-redemptions — client: list own redemptions ──────
+    if (method === "GET" && action === "my-redemptions") {
+      const user = await verifyAuth(req);
+
+      const { data: clientRow } = await supabaseAdmin
+        .from("clients")
+        .select("id")
+        .eq("user_id", user.id)
+        .maybeSingle();
+
+      if (!clientRow) return jsonCors(req, { redemptions: [] });
+
+      const { data, error } = await supabaseAdmin
+        .from("offer_redemptions")
+        .select(`
+          id, offer_id, status, sessions_used, sessions_total,
+          amount_paid, currency_code, expires_at, created_at,
+          offer:business_offers ( id, type, title, description, price, currency_code, sessions_total, discount_type, discount_value )
+        `)
+        .eq("client_id", clientRow.id)
+        .order("created_at", { ascending: false });
+
+      if (error) return serverError(req, error.message);
+      return jsonCors(req, { redemptions: data ?? [] });
+    }
+
     // ── GET /offers?business_id= — list active offer catalog ─────────────────
     if (method === "GET" && !action) {
       const businessId  = url.searchParams.get("business_id");

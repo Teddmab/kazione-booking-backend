@@ -430,10 +430,10 @@ Deno.serve(withLogging("training", async (req: Request) => {
       return jsonCors(req, { success: true });
     }
 
-    // ── POST ?action=upload-url — owner: signed video upload URL ─────────────
+    // ── POST ?action=upload-url — owner: signed media upload URL ────────────
     if (method === "POST" && action === "upload-url") {
       const body = await req.json().catch(() => null) as {
-        business_id: string; course_id: string;
+        business_id: string; course_id: string; file_name?: string; content_type?: string;
       } | null;
       if (!body) return badRequest(req, "Invalid JSON body");
 
@@ -453,8 +453,13 @@ Deno.serve(withLogging("training", async (req: Request) => {
 
       if (!course) return notFound(req, "Course not found");
 
-      const videoId     = crypto.randomUUID();
-      const storagePath = `${business_id}/${course_id}/${videoId}.mp4`;
+      // Derive extension from file_name; default to mp4 for video uploads.
+      const fileName = body.file_name ?? "";
+      const dotIdx = fileName.lastIndexOf(".");
+      const ext = dotIdx >= 0 ? fileName.slice(dotIdx + 1).toLowerCase() : "mp4";
+
+      const assetId     = crypto.randomUUID();
+      const storagePath = `${business_id}/${course_id}/${assetId}.${ext}`;
 
       const { data, error } = await supabaseAdmin.storage
         .from(BUCKET)
@@ -462,6 +467,68 @@ Deno.serve(withLogging("training", async (req: Request) => {
 
       if (error) return serverError(req, error.message);
       return jsonCors(req, { upload_url: rewriteLocalUrl(data.signedUrl), path: storagePath });
+    }
+
+    // ── GET ?action=my-training — client: list own training redemptions ───────
+    if (method === "GET" && action === "my-training") {
+      const user = await verifyAuth(req);
+
+      const { data: clientRow } = await supabaseAdmin
+        .from("clients")
+        .select("id")
+        .eq("user_id", user.id)
+        .maybeSingle();
+
+      if (!clientRow) return jsonCors(req, { trainings: [] });
+
+      // Get all client redemptions
+      const { data: redemptions } = await supabaseAdmin
+        .from("offer_redemptions")
+        .select("id, offer_id, status, sessions_used, sessions_total, created_at")
+        .eq("client_id", clientRow.id);
+
+      if (!redemptions || redemptions.length === 0) {
+        return jsonCors(req, { trainings: [] });
+      }
+
+      const offerIds = redemptions.map((r) => r.offer_id);
+
+      // Get only training-type offers
+      const { data: trainingOffers } = await supabaseAdmin
+        .from("business_offers")
+        .select("id, title, description")
+        .in("id", offerIds)
+        .eq("type", "training");
+
+      if (!trainingOffers || trainingOffers.length === 0) {
+        return jsonCors(req, { trainings: [] });
+      }
+
+      const trainingOfferIds = new Set(trainingOffers.map((o) => o.id));
+
+      // Get courses linked to those offers
+      const { data: courses } = await supabaseAdmin
+        .from("training_courses")
+        .select("id, offer_id, title, description")
+        .in("offer_id", [...trainingOfferIds]);
+
+      const courseByOfferId = new Map((courses ?? []).map((c) => [c.offer_id, c]));
+      const offerById       = new Map(trainingOffers.map((o) => [o.id, o]));
+
+      const trainings = redemptions
+        .filter((r) => trainingOfferIds.has(r.offer_id))
+        .map((r) => ({
+          redemption_id:  r.id,
+          offer_id:       r.offer_id,
+          status:         r.status,
+          sessions_used:  r.sessions_used,
+          sessions_total: r.sessions_total,
+          created_at:     r.created_at,
+          offer_title:    offerById.get(r.offer_id)?.title ?? null,
+          course:         courseByOfferId.get(r.offer_id) ?? null,
+        }));
+
+      return jsonCors(req, { trainings });
     }
 
     // ── POST ?action=progress — client: mark section complete ─────────────────

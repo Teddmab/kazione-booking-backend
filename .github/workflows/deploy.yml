@@ -16,7 +16,7 @@ jobs:
 
       - uses: supabase/setup-cli@v1
         with:
-          version: latest
+          version: 2.105.0
 
       - name: Deploy all edge functions
         env:
@@ -27,6 +27,10 @@ jobs:
       - name: Push pending migrations
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+          SUPABASE_PROJECT_ID: ${{ secrets.SUPABASE_PROJECT_ID }}
         run: |
-          supabase link --project-ref "${{ secrets.SUPABASE_PROJECT_ID }}"
-          supabase db push --linked --password "${{ secrets.SUPABASE_DB_PASSWORD }}"
+          # Use --db-url to bypass supabase link, which fails on some CLI versions
+          # due to strict ISO 8601 validation of inserted_at in the Management API response
+          supabase db push \
+            --db-url "postgresql://postgres:${SUPABASE_DB_PASSWORD}@db.${SUPABASE_PROJECT_ID}.supabase.co:5432/postgres"

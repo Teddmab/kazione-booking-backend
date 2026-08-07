@@ -7,9 +7,16 @@ on:
     branches: [master, main]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: backend-ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  type-check:
-    name: Deno Type Check
+  ci:
+    name: Backend CI
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -27,28 +34,8 @@ jobs:
           done
           exit $fail
 
-  lint:
-    name: Deno Lint
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: denoland/setup-deno@v2
-        with:
-          deno-version: v2.x
-
       - name: Lint
         run: deno lint --config supabase/functions/deno.json supabase/functions
-
-  integration-tests:
-    name: Integration Tests
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: denoland/setup-deno@v2
-        with:
-          deno-version: v2.x
 
       - uses: supabase/setup-cli@v1
         with:
@@ -99,24 +86,7 @@ jobs:
             --reporter=pretty \
             --ignore=supabase/functions/_shared/adminAuth.test.ts,supabase/functions/_shared/adminAudit.test.ts
 
-      - name: Stop Supabase stack
-        if: always()
-        run: supabase stop
-
-  admin-unit-tests:
-    name: Admin Shared Unit Tests
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: denoland/setup-deno@v2
-        with:
-          deno-version: v2.x
-
       - name: Run admin shared unit tests
-        # Mock env vars so supabaseAdmin.ts can initialise without a real DB.
-        # These tests only exercise pure logic (header parsing, type shapes,
-        # fire-and-forget resilience) — no actual DB calls succeed.
         run: |
           cd supabase/functions
           SUPABASE_URL=http://127.0.0.1:54321 \
@@ -126,3 +96,7 @@ jobs:
             --allow-env --allow-net --allow-read \
             --config deno.json \
             --reporter=pretty
+
+      - name: Stop Supabase stack
+        if: always()
+        run: supabase stop

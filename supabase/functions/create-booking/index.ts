@@ -5,7 +5,12 @@ import { verifyAuth } from "../_shared/auth.ts";
 import { createPaymentIntent } from "../_shared/stripe.ts";
 import { withLogging } from "../_shared/logger.ts";
 import { checkRateLimit } from "../_shared/rateLimit.ts";
-import { bookingConfirmationEmail, bookingReceivedOwnerEmail, staffAppointmentOfferEmail, sendEmail } from "../_shared/resend.ts";
+import {
+  bookingConfirmationEmail,
+  bookingReceivedOwnerEmail,
+  sendEmail,
+  staffAppointmentOfferEmail,
+} from "../_shared/resend.ts";
 import { issueCancelToken } from "../_shared/bookingCancelToken.ts";
 import { sendSms } from "../_shared/messagebird.ts";
 import { sendWhatsApp } from "../_shared/meta-whatsapp.ts";
@@ -235,7 +240,8 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
       if (referrerStaffId) {
         // Referral booking — prefer the referred staff's slot
         const referrerSlot = matchingSlots.find(
-          (s: { staff_profile_id: string }) => s.staff_profile_id === referrerStaffId,
+          (s: { staff_profile_id: string }) =>
+            s.staff_profile_id === referrerStaffId,
         );
         selectedStaffId = referrerSlot
           ? referrerStaffId
@@ -290,9 +296,11 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
     // ── Validate payment method against business's enabled list ───────────
     const enabledMethods: string[] =
       (settings?.enabled_payment_methods as string[] | null) ??
-      ["deposit", "full", "later"];
+        ["deposit", "full", "later"];
     // Empty list = no online payment step; only "later" is allowed server-side
-    const effectiveEnabled = enabledMethods.length > 0 ? enabledMethods : ["later"];
+    const effectiveEnabled = enabledMethods.length > 0
+      ? enabledMethods
+      : ["later"];
     if (!effectiveEnabled.includes(payment_method)) {
       return badRequest(
         `payment_method '${payment_method}' is not enabled for this business. ` +
@@ -501,7 +509,9 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
     // Snapshot commission_split_pct from service for dual-staff appointments
     // (owner assigns both staff members after booking; split is snapshotted now
     // so retroactive service edits don't affect historical commission payouts).
-    const requiresTwoStaff = Boolean((service as Record<string, unknown>).requires_two_staff);
+    const requiresTwoStaff = Boolean(
+      (service as Record<string, unknown>).requires_two_staff,
+    );
     const splitPct = requiresTwoStaff
       ? Number((service as Record<string, unknown>).commission_split_pct ?? 50)
       : null;
@@ -528,6 +538,7 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
         p_notes: client.notes ?? null,
         p_payment_method: payment_method,
         p_payment_status: "pending",
+        p_staff_id_2: null,
         p_commission_split_pct: splitPct,
       },
     );
@@ -563,7 +574,9 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
     } else if (body.intake_answer) {
       apptExtra.intake_answer = body.intake_answer;
     }
-    if (body.terms_accepted) apptExtra.terms_accepted_at = new Date().toISOString();
+    if (body.terms_accepted) {
+      apptExtra.terms_accepted_at = new Date().toISOString();
+    }
 
     if (referrerStaffId) {
       // Referral booking: record the referrer and mark as offered (staff must confirm)
@@ -584,9 +597,13 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
             .select("user:users(email)")
             .eq("id", sp.business_member_id as string)
             .maybeSingle();
-          const staffEmail = ((bmRow as Record<string, unknown> | null)?.user as Record<string, unknown> | null)?.email as string | null;
+          const staffEmail =
+            ((bmRow as Record<string, unknown> | null)?.user as
+              | Record<string, unknown>
+              | null)?.email as string | null;
           if (!staffEmail) return;
-          const appUrl = Deno.env.get("APP_URL") ?? "https://kazionebooking.com";
+          const appUrl = Deno.env.get("APP_URL") ??
+            "https://kazionebooking.com";
           const { subject, html } = staffAppointmentOfferEmail({
             staffName: (sp.display_name as string) ?? "Team member",
             salonName: business.name,
@@ -598,8 +615,12 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
             reference: bookingReference,
             dashboardUrl: `${appUrl}/staff`,
           });
-          await sendEmail(staffEmail, subject, html).catch((e) => console.warn("referral offer email failed:", e));
-        } catch (e) { console.warn("referral offer email error:", e); }
+          await sendEmail(staffEmail, subject, html).catch((e) =>
+            console.warn("referral offer email failed:", e)
+          );
+        } catch (e) {
+          console.warn("referral offer email error:", e);
+        }
       })();
     } else if (!staff_profile_id) {
       // Non-referral booking with no explicit staff preference: clear the slot-lock staff
@@ -608,7 +629,10 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
     }
 
     if (Object.keys(apptExtra).length > 0) {
-      await supabaseAdmin.from("appointments").update(apptExtra).eq("id", appointmentId);
+      await supabaseAdmin.from("appointments").update(apptExtra).eq(
+        "id",
+        appointmentId,
+      );
     }
 
     // STEP 7: INSERT appointment_services
@@ -711,18 +735,21 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
           `Pending confirmation. Ref: ${bookingReference}. Manage: ${appUrl}/booking/${bookingReference}`;
         if (settings?.sms_notifications_enabled) {
           sendSms(clientPhone, smsText).catch((err) =>
-            console.error("SMS send failed:", err),
+            console.error("SMS send failed:", err)
           );
         }
         if (settings?.whatsapp_notifications_enabled) {
           sendWhatsApp(clientPhone, smsText).catch((err) =>
-            console.error("WhatsApp send failed:", err),
+            console.error("WhatsApp send failed:", err)
           );
         }
       }
 
       // Send owner notification email if configured
-      const ownerNotifEmail = settings?.booking_notification_email as string | null | undefined;
+      const ownerNotifEmail = settings?.booking_notification_email as
+        | string
+        | null
+        | undefined;
       if (ownerNotifEmail) {
         const ownerEmailData = bookingReceivedOwnerEmail({
           clientName: first,
@@ -735,12 +762,15 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
           date,
           time,
           reference: bookingReference,
-          price: `${currencyCode === "EUR" ? "€" : currencyCode} ${totalAmount.toFixed(2)}`,
+          price: `${currencyCode === "EUR" ? "€" : currencyCode} ${
+            totalAmount.toFixed(2)
+          }`,
           manageUrl: `${appUrl}/owner`,
         });
-        sendEmail(ownerNotifEmail, ownerEmailData.subject, ownerEmailData.html).catch(
-          (err) => console.error("Owner notification email failed:", err),
-        );
+        sendEmail(ownerNotifEmail, ownerEmailData.subject, ownerEmailData.html)
+          .catch(
+            (err) => console.error("Owner notification email failed:", err),
+          );
       }
 
       // Insert notification for business

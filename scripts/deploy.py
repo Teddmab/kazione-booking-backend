@@ -62,7 +62,7 @@ def delete_function(slug: str) -> bool:
     """Delete the function via Supabase CLI (uses its own auth, avoids token expiry)."""
     try:
         result = subprocess.run(
-            ["npx", "supabase", "functions", "delete", slug, "--project-ref", PROJECT_REF],
+            ["supabase", "functions", "delete", slug, "--project-ref", PROJECT_REF],
             cwd=PROJECT_DIR, capture_output=True, text=True, timeout=30,
         )
         ok = result.returncode == 0
@@ -98,10 +98,10 @@ def needs_import_map(slug: str) -> bool:
     return False
 
 
-def _run_deploy_cmd(slug: str) -> tuple[bool, bool]:
+def _run_deploy_cmd(slug: str, timeout: int = 240) -> tuple[bool, bool]:
     """Run the deploy CLI command. Returns (success, got_409)."""
     cmd = [
-        "npx", "supabase", "functions", "deploy", slug,
+        "supabase", "functions", "deploy", slug,
         "--project-ref", PROJECT_REF, "--use-api",
     ]
     if needs_import_map(slug):
@@ -117,7 +117,7 @@ def _run_deploy_cmd(slug: str) -> tuple[bool, bool]:
 
     output_lines: list[str] = []
     start = time.time()
-    while proc.poll() is None and time.time() - start < 120:
+    while proc.poll() is None and time.time() - start < timeout:
         r, _, _ = select.select([master], [], [], 0.3)
         if r:
             try:
@@ -140,6 +140,7 @@ def _run_deploy_cmd(slug: str) -> tuple[bool, bool]:
     timed_out = proc.poll() is None
     if timed_out:
         proc.kill()
+        print(f"  [timeout] deploy timed out after {timeout}s", flush=True)
     try:
         os.close(master)
     except Exception:
@@ -148,7 +149,19 @@ def _run_deploy_cmd(slug: str) -> tuple[bool, bool]:
     if timed_out:
         return False, False
 
-    got_409 = any("409" in l and "deployment already exists" in l for l in output_lines)
+    got_409 = any(
+        ("409" in l or "already exists" in l.lower()) for l in output_lines
+    )
+
+    if proc.returncode != 0 and not got_409:
+        # Print full output so CI logs show the actual error
+        if output_lines:
+            print(f"  [error] deploy failed (exit {proc.returncode}). Captured output:", flush=True)
+            for l in output_lines:
+                print(f"    {l}", flush=True)
+        else:
+            print(f"  [error] deploy failed (exit {proc.returncode}) — no output captured", flush=True)
+
     return proc.returncode == 0, got_409
 
 

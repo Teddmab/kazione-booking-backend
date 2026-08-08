@@ -100,4 +100,4 @@ jobs:
 
       - name: Stop Supabase stack
         if: always()
-        run: supabase stop
+        run: command -v supabase && supabase stop || true

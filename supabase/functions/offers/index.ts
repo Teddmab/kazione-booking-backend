@@ -97,9 +97,9 @@ Deno.serve(withLogging("offers", async (req: Request) => {
       if (error) return serverError(req, error.message);
       if (!row) return notFound(req, "Voucher not found");
 
-      const offer  = row.offer as { type: string; title: string; currency_code: string; sessions_total: number | null } | null;
-      const client = row.client as { first_name: string } | null;
-      const biz    = row.business as { name: string } | null;
+      const offer  = row.offer as unknown as { type: string; title: string; currency_code: string; sessions_total: number | null } | null;
+      const client = row.client as unknown as { first_name: string } | null;
+      const biz    = row.business as unknown as { name: string } | null;
 
       const balance_remaining =
         (row.voucher_value ?? 0) - (row.voucher_used ?? 0);

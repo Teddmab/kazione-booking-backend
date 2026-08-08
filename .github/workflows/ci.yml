@@ -39,7 +39,7 @@ jobs:
 
       - uses: supabase/setup-cli@v1
         with:
-          version: 2.105.0
+          version: latest
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -100,4 +100,4 @@ jobs:
 
       - name: Stop Supabase stack
         if: always()
-        run: supabase stop
+        run: command -v supabase && supabase stop || true

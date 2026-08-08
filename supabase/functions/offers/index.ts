@@ -1,6 +1,6 @@
 import { supabaseAdmin } from "../_shared/supabaseAdmin.ts";
 import { handleCors, jsonCors } from "../_shared/cors.ts";
-import { badRequest, notFound, serverError } from "../_shared/errors.ts";
+import { badRequest, forbidden, notFound, serverError } from "../_shared/errors.ts";
 import { requireOwnerOrManagerCtx, verifyAuth } from "../_shared/auth.ts";
 import { withLogging } from "../_shared/logger.ts";
 
@@ -75,6 +75,60 @@ Deno.serve(withLogging("offers", async (req: Request) => {
 
       if (error) return serverError(req, error.message);
       return jsonCors(req, { offers: data ?? [] });
+    }
+
+    // ── POST /offers?action=staff-redeem — staff: mark a voucher as fully used ──
+    // Any business member (owner, manager, staff, receptionist) may call this.
+    // Used from the staff "Scan Voucher" dialog.
+    if (method === "POST" && action === "staff-redeem") {
+      const user = await verifyAuth(req);
+      const body = await req.json().catch(() => null) as { redemption_id: string; amount?: number } | null;
+      if (!body?.redemption_id) return badRequest(req, "redemption_id is required");
+
+      const { data: redemption, error: rErr } = await supabaseAdmin
+        .from("offer_redemptions")
+        .select(`
+          id, status, business_id, sessions_total, sessions_used,
+          voucher_value, voucher_used,
+          offer:business_offers ( type )
+        `)
+        .eq("id", body.redemption_id)
+        .maybeSingle();
+
+      if (rErr) return serverError(req, rErr.message);
+      if (!redemption) return notFound(req, "Voucher not found");
+      if (redemption.status !== "active") return badRequest(req, `Voucher is ${redemption.status}, not active`);
+
+      // Verify the caller is a member of this business (any role)
+      const { data: member } = await supabaseAdmin
+        .from("business_members")
+        .select("role")
+        .eq("user_id", user.id)
+        .eq("business_id", redemption.business_id)
+        .maybeSingle();
+
+      if (!member) return forbidden(req, "Not a member of this business");
+
+      const offer = redemption.offer as unknown as { type: string } | null;
+      const now   = new Date().toISOString();
+
+      let update: Record<string, unknown> = { status: "completed", completed_at: now };
+
+      if (offer?.type === "gift_voucher") {
+        const remaining = (redemption.voucher_value ?? 0) - (redemption.voucher_used ?? 0);
+        const toUse     = Math.min(body.amount ?? remaining, remaining);
+        update = { voucher_used: (redemption.voucher_used ?? 0) + toUse, status: "completed", completed_at: now };
+      } else if (offer?.type === "package" || offer?.type === "training") {
+        update = { sessions_used: redemption.sessions_total ?? 0, status: "completed", completed_at: now };
+      }
+
+      const { error: uErr } = await supabaseAdmin
+        .from("offer_redemptions")
+        .update(update)
+        .eq("id", body.redemption_id);
+
+      if (uErr) return serverError(req, uErr.message);
+      return jsonCors(req, { success: true });
     }
 
     // ── POST /offers?action=buy — client: self-purchase any active offer ────────

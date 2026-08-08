@@ -68,7 +68,7 @@ Deno.serve(withLogging("offers", async (req: Request) => {
 
       const { data, error } = await supabaseAdmin
         .from("business_offers")
-        .select("id, type, title, description, price, currency_code, sessions_total, discount_type, discount_value, valid_from, valid_until")
+        .select("id, type, title, description, price, currency_code, sessions_total, discount_type, discount_value, applies_to_services, valid_from, valid_until")
         .eq("business_id", businessId)
         .eq("is_active", true)
         .order("created_at", { ascending: false });
@@ -213,7 +213,7 @@ Deno.serve(withLogging("offers", async (req: Request) => {
         .select(`
           id, offer_id, status, sessions_used, sessions_total,
           voucher_value, voucher_used, amount_paid, created_at, completed_at,
-          offer:business_offers ( id, type, title, description, price, currency_code, sessions_total, discount_type, discount_value ),
+          offer:business_offers ( id, type, title, description, price, currency_code, sessions_total, discount_type, discount_value, applies_to_services ),
           business:businesses ( name )
         `)
         .in("client_id", clientIds)

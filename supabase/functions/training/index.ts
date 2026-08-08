@@ -998,7 +998,7 @@ Deno.serve(withLogging("training", async (req: Request) => {
         },
         body: JSON.stringify({
           model: "claude-haiku-4-5-20251001",
-          max_tokens: 4096,
+          max_tokens: 8192,
           system: systemPrompt,
           messages: [{ role: "user", content: userPrompt }],
         }),
@@ -1019,13 +1019,106 @@ Deno.serve(withLogging("training", async (req: Request) => {
       try {
         parsed = JSON.parse(jsonMatch[0]);
       } catch {
+        console.error("[training/ai-generate] JSON.parse failed. stop_reason:", aiData.stop_reason, "raw prefix:", rawText.slice(0, 200));
         return serverError(req, "AI returned invalid JSON — try again");
       }
 
       return jsonCors(req, { course: parsed.course ?? null });
     }
 
-    return badRequest(req, "Unknown route. Expected action: course|player|chapter|section|upload-url|progress|slots|register|review|reviews|my-slots|ai-generate");
+    // ── POST ?action=ai-suggest-chapter — owner: AI sections for one chapter ──
+    if (method === "POST" && action === "ai-suggest-chapter") {
+      const body = await req.json().catch(() => null) as {
+        business_id: string; offer_id: string; chapter_title: string;
+        instructions?: string;
+        tone?: "beginner" | "intermediate" | "professional";
+      } | null;
+      if (!body) return badRequest(req, "Invalid JSON body");
+
+      const { business_id, offer_id, chapter_title } = body;
+      if (!business_id)         return badRequest(req, "business_id is required");
+      if (!offer_id)            return badRequest(req, "offer_id is required");
+      if (!chapter_title?.trim()) return badRequest(req, "chapter_title is required");
+
+      const ctx = await requireOwnerOrManagerCtx(req, business_id);
+      if (ctx instanceof Response) return ctx;
+
+      const apiKey = Deno.env.get("ANTHROPIC_API_KEY");
+      if (!apiKey) return serverError(req, "AI generation is not configured on this server");
+
+      const [{ data: offer }, { data: business }] = await Promise.all([
+        supabaseAdmin.from("business_offers").select("id, title, type").eq("id", offer_id).eq("business_id", business_id).single(),
+        supabaseAdmin.from("businesses").select("name, city, country").eq("id", business_id).single(),
+      ]);
+
+      if (!offer) return notFound(req, "Offer not found");
+      if (offer.type !== "training") return badRequest(req, "Offer must be type 'training'");
+
+      const tone = body.tone ?? "intermediate";
+      const toneMap: Record<string, string> = {
+        beginner:     "Simple language, step-by-step breakdowns, no jargon. Assume no prior experience.",
+        intermediate: "Balance theory with hands-on practical tips. Some prior experience assumed.",
+        professional: "Dense, specific, peer-to-peer — advanced practitioners only. No hand-holding.",
+      };
+
+      const systemPrompt =
+        "You are a professional beauty education content writer for KaziOne. " +
+        "Write training section content that sounds natural, like an experienced practitioner — not AI-generated. " +
+        "Draw on real salon workflows and hands-on expertise. " +
+        "All text fields must be i18n objects with keys en/et/fr/ru. " +
+        "Be CONCISE — 60–100 words per language per section. " +
+        "Always respond with valid JSON only — no text, no markdown, no code fences.";
+
+      const userPrompt = [
+        `Business: ${business?.name ?? "the salon"} (${business?.city ?? ""}, ${business?.country ?? ""})`,
+        `Training offer: "${offer.title}"`,
+        `Chapter to fill: "${chapter_title.trim()}"`,
+        body.instructions ? `Owner instructions: ${body.instructions}` : "",
+        `Tone: ${toneMap[tone]}`,
+        "",
+        "Create 2–3 sections for this specific chapter only.",
+        'Mark 1 section as content_type "video" where a filmed demo helps; others as "text".',
+        "Titles: 4–7 words. content_text: 60–100 words per language.",
+        'Every text value MUST be an i18n object: {"en":"","et":"","fr":"","ru":""}',
+        "",
+        "Respond with exactly this JSON shape:",
+        '{ "sections": [{ "title": {"en":"","et":"","fr":"","ru":""}, "content_type": "text"|"video", "content_text": {"en":"","et":"","fr":"","ru":""} }] }',
+      ].filter(Boolean).join("\n");
+
+      const anthropicRes = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01" },
+        body: JSON.stringify({
+          model:      "claude-haiku-4-5-20251001",
+          max_tokens: 4096,
+          system:     systemPrompt,
+          messages:   [{ role: "user", content: userPrompt }],
+        }),
+      });
+
+      if (!anthropicRes.ok) {
+        const errText = await anthropicRes.text();
+        console.error("[training/ai-suggest-chapter] Anthropic error", anthropicRes.status, errText.slice(0, 300));
+        return serverError(req, `AI generation failed (${anthropicRes.status})`);
+      }
+
+      const aiData = await anthropicRes.json();
+      const rawText: string = aiData.content?.[0]?.text ?? "";
+      const jsonMatch = rawText.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) return serverError(req, "AI returned unexpected format — try again");
+
+      let parsed: { sections?: unknown };
+      try {
+        parsed = JSON.parse(jsonMatch[0]);
+      } catch {
+        console.error("[training/ai-suggest-chapter] JSON.parse failed. stop_reason:", aiData.stop_reason, "raw:", rawText.slice(0, 200));
+        return serverError(req, "AI returned invalid JSON — try again");
+      }
+
+      return jsonCors(req, { sections: parsed.sections ?? [] });
+    }
+
+    return badRequest(req, "Unknown route. Expected action: course|player|chapter|section|upload-url|progress|slots|register|review|reviews|my-slots|ai-generate|ai-suggest-chapter");
   } catch (err) {
     console.error("training error:", err);
     return serverError(req, "An unexpected error occurred");

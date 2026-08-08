@@ -1,6 +1,7 @@
 {
   "version": "5",
   "specifiers": {
+    "npm:@messagebird/sdk@*": "0.16.0",
     "npm:@supabase/supabase-js@2": "2.106.2",
     "npm:resend@3": "3.5.0_react@18.3.1_react-dom@18.3.1__react@18.3.1",
     "npm:stripe@14": "14.25.0"
@@ -15,6 +16,12 @@
         "strip-ansi-cjs@npm:strip-ansi@6.0.1",
         "wrap-ansi@8.1.0",
         "wrap-ansi-cjs@npm:wrap-ansi@7.0.0"
+      ]
+    },
+    "@messagebird/sdk@0.16.0": {
+      "integrity": "sha512-8LZpBtcnqdzTX+0VsF9qzYuCsambz3gb0xWSQsvpZpFk6UDfGCDfQYZug1x++kvmgP7rbks6ZSZfZbhEl8HTAw==",
+      "dependencies": [
+        "standardwebhooks"
       ]
     },
     "@one-ini/wasm@0.1.1": {
@@ -39,6 +46,9 @@
         "domhandler",
         "selderee"
       ]
+    },
+    "@stablelib/base64@1.0.1": {
+      "integrity": "sha512-1bnPQqSxSuc3Ii6MhBysoWCg58j97aUjuCSZrGSmDxNqtytIi0k8utUenAwTZN4V5mXXYGsVUI9zeBqy+jBOSQ=="
     },
     "@supabase/auth-js@2.106.2": {
       "integrity": "sha512-VcAjUErkHkhC5Jaf+g/G1qbkQrFh8edaCdHa7pxJmHUjkWKjT7UnYCtPA89XV0N0GIYRkEqJZw5V62CtOxTmBQ==",
@@ -231,6 +241,9 @@
     },
     "fast-deep-equal@2.0.1": {
       "integrity": "sha512-bCK/2Z4zLidyB4ReuIsvALH6w31YfAQDmXMqMx6FyfHqvBxtjC0eRumeSu4Bs3XtXwpyIywtSTrVT99BxY1f9w=="
+    },
+    "fast-sha256@1.3.0": {
+      "integrity": "sha512-n11RGP/lrWEFI/bWdygLxhI+pVeo1ZYIVwvvPkW7azl/rOy+F3HYRZ2K5zeE9mmkhQppyv9sQFx0JM9UabnpPQ=="
     },
     "foreground-child@3.3.1": {
       "integrity": "sha512-gIXjKqtFuWEgzFRJA9WCQeSJLZDjgJUOMCMzxtvFq/37KojM1BFGufqsCy0r4qSQmYLsZYMeyRqzIWOMup03sw==",
@@ -502,6 +515,13 @@
     },
     "signal-exit@4.1.0": {
       "integrity": "sha512-bzyZ1e88w9O1iNJbKnOlvYTrWPDl46O1bG0D3XInv+9tkPrxrN8jUUTiFlDkkmKWgn1M6CfIA13SuGqOa9Korw=="
+    },
+    "standardwebhooks@1.0.0": {
+      "integrity": "sha512-BbHGOQK9olHPMvQNHWul6MYlrRTAOKn03rOe4A8O3CLWhNf4YHBqq2HJKKC+sfqpxiBY52pNeesD6jIiLDz8jg==",
+      "dependencies": [
+        "@stablelib/base64",
+        "fast-sha256"
+      ]
     },
     "string-width@4.2.3": {
       "integrity": "sha512-wKyQRQpjJ0sIp62ErSZdGsjMJWsap5oRNihHhu6G7JVO/9jIB6UyevL+tXuOqrng8j/cxKTWyWUwvSTriiZz/g==",

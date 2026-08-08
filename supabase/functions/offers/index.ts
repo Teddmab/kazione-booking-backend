@@ -540,7 +540,7 @@ Deno.serve(withLogging("offers", async (req: Request) => {
       const ctx = await requireOwnerOrManagerCtx(req, businessId);
       if (ctx instanceof Response) return ctx;
 
-      const allowed = ["payment_id", "bank_transaction_id", "amount_paid", "status", "notes"];
+      const allowed = ["payment_id", "bank_transaction_id", "amount_paid", "payment_method", "status", "notes"];
       const patch: Record<string, unknown> = {};
       for (const key of allowed) {
         if (key in body) patch[key] = body[key];

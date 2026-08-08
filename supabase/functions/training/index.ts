@@ -967,24 +967,25 @@ Deno.serve(withLogging("training", async (req: Request) => {
         "You are a professional beauty education content writer for KaziOne. " +
         "You create training courses that sound natural and written by an experienced practitioner — not AI-generated. " +
         "Your writing draws on real salon workflows, specific service knowledge, and hands-on expertise. " +
-        "You must produce the complete course in FOUR languages simultaneously: English (en), Estonian (et), French (fr), and Russian (ru). " +
+        "You must produce the complete course in FOUR languages: English (en), Estonian (et), French (fr), and Russian (ru). " +
         "All text fields (title, description, content_text) must be objects with keys en/et/fr/ru — never plain strings. " +
-        "Always respond with valid JSON only — no text, no markdown, no code fences outside the JSON.";
+        "Be CONCISE — each content_text must be 60–100 words per language. Owners expand sections manually. " +
+        "Always respond with valid JSON only — no text, no markdown, no code fences.";
 
       const userPrompt = [
         `Business: ${business?.name ?? "the salon"} (${business?.city ?? ""}, ${business?.country ?? ""})`,
         `Training offer: "${offer.title}"`,
         offer.description ? `Offer description: ${offer.description}` : "",
         offer.sessions_total ? `Total sessions: ${offer.sessions_total}` : "",
-        serviceList ? `\nServices offered at this business:\n${serviceList}` : "",
+        serviceList ? `\nServices offered:\n${serviceList}` : "",
         body.instructions ? `\nOwner instructions: ${body.instructions}` : "",
         `\nTone: ${toneMap[tone]}`,
-        "\nCreate a complete training course with 2–4 chapters, each with 2–4 sections.",
-        'Sections should alternate between text explanations and practical notes. Set content_type to "video" for 1–2 sections per chapter where filming a demonstration would be ideal.',
-        "Keep each content_text between 150–400 words per language. Use real examples from the business's services.",
-        "Every text value MUST be an object with keys: en, et, fr, ru.",
+        "\nCreate 2–3 chapters, each with 2–3 sections (6–9 sections total).",
+        'Mark 1 section per chapter as content_type "video" where a filmed demo would help.',
+        "content_text: 60–100 words per language. Titles: 4–7 words. Use real examples from the services listed.",
+        "Every text value MUST be an object: {\"en\":\"\",\"et\":\"\",\"fr\":\"\",\"ru\":\"\"}",
         "",
-        "Respond with exactly this JSON shape (all leaf strings replaced by {en,et,fr,ru} objects):",
+        "Respond with exactly this JSON shape:",
         '{ "course": { "title": {"en":"","et":"","fr":"","ru":""}, "description": {"en":"","et":"","fr":"","ru":""}, "chapters": [{ "title": {"en":"","et":"","fr":"","ru":""}, "sections": [{ "title": {"en":"","et":"","fr":"","ru":""}, "content_type": "text"|"video", "content_text": {"en":"","et":"","fr":"","ru":""} }] }] } }',
       ].filter(Boolean).join("\n");
 
@@ -996,8 +997,8 @@ Deno.serve(withLogging("training", async (req: Request) => {
           "anthropic-version": "2023-06-01",
         },
         body: JSON.stringify({
-          model: "claude-sonnet-4-6",
-          max_tokens: 8000,
+          model: "claude-haiku-4-5-20251001",
+          max_tokens: 4096,
           system: systemPrompt,
           messages: [{ role: "user", content: userPrompt }],
         }),

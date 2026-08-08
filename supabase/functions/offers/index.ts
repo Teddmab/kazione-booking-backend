@@ -93,7 +93,7 @@ Deno.serve(withLogging("offers", async (req: Request) => {
         .from("offer_redemptions")
         .select(`
           id, offer_id, status, sessions_used, sessions_total,
-          amount_paid, currency_code, expires_at, created_at,
+          voucher_value, voucher_used, amount_paid, created_at,
           offer:business_offers ( id, type, title, description, price, currency_code, sessions_total, discount_type, discount_value )
         `)
         .in("client_id", clientIds)
@@ -130,6 +130,7 @@ Deno.serve(withLogging("offers", async (req: Request) => {
     if (method === "GET" && action === "redemptions") {
       const businessId = url.searchParams.get("business_id");
       const clientId   = url.searchParams.get("client_id") ?? undefined;
+      const offerId    = url.searchParams.get("offer_id")  ?? undefined;
       const status     = url.searchParams.get("status") ?? undefined;
 
       if (!businessId) return badRequest(req, "business_id is required");
@@ -148,6 +149,7 @@ Deno.serve(withLogging("offers", async (req: Request) => {
         .order("created_at", { ascending: false });
 
       if (clientId) query = query.eq("client_id", clientId);
+      if (offerId)  query = query.eq("offer_id", offerId);
       if (status)   query = query.eq("status", status);
 
       const { data, error } = await query;

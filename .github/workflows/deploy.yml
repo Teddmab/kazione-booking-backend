@@ -30,7 +30,12 @@ jobs:
           SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
           SUPABASE_PROJECT_ID: ${{ secrets.SUPABASE_PROJECT_ID }}
         run: |
-          # Use --db-url to bypass supabase link, which fails on some CLI versions
-          # due to strict ISO 8601 validation of inserted_at in the Management API response
-          supabase db push \
-            --db-url "postgresql://postgres:${SUPABASE_DB_PASSWORD}@db.${SUPABASE_PROJECT_ID}.supabase.co:5432/postgres"
+          # db.*.supabase.co resolves to IPv6, which GitHub Actions runners can't reach.
+          # Use the session-mode connection pooler (IPv4) instead — same password, no new secrets.
+          # We derive the pooler hostname from the project region via the Management API.
+          REGION=$(curl -sf \
+            -H "Authorization: Bearer ${SUPABASE_ACCESS_TOKEN}" \
+            "https://api.supabase.com/v1/projects/${SUPABASE_PROJECT_ID}" \
+            | python3 -c "import sys,json; print(json.load(sys.stdin)['region'])")
+          POOLER_URL="postgresql://postgres.${SUPABASE_PROJECT_ID}:${SUPABASE_DB_PASSWORD}@aws-0-${REGION}.pooler.supabase.com:5432/postgres"
+          supabase db push --db-url "${POOLER_URL}"

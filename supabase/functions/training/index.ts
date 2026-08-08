@@ -44,7 +44,7 @@ async function verifyClientAccess(req: Request, redemptionId: string) {
   }
 }
 
-// ─── Signed download URL for a private video ──────────────────────────────────
+// ─── Signed download URL for a private video/image ───────────────────────────
 
 async function signVideoUrl(path: string | null): Promise<string | null> {
   if (!path) return null;
@@ -53,6 +53,46 @@ async function signVideoUrl(path: string | null): Promise<string | null> {
     .createSignedUrl(path, SIGNED_URL_TTL);
   if (error || !data) return null;
   return data.signedUrl;
+}
+
+// ─── Sign image src paths embedded inside TipTap JSON ────────────────────────
+
+async function signTipTapImageNodes(doc: unknown): Promise<unknown> {
+  if (!doc || typeof doc !== "object") return doc;
+  if (Array.isArray(doc)) return Promise.all(doc.map(signTipTapImageNodes));
+  const node = doc as Record<string, unknown>;
+
+  if (node.type === "image") {
+    const attrs = (node.attrs ?? {}) as Record<string, unknown>;
+    if (typeof attrs.src === "string" && !attrs.src.startsWith("http")) {
+      const signed = await signVideoUrl(attrs.src);
+      return { ...node, attrs: { ...attrs, src: signed ?? attrs.src } };
+    }
+  }
+
+  if (Array.isArray(node.content)) {
+    return { ...node, content: await Promise.all(node.content.map(signTipTapImageNodes)) };
+  }
+  return node;
+}
+
+async function signSectionMedia(section: Record<string, unknown>): Promise<void> {
+  // Sign video_url / image_url stored in the video_url column
+  if (
+    (section.content_type === "video" || section.content_type === "image") &&
+    section.video_url
+  ) {
+    section.video_url = await signVideoUrl(section.video_url as string);
+  }
+  // Sign inline images embedded in TipTap JSON content_text
+  if (section.content_type === "text" && typeof section.content_text === "string") {
+    try {
+      const doc = JSON.parse(section.content_text);
+      if (doc?.type === "doc") {
+        section.content_text = JSON.stringify(await signTipTapImageNodes(doc));
+      }
+    } catch { /* not TipTap JSON, leave as-is */ }
+  }
 }
 
 // ─── Rewrite internal Supabase Docker hostname for local dev ──────────────────
@@ -101,6 +141,18 @@ Deno.serve(withLogging("training", async (req: Request) => {
         .maybeSingle();
 
       if (error) return serverError(req, error.message);
+
+      if (course) {
+        const chapters = (course as Record<string, unknown>).chapters as Record<string, unknown>[] | null;
+        if (chapters) {
+          for (const chapter of chapters) {
+            const sections = chapter.sections as Record<string, unknown>[] | null;
+            if (!sections) continue;
+            for (const section of sections) await signSectionMedia(section);
+          }
+        }
+      }
+
       return jsonCors(req, { course: course ?? null });
     }
 
@@ -128,17 +180,13 @@ Deno.serve(withLogging("training", async (req: Request) => {
       if (cErr) return serverError(req, cErr.message);
       if (!course) return notFound(req, "No course found for this training");
 
-      // Sign video URLs so the client browser can stream directly
+      // Sign video/image URLs and inline TipTap images so the client can render them
       const chapters = (course as Record<string, unknown>).chapters as Record<string, unknown>[] | null;
       if (chapters) {
         for (const chapter of chapters) {
           const sections = chapter.sections as Record<string, unknown>[] | null;
           if (!sections) continue;
-          for (const section of sections) {
-            if (section.content_type === "video" && section.video_url) {
-              section.video_url = await signVideoUrl(section.video_url as string);
-            }
-          }
+          for (const section of sections) await signSectionMedia(section);
         }
       }
 

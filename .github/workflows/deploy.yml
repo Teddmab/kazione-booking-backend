@@ -27,21 +27,15 @@ jobs:
       - name: Push pending migrations
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
-          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+          SUPABASE_PROJECT_ID: ${{ secrets.SUPABASE_PROJECT_ID }}
         run: |
-          if [ -z "${SUPABASE_DB_URL}" ]; then
-            echo "❌ SUPABASE_DB_URL secret is not set."
-            echo ""
-            echo "The direct db.*.supabase.co host is IPv6-only and unreachable from GitHub"
-            echo "Actions runners. Use the session-mode pooler URL (IPv4) instead."
-            echo ""
-            echo "How to get it:"
-            echo "  Supabase Dashboard → Settings → Database → Connection string"
-            echo "  → switch to 'Session mode' tab → copy the URI"
-            echo ""
-            echo "Format: postgresql://postgres.{ref}:{password}@{region}.pooler.supabase.com:5432/postgres"
-            echo ""
-            echo "Add it as SUPABASE_DB_URL in: GitHub repo → Settings → Secrets and variables → Actions"
-            exit 1
-          fi
-          supabase db push --db-url "${SUPABASE_DB_URL}"
+          # db.*.supabase.co resolves to IPv6, which GitHub Actions runners can't reach.
+          # Use the session-mode connection pooler (IPv4) instead — same password, no new secrets.
+          # We derive the pooler hostname from the project region via the Management API.
+          REGION=$(curl -sf \
+            -H "Authorization: Bearer ${SUPABASE_ACCESS_TOKEN}" \
+            "https://api.supabase.com/v1/projects/${SUPABASE_PROJECT_ID}" \
+            | python3 -c "import sys,json; print(json.load(sys.stdin)['region'])")
+          POOLER_URL="postgresql://postgres.${SUPABASE_PROJECT_ID}:${SUPABASE_DB_PASSWORD}@aws-0-${REGION}.pooler.supabase.com:5432/postgres"
+          supabase db push --db-url "${POOLER_URL}"

@@ -212,8 +212,9 @@ Deno.serve(withLogging("offers", async (req: Request) => {
         .from("offer_redemptions")
         .select(`
           id, offer_id, status, sessions_used, sessions_total,
-          voucher_value, voucher_used, amount_paid, created_at,
-          offer:business_offers ( id, type, title, description, price, currency_code, sessions_total, discount_type, discount_value )
+          voucher_value, voucher_used, amount_paid, created_at, completed_at,
+          offer:business_offers ( id, type, title, description, price, currency_code, sessions_total, discount_type, discount_value ),
+          business:businesses ( name )
         `)
         .in("client_id", clientIds)
         .order("created_at", { ascending: false });

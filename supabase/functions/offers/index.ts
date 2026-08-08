@@ -77,6 +77,125 @@ Deno.serve(withLogging("offers", async (req: Request) => {
       return jsonCors(req, { offers: data ?? [] });
     }
 
+    // ── POST /offers?action=buy — client: self-purchase any active offer ────────
+    // Signed-in clients can buy packages, vouchers, and discounts.
+    // Auto-creates a client profile if the user doesn't have one yet (same as training register).
+    // Free offers / appointment_discount → status = active immediately.
+    // Paid offers (package, gift_voucher) → status = pending until owner confirms payment.
+    if (method === "POST" && action === "buy") {
+      const body = await req.json().catch(() => null) as { offer_id: string; notes?: string } | null;
+      if (!body) return badRequest(req, "Invalid JSON body");
+
+      const { offer_id, notes } = body;
+      if (!offer_id) return badRequest(req, "offer_id is required");
+
+      const user = await verifyAuth(req);
+
+      // Fetch the active offer (no business_id in body — derived from offer row)
+      const { data: offer } = await supabaseAdmin
+        .from("business_offers")
+        .select("id, type, business_id, price, sessions_total, discount_type, discount_value, valid_from, valid_until, max_redemptions")
+        .eq("id", offer_id)
+        .eq("is_active", true)
+        .maybeSingle();
+
+      if (!offer) return notFound(req, "Offer not found or not available");
+
+      // Date validity check
+      const today = new Date().toISOString().slice(0, 10);
+      if (offer.valid_from && today < offer.valid_from)
+        return badRequest(req, "This offer is not yet available");
+      if (offer.valid_until && today > offer.valid_until)
+        return badRequest(req, "This offer has expired");
+
+      // Max redemptions check
+      if (offer.max_redemptions != null) {
+        const { count } = await supabaseAdmin
+          .from("offer_redemptions")
+          .select("id", { count: "exact", head: true })
+          .eq("offer_id", offer_id)
+          .neq("status", "cancelled");
+        if ((count ?? 0) >= offer.max_redemptions)
+          return badRequest(req, "This offer is no longer available — all spots have been filled");
+      }
+
+      // Resolve or auto-create client (same pattern as training/register)
+      let clientRow: { id: string } | null = null;
+
+      const { data: byUserId } = await supabaseAdmin
+        .from("clients")
+        .select("id")
+        .eq("user_id", user.id)
+        .eq("business_id", offer.business_id)
+        .maybeSingle();
+
+      clientRow = byUserId ?? null;
+
+      if (!clientRow && user.email) {
+        const { data: byEmail } = await supabaseAdmin
+          .from("clients")
+          .select("id")
+          .eq("business_id", offer.business_id)
+          .eq("email", user.email)
+          .maybeSingle();
+        if (byEmail) {
+          await supabaseAdmin.from("clients").update({ user_id: user.id }).eq("id", byEmail.id);
+          clientRow = byEmail;
+        }
+      }
+
+      if (!clientRow) {
+        const meta = (user.user_metadata ?? {}) as Record<string, string>;
+        const firstName = (meta.first_name ?? meta.given_name ?? "").trim() || (user.email?.split("@")[0] ?? "Client");
+        const lastName  = (meta.last_name  ?? meta.family_name ?? "").trim() || "";
+        const { data: newClient, error: clientErr } = await supabaseAdmin
+          .from("clients")
+          .insert({ business_id: offer.business_id, user_id: user.id, first_name: firstName, last_name: lastName, email: user.email ?? null, source: "marketplace" })
+          .select("id")
+          .single();
+        if (clientErr) return serverError(req, `Failed to create client profile: ${clientErr.message}`);
+        clientRow = newClient;
+      }
+
+      // Check for existing active / pending redemption (prevent accidental duplicates)
+      const { data: existing } = await supabaseAdmin
+        .from("offer_redemptions")
+        .select("id, status")
+        .eq("offer_id", offer_id)
+        .eq("client_id", clientRow.id)
+        .in("status", ["active", "pending"])
+        .maybeSingle();
+
+      if (existing) {
+        return jsonCors(req, { redemption_id: existing.id, status: existing.status, already_purchased: true });
+      }
+
+      // appointment_discount is always free (no currency transaction); gift_voucher and
+      // package with price=0 are also free → activate immediately.
+      const isFree = offer.type === "appointment_discount" || offer.price === null || offer.price === 0;
+      const status = isFree ? "active" : "pending";
+
+      const { data: redemption, error: rErr } = await supabaseAdmin
+        .from("offer_redemptions")
+        .insert({
+          offer_id,
+          client_id:      clientRow.id,
+          business_id:    offer.business_id,
+          status,
+          sessions_total: (offer.type === "package" || offer.type === "training") ? offer.sessions_total : null,
+          sessions_used:  0,
+          voucher_value:  offer.type === "gift_voucher" ? offer.price : null,
+          voucher_used:   0,
+          notes:          notes ?? null,
+        })
+        .select("id, status")
+        .single();
+
+      if (rErr) return serverError(req, rErr.message);
+
+      return jsonCors(req, { redemption_id: redemption.id, status: redemption.status, already_purchased: false }, 201);
+    }
+
     // ── GET /offers?action=my-redemptions — client: list own redemptions ──────
     if (method === "GET" && action === "my-redemptions") {
       const user = await verifyAuth(req);

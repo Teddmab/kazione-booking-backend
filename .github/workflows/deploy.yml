@@ -24,6 +24,13 @@ jobs:
         run: |
           python3 scripts/deploy.py
 
+      - name: Force IPv4 DNS resolution
+        run: |
+          # GitHub Actions runners resolve db.*.supabase.co to an IPv6 address but
+          # have no IPv6 network path — disabling IPv6 forces the fallback A record.
+          sudo sysctl -w net.ipv6.conf.all.disable_ipv6=1
+          sudo sysctl -w net.ipv6.conf.default.disable_ipv6=1
+
       - name: Push pending migrations
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}

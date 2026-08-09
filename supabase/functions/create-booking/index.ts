@@ -509,7 +509,7 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
         return badRequest("Offer redemption not found, not active, or does not belong to this client");
       }
 
-      const offer = redemption.offer as {
+      const offer = redemption.offer as unknown as {
         id: string;
         type: string;
         discount_type: string | null;
@@ -646,7 +646,7 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
         .maybeSingle();
 
       if (currentRedemption) {
-        const offerType = (currentRedemption.offer as { type: string } | null)?.type;
+        const offerType = (currentRedemption.offer as unknown as { type: string } | null)?.type;
         const redemptionPatch: Record<string, unknown> = { appointment_id: appointmentId };
 
         if (offerType === "package") {
@@ -975,7 +975,7 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
             .eq("id", offerRedemptionId)
             .maybeSingle();
           if (consumedRedemption) {
-            const offerType = (consumedRedemption.offer as { type: string } | null)?.type;
+            const offerType = (consumedRedemption.offer as unknown as { type: string } | null)?.type;
             const rollbackPatch: Record<string, unknown> = {
               status: "active",
               appointment_id: null,

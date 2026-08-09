@@ -221,7 +221,10 @@ $$ LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public;
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- 4) get_staff_performance  — exclude soft-deleted appointments
+-- DROP required because we cannot change return type via CREATE OR REPLACE.
 -- ─────────────────────────────────────────────────────────────────────────────
+
+DROP FUNCTION IF EXISTS get_staff_performance(uuid, date, date);
 
 CREATE OR REPLACE FUNCTION get_staff_performance(
   p_business_id uuid,
@@ -229,14 +232,17 @@ CREATE OR REPLACE FUNCTION get_staff_performance(
   p_end_date    date
 )
 RETURNS TABLE (
-  staff_profile_id  uuid,
-  display_name      text,
-  bookings          int,
-  revenue           numeric,
-  unique_clients    int,
-  avg_rating        numeric,
-  completion_rate   numeric,
-  commission_amount numeric
+  staff_profile_id     uuid,
+  display_name         text,
+  bookings             int,
+  revenue              numeric,
+  unique_clients       int,
+  avg_rating           numeric,
+  completion_rate      numeric,
+  commission_amount    numeric,
+  referrals_initiated  int,
+  referral_conversions int,
+  referral_revenue     numeric
 )
 AS $$
 BEGIN
@@ -270,26 +276,41 @@ BEGIN
      GROUP BY ap.staff_profile_id
   ),
   staff_ratings AS (
-    SELECT r.business_id,
-           a.staff_profile_id AS sp_id,
+    SELECT a.staff_profile_id AS sp_id,
            ROUND(AVG(r.rating), 2) AS avg_rating
       FROM reviews r
       JOIN appointments a ON a.id = r.appointment_id
      WHERE r.business_id = p_business_id
        AND r.is_public = true
-     GROUP BY r.business_id, a.staff_profile_id
+     GROUP BY a.staff_profile_id
+  ),
+  referral_stats AS (
+    SELECT a.referrer_staff_id                                                 AS sp_id,
+           COUNT(*)::int                                                        AS referrals_initiated,
+           COUNT(*) FILTER (WHERE a.status = 'completed')::int                 AS referral_conversions,
+           COALESCE(SUM(a.price) FILTER (WHERE a.status = 'completed'), 0)     AS referral_revenue
+      FROM appointments a
+     WHERE a.business_id = p_business_id
+       AND a.starts_at::date BETWEEN p_start_date AND p_end_date
+       AND a.referrer_staff_id IS NOT NULL
+       AND a.deleted_at IS NULL
+     GROUP BY a.referrer_staff_id
   )
-  SELECT sp.id                                        AS staff_profile_id,
+  SELECT sp.id                                                         AS staff_profile_id,
          sp.display_name,
-         COALESCE(ss.bookings, 0)                     AS bookings,
-         COALESCE(ss.revenue, 0)                      AS revenue,
-         COALESCE(ss.unique_clients, 0)               AS unique_clients,
-         COALESCE(sr.avg_rating, 0)                   AS avg_rating,
-         COALESCE(ss.completion_rate, 0)               AS completion_rate,
-         ROUND(COALESCE(ss.revenue, 0) * sp.commission_rate / 100, 2) AS commission_amount
+         COALESCE(ss.bookings, 0)                                      AS bookings,
+         COALESCE(ss.revenue, 0)                                       AS revenue,
+         COALESCE(ss.unique_clients, 0)                                AS unique_clients,
+         COALESCE(sr.avg_rating, 0)                                    AS avg_rating,
+         COALESCE(ss.completion_rate, 0)                               AS completion_rate,
+         ROUND(COALESCE(ss.revenue, 0) * sp.commission_rate / 100, 2) AS commission_amount,
+         COALESCE(rs.referrals_initiated, 0)                           AS referrals_initiated,
+         COALESCE(rs.referral_conversions, 0)                          AS referral_conversions,
+         COALESCE(rs.referral_revenue, 0)                              AS referral_revenue
     FROM staff_profiles sp
-    LEFT JOIN staff_stats   ss ON ss.sp_id = sp.id
-    LEFT JOIN staff_ratings sr ON sr.sp_id = sp.id
+    LEFT JOIN staff_stats    ss ON ss.sp_id = sp.id
+    LEFT JOIN staff_ratings  sr ON sr.sp_id = sp.id
+    LEFT JOIN referral_stats rs ON rs.sp_id = sp.id
    WHERE sp.business_id = p_business_id
      AND sp.is_active = true
    ORDER BY revenue DESC;

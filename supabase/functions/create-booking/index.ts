@@ -38,6 +38,7 @@ interface CreateBookingBody {
   locale?: "en" | "et" | "fr";
   gdpr_consent?: boolean;
   referrer_staff_id?: string | null;
+  offer_redemption_id?: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -196,6 +197,7 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
     //   2. referrer_staff_id present → try to use the referrer; fall back to any available
     //   3. Neither → pick any available staff for the atomic lock, then unassign after insert
     const referrerStaffId = body.referrer_staff_id ?? null;
+    const offerRedemptionId = body.offer_redemption_id ?? null;
 
     let selectedStaffId = staff_profile_id;
     if (staff_profile_id) {
@@ -364,8 +366,9 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
       depositAmount = totalAmount;
     }
 
-    // Amount to charge now
-    const chargeAmount = payment_method === "later" ? 0 : depositAmount;
+    // Amount to charge now (may be reduced by an applied offer after client resolution)
+    let chargeAmount = payment_method === "later" ? 0 : depositAmount;
+    let offerDiscountAmount = 0;
 
     // ── BEGIN TRANSACTION ─────────────────────────────────────────────────
     // Use a raw SQL transaction via supabaseAdmin.rpc to ensure atomicity.
@@ -488,6 +491,73 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
       }
     }
 
+    // STEP 4b: Validate and apply offer redemption (authenticated clients only)
+    if (offerRedemptionId && userId && clientId) {
+      const { data: redemption, error: redemptionErr } = await supabaseAdmin
+        .from("offer_redemptions")
+        .select(
+          "id, status, sessions_used, sessions_total, voucher_value, voucher_used, offer:offers(id, type, discount_type, discount_value, applies_to_services)",
+        )
+        .eq("id", offerRedemptionId)
+        .eq("client_id", clientId)
+        .eq("status", "active")
+        .maybeSingle();
+
+      if (redemptionErr) throw redemptionErr;
+
+      if (!redemption) {
+        return badRequest("Offer redemption not found, not active, or does not belong to this client");
+      }
+
+      const offer = redemption.offer as unknown as {
+        id: string;
+        type: string;
+        discount_type: string | null;
+        discount_value: number | null;
+        applies_to_services: string[];
+      } | null;
+
+      if (!offer) {
+        return badRequest("Offer details not found for this redemption");
+      }
+
+      // Check service applicability
+      const appliesTo = offer.applies_to_services;
+      if (appliesTo && appliesTo.length > 0 && !appliesTo.includes(service_id)) {
+        return badRequest("This offer does not apply to the selected service");
+      }
+
+      // Compute discount based on offer type
+      if (offer.type === "package") {
+        const sessionsTotal = redemption.sessions_total ?? 0;
+        const sessionsUsed = redemption.sessions_used ?? 0;
+        if (sessionsUsed >= sessionsTotal) {
+          return badRequest("This package has no remaining sessions");
+        }
+        // Package covers the full session price
+        offerDiscountAmount = totalAmount;
+      } else if (offer.type === "gift_voucher") {
+        const voucherValue = redemption.voucher_value ?? 0;
+        const voucherUsed = redemption.voucher_used ?? 0;
+        const balanceRemaining = voucherValue - voucherUsed;
+        if (balanceRemaining <= 0) {
+          return badRequest("This voucher has no remaining balance");
+        }
+        offerDiscountAmount = Math.min(balanceRemaining, totalAmount);
+      } else if (offer.type === "appointment_discount") {
+        if (offer.discount_type === "percentage" && offer.discount_value != null) {
+          offerDiscountAmount = +(totalAmount * (offer.discount_value / 100)).toFixed(2);
+        } else if (offer.discount_type === "fixed_amount" && offer.discount_value != null) {
+          offerDiscountAmount = Math.min(offer.discount_value, totalAmount);
+        }
+      }
+
+      // Reduce the charge amount by the offer discount (never go below zero)
+      if (offerDiscountAmount > 0 && payment_method !== "later") {
+        chargeAmount = Math.max(0, chargeAmount - offerDiscountAmount);
+      }
+    }
+
     // STEP 5: Generate booking reference
     const { data: refData, error: refErr } = await supabaseAdmin.rpc(
       "generate_booking_reference",
@@ -566,6 +636,41 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
     }
     const appointmentId = atomicId as string;
     const cancelToken = await issueCancelToken(appointmentId, bookingReference);
+
+    // Consume the offer redemption now that the appointment is created
+    if (offerRedemptionId && offerDiscountAmount > 0) {
+      const { data: currentRedemption } = await supabaseAdmin
+        .from("offer_redemptions")
+        .select("id, sessions_used, sessions_total, voucher_value, voucher_used, offer:offers(type)")
+        .eq("id", offerRedemptionId)
+        .maybeSingle();
+
+      if (currentRedemption) {
+        const offerType = (currentRedemption.offer as unknown as { type: string } | null)?.type;
+        const redemptionPatch: Record<string, unknown> = { appointment_id: appointmentId };
+
+        if (offerType === "package") {
+          const newSessionsUsed = (currentRedemption.sessions_used ?? 0) + 1;
+          redemptionPatch.sessions_used = newSessionsUsed;
+          if (newSessionsUsed >= (currentRedemption.sessions_total ?? 0)) {
+            redemptionPatch.status = "completed";
+            redemptionPatch.completed_at = new Date().toISOString();
+          }
+        } else if (offerType === "gift_voucher") {
+          const newVoucherUsed = (currentRedemption.voucher_used ?? 0) + offerDiscountAmount;
+          redemptionPatch.voucher_used = +newVoucherUsed.toFixed(2);
+          if (newVoucherUsed >= (currentRedemption.voucher_value ?? 0)) {
+            redemptionPatch.status = "completed";
+            redemptionPatch.completed_at = new Date().toISOString();
+          }
+        }
+
+        await supabaseAdmin
+          .from("offer_redemptions")
+          .update(redemptionPatch)
+          .eq("id", offerRedemptionId);
+      }
+    }
 
     // Post-insert updates: intake answers, referral, and status/staff adjustments.
     const apptExtra: Record<string, unknown> = {};
@@ -861,6 +966,32 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
           .from("appointments")
           .delete()
           .eq("id", appointmentId);
+
+        // Restore consumed offer redemption if one was applied
+        if (offerRedemptionId && offerDiscountAmount > 0) {
+          const { data: consumedRedemption } = await supabaseAdmin
+            .from("offer_redemptions")
+            .select("sessions_used, voucher_used, offer:offers(type)")
+            .eq("id", offerRedemptionId)
+            .maybeSingle();
+          if (consumedRedemption) {
+            const offerType = (consumedRedemption.offer as unknown as { type: string } | null)?.type;
+            const rollbackPatch: Record<string, unknown> = {
+              status: "active",
+              appointment_id: null,
+              completed_at: null,
+            };
+            if (offerType === "package") {
+              rollbackPatch.sessions_used = Math.max(0, (consumedRedemption.sessions_used ?? 0) - 1);
+            } else if (offerType === "gift_voucher") {
+              rollbackPatch.voucher_used = Math.max(0, +(((consumedRedemption.voucher_used ?? 0) - offerDiscountAmount).toFixed(2)));
+            }
+            await supabaseAdmin
+              .from("offer_redemptions")
+              .update(rollbackPatch)
+              .eq("id", offerRedemptionId);
+          }
+        }
 
         return serverError("Payment processing failed. Please try again.");
       }

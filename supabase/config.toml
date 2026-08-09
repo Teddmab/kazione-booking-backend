@@ -106,3 +106,7 @@ verify_jwt = false
 # reviews GET is public (storefront page); POST requires auth checked internally.
 [functions.reviews]
 verify_jwt = false
+
+# track-event is a public analytics endpoint — no auth required.
+[functions.track-event]
+verify_jwt = false

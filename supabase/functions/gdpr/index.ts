@@ -194,6 +194,10 @@ Deno.serve(withLogging("gdpr", async (req: Request) => {
 
     // ── DELETE /gdpr?action=delete — owner-initiated anonymisation ──────────
     if (req.method === "DELETE" && action === "delete") {
+      // Auth check must come before param validation so unauthenticated
+      // requests get 401/403 rather than 400.
+      await verifyAuth(req);
+
       const body = await req.json().catch(() => ({})) as Record<string, unknown>;
       const businessId = body.business_id as string | undefined;
 

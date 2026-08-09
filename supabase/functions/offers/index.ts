@@ -77,6 +77,56 @@ Deno.serve(withLogging("offers", async (req: Request) => {
       return jsonCors(req, { offers: data ?? [] });
     }
 
+    // ── GET /offers?action=verify-voucher&id= — public: scan QR to verify a redemption ──
+    // No auth required — the UUID itself is unguessable and acts as an access token.
+    if (method === "GET" && action === "verify-voucher") {
+      if (!id) return badRequest(req, "id is required");
+
+      const { data: row, error } = await supabaseAdmin
+        .from("offer_redemptions")
+        .select(`
+          id, status, sessions_used, sessions_total,
+          voucher_value, voucher_used, amount_paid, created_at, completed_at,
+          offer:business_offers ( type, title, price, currency_code, sessions_total, discount_type, discount_value ),
+          client:clients ( first_name ),
+          business:businesses ( name )
+        `)
+        .eq("id", id)
+        .maybeSingle();
+
+      if (error) return serverError(req, error.message);
+      if (!row) return notFound(req, "Voucher not found");
+
+      const offer  = row.offer as unknown as { type: string; title: string; currency_code: string; sessions_total: number | null } | null;
+      const client = row.client as unknown as { first_name: string } | null;
+      const biz    = row.business as unknown as { name: string } | null;
+
+      const balance_remaining =
+        (row.voucher_value ?? 0) - (row.voucher_used ?? 0);
+      const sessions_remaining =
+        (row.sessions_total ?? 0) - (row.sessions_used ?? 0);
+
+      return jsonCors(req, {
+        voucher: {
+          id:                  row.id,
+          status:              row.status,
+          offer_type:          offer?.type ?? null,
+          offer_title:         offer?.title ?? null,
+          currency_code:       offer?.currency_code ?? "EUR",
+          business_name:       biz?.name ?? null,
+          client_first_name:   client?.first_name ?? null,
+          voucher_value:       row.voucher_value,
+          voucher_used:        row.voucher_used,
+          balance_remaining:   offer?.type === "gift_voucher" ? balance_remaining : null,
+          sessions_total:      row.sessions_total,
+          sessions_used:       row.sessions_used,
+          sessions_remaining:  offer?.type === "package" || offer?.type === "training" ? sessions_remaining : null,
+          issued_at:           row.created_at,
+          completed_at:        row.completed_at,
+        },
+      });
+    }
+
     // ── POST /offers?action=buy — client: self-purchase any active offer ────────
     // Signed-in clients can buy packages, vouchers, and discounts.
     // Auto-creates a client profile if the user doesn't have one yet (same as training register).

@@ -1353,9 +1353,13 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
       return jsonCors(req, normalizePayment(data));
     }
 
-    // ── DELETE ?id= — soft delete (cancelled only) ─────────────────────────
+    // ── DELETE ?id= — soft delete (cancelled or completed) ──────────────────
     if (method === "DELETE") {
       if (!id) return badRequest("id is required");
+
+      // payment_action: "mark_test" | "remove" | absent
+      // Only applies when deleting a completed appointment that has a payment.
+      const paymentAction = url.searchParams.get("payment_action") as "mark_test" | "remove" | null;
 
       const { data: existing } = await supabaseAdmin
         .from("appointments")
@@ -1367,15 +1371,22 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
       if (!existing) return notFound("Appointment not found");
 
       const appt = existing as Record<string, unknown>;
-      if (appt.status !== "cancelled") {
-        return jsonCors(req, 
-          { error: { code: "INVALID_STATE", message: "Only cancelled appointments can be deleted" } },
+      if (appt.status !== "cancelled" && appt.status !== "completed") {
+        return jsonCors(req,
+          { error: { code: "INVALID_STATE", message: "Only cancelled or completed appointments can be deleted" } },
           409,
         );
       }
 
       const ctx = await requireOwnerOrManagerCtx(req, appt.business_id as string);
       if (ctx instanceof Response) return ctx;
+
+      // Handle payment action for completed appointments
+      if (appt.status === "completed" && paymentAction === "remove") {
+        await supabaseAdmin.from("payments").delete().eq("appointment_id", id);
+      } else if (appt.status === "completed" && paymentAction === "mark_test") {
+        await supabaseAdmin.from("payments").update({ is_test: true }).eq("appointment_id", id);
+      }
 
       const { error } = await supabaseAdmin
         .from("appointments")

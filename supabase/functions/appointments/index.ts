@@ -903,6 +903,50 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
       return jsonCors(req, normalizePayment(updated));
     }
 
+    // ── PATCH ?action=mark_commission_paid ─────────────────────────────────
+    // Supports retroactive marking: works on any completed appointment regardless
+    // of when it was booked. Passing paid=false clears the paid timestamp.
+    if (method === "PATCH" && action === "mark_commission_paid") {
+      if (!id) return badRequest("id is required");
+      const body = await req.json() as Record<string, unknown>;
+
+      const { data: appt } = await supabaseAdmin
+        .from("appointments")
+        .select("business_id, status, staff_profile_id, price")
+        .eq("id", id)
+        .is("deleted_at", null)
+        .maybeSingle();
+
+      if (!appt) return notFound("Appointment not found");
+      const apptRow = appt as { business_id: string; status: string; staff_profile_id: string | null; price: number };
+
+      if (apptRow.status !== "completed") {
+        return badRequest("Commission can only be marked on completed appointments");
+      }
+
+      const ctx = await requireOwnerOrManagerCtx(req, apptRow.business_id);
+      if (ctx instanceof Response) return ctx;
+
+      const clearing = body.paid === false;
+
+      const updateFields: Record<string, unknown> = clearing
+        ? { commission_paid_at: null, commission_pay_method: null, commission_amount_paid: null }
+        : {
+            commission_paid_at: new Date().toISOString(),
+            commission_pay_method: (body.pay_method as string | undefined) ?? "manual",
+            commission_amount_paid: typeof body.amount === "number" ? body.amount : null,
+          };
+
+      const { error: updateErr } = await supabaseAdmin
+        .from("appointments")
+        .update(updateFields)
+        .eq("id", id);
+
+      if (updateErr) return serverError("Failed to update commission status");
+
+      return jsonCors(req, { success: true });
+    }
+
     // ── PATCH ──────────────────────────────────────────────────────────────
     if (method === "PATCH") {
       if (!id) return badRequest("id is required");

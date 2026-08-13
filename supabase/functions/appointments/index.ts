@@ -955,7 +955,7 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
       // Fetch appointment to get business_id for auth (+ service_id for stock-out + price for payment settlement)
       const { data: existing, error: fetchErr } = await supabaseAdmin
         .from("appointments")
-        .select("status, business_id, service_id, staff_profile_id, price")
+        .select("status, business_id, service_id, staff_profile_id, staff_profile_id_2, price")
         .eq("id", id)
         .single();
 
@@ -966,6 +966,8 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
         business_id: string;
         service_id: string | null;
         staff_profile_id: string | null;
+        staff_profile_id_2: string | null;
+        price: number;
       };
 
       // Owner/manager OR assigned staff may update status (staff portal MS1)
@@ -1391,6 +1393,48 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
                 .eq("id", u.product_id);
             }
           }
+        }
+      }
+
+      // Auto-create commission tasks when appointment is completed
+      if (status === "completed") {
+        try {
+          const apptRow = data as Record<string, unknown>;
+          const staffIds = [
+            existingRow.staff_profile_id,
+            existingRow.staff_profile_id_2,
+          ].filter(Boolean) as string[];
+
+          for (const staffId of staffIds) {
+            const { data: sp } = await supabaseAdmin
+              .from("staff_profiles")
+              .select("display_name, commission_rate")
+              .eq("id", staffId)
+              .single();
+
+            const spRow = sp as { display_name: string; commission_rate: number | null } | null;
+            if (!spRow || !spRow.commission_rate) continue;
+
+            const commissionAmount = Number(existingRow.price ?? 0) * (spRow.commission_rate / 100);
+            if (commissionAmount <= 0) continue;
+
+            await supabaseAdmin.from("owner_tasks").insert({
+              business_id: existingRow.business_id,
+              type: "commission_payment",
+              ref_id: id,
+              ref_type: "appointment",
+              title: `Commission due: ${spRow.display_name}`,
+              body: {
+                staff_name: spRow.display_name,
+                staff_profile_id: staffId,
+                commission_amount: commissionAmount,
+                appointment_id: id,
+                booking_reference: apptRow.booking_reference ?? null,
+              },
+            });
+          }
+        } catch (taskErr) {
+          console.warn("commission task insert error:", taskErr);
         }
       }
 

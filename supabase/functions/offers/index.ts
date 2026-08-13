@@ -68,9 +68,11 @@ Deno.serve(withLogging("offers", async (req: Request) => {
 
       const { data, error } = await supabaseAdmin
         .from("business_offers")
-        .select("id, type, title, description, price, currency_code, sessions_total, discount_type, discount_value, applies_to_services, valid_from, valid_until")
+        .select("id, type, title, description, price, currency_code, sessions_total, discount_type, discount_value, applies_to_services, valid_from, valid_until, publish_status, target_audience")
         .eq("business_id", businessId)
         .eq("is_active", true)
+        .eq("publish_status", "published")
+        .in("target_audience", ["client", "both"])
         .order("created_at", { ascending: false });
 
       if (error) return serverError(req, error.message);
@@ -611,6 +613,7 @@ Deno.serve(withLogging("offers", async (req: Request) => {
         "title", "description", "is_active", "valid_from", "valid_until",
         "max_redemptions", "price", "discount_value", "discount_type",
         "sessions_total", "applies_to_services",
+        "publish_status", "target_audience",
       ];
       const patch: Record<string, unknown> = {};
       for (const key of allowed) {

@@ -171,9 +171,11 @@ Deno.serve(withLogging("debts", async (req: Request) => {
         if (d.status === "paid_off") return badRequest("This debt is already paid off");
 
         // Insert payment — DB trigger reduces current_balance automatically
-        const { error: payErr } = await supabaseAdmin
+        const { data: newPayment, error: payErr } = await supabaseAdmin
           .from("debt_payments")
-          .insert({ debt_id: debtId, business_id: businessId, amount, payment_date: payDate, notes });
+          .insert({ debt_id: debtId, business_id: businessId, amount, payment_date: payDate, notes })
+          .select("id, debt_id, amount, payment_date, notes, created_at")
+          .single();
 
         if (payErr) return serverError(payErr.message);
 
@@ -185,7 +187,7 @@ Deno.serve(withLogging("debts", async (req: Request) => {
           .single();
 
         if (refetchErr) return serverError(refetchErr.message);
-        return jsonCors(req, { debt: updated, payment: { debt_id: debtId, amount, payment_date: payDate, notes } });
+        return jsonCors(req, { debt: updated, payment: newPayment });
       }
 
       // Create debt

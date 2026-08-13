@@ -8,13 +8,15 @@ import { findCandidates, type OcrData } from "./match.ts";
 /**
  * /receipt-scan — Claude Vision OCR + smart matching
  *
- * POST   body: { business_id, image_base64, image_type? }
+ * POST   body: { business_id, image_base64, image_type?, receipt_type? }
+ *   receipt_type: "income" (default) | "expense"
  *   → Uploads to storage, calls Claude Vision, runs matching
- *   → Returns { receipt_id, ocr, candidates }
+ *   → Returns { receipt_id, ocr, candidates, receipt_type }
  *
  * PATCH  ?id=&action=confirm
- *   body: { matched_to, matched_id?, expense? }
- *   → Updates receipts row; creates/updates expense record
+ *   body: { matched_to, matched_id?, expense?, receipt_type? }
+ *   income receipts: matching an appointment just stores the link — no expense created
+ *   expense receipts: creates/updates an expense record (original behaviour)
  *   → Returns { success: true, expense_id? }
  */
 Deno.serve(withLogging("receipt-scan", async (req: Request) => {
@@ -30,8 +32,9 @@ Deno.serve(withLogging("receipt-scan", async (req: Request) => {
     // ── POST — scan image ──────────────────────────────────────────────────
     if (method === "POST") {
       const body = await req.json() as Record<string, unknown>;
-      const imageBase64 = body.image_base64 as string | undefined;
-      const imageType   = (body.image_type as string | undefined) ?? "image/jpeg";
+      const imageBase64   = body.image_base64 as string | undefined;
+      const imageType     = (body.image_type as string | undefined) ?? "image/jpeg";
+      const receiptType   = (body.receipt_type as string | undefined) === "expense" ? "expense" : "income";
 
       if (!imageBase64) return badRequest("image_base64 is required");
 
@@ -127,27 +130,30 @@ If a field cannot be determined, use null. If no line items, use [].`,
         console.warn("Claude Vision fetch error:", visionErr);
       }
 
-      // Insert receipts audit row
+      // Insert receipts audit row — receipt_type stored in ocr_data metadata
+      const ocrWithMeta = { ...ocr, _receipt_type: receiptType };
+
       const { data: receiptRow, error: insertErr } = await supabaseAdmin
         .from("receipts")
         .insert({
           business_id:  ctx.businessId,
           owner_id:     ctx.userId,
           storage_path: storagePath,
-          ocr_data:     ocr,
+          ocr_data:     ocrWithMeta,
         })
         .select("id")
         .single();
 
       if (insertErr) return serverError("Failed to save receipt record");
 
-      // Smart match candidates
-      const candidates = await findCandidates(ctx.businessId, ocr);
+      // Smart match candidates (filtered by receipt type)
+      const candidates = await findCandidates(ctx.businessId, ocr, receiptType);
 
       return jsonCors(req, {
         receipt_id: (receiptRow as { id: string }).id,
         ocr,
         candidates,
+        receipt_type: receiptType,
       });
     }
 
@@ -156,9 +162,11 @@ If a field cannot be determined, use null. If no line items, use [].`,
       if (!id) return badRequest("id is required");
 
       const body = await req.json() as Record<string, unknown>;
-      const matchedTo  = body.matched_to as string | undefined;
-      const matchedId  = body.matched_id as string | undefined;
-      const expenseIn  = body.expense as Record<string, unknown> | undefined;
+      const matchedTo   = body.matched_to as string | undefined;
+      const matchedId   = body.matched_id as string | undefined;
+      const expenseIn   = body.expense as Record<string, unknown> | undefined;
+      // receipt_type may be passed explicitly; fall back to what was stored in ocr_data
+      const bodyReceiptType = body.receipt_type as string | undefined;
 
       if (!matchedTo || !["appointment", "expense", "unknown"].includes(matchedTo)) {
         return badRequest("matched_to must be 'appointment', 'expense', or 'unknown'");
@@ -172,58 +180,65 @@ If a field cannot be determined, use null. If no line items, use [].`,
         .maybeSingle();
 
       if (!receipt) return notFound("Receipt not found");
-      const r = receipt as { business_id: string; ocr_data: OcrData; storage_path: string };
+      const r = receipt as { business_id: string; ocr_data: Record<string, unknown>; storage_path: string };
+      const storedReceiptType = (r.ocr_data._receipt_type as string | undefined) ?? "income";
+      const receiptType = bodyReceiptType ?? storedReceiptType;
 
       const ctx = await requireOwnerOrManagerCtx(req, r.business_id);
       if (ctx instanceof Response) return ctx;
 
       let expenseId: string | null = null;
+      const ocr = r.ocr_data as unknown as OcrData;
 
-      if (matchedTo === "expense" && matchedId) {
-        // Link existing expense to this receipt
-        await supabaseAdmin
-          .from("expenses")
-          .update({ receipt_url: r.storage_path, ocr_data: r.ocr_data })
-          .eq("id", matchedId)
-          .eq("business_id", ctx.businessId);
-        expenseId = matchedId;
+      if (receiptType === "income") {
+        // Income receipt (payment machine) — just store the link, no expense created
+        // For appointment match: confirms that cash/card payment was received for that appointment
+        // For unknown: stored as unmatched income receipt for manual review
+      } else {
+        // Expense receipt — create or link an expense record
+        if (matchedTo === "expense" && matchedId) {
+          await supabaseAdmin
+            .from("expenses")
+            .update({ receipt_url: r.storage_path, ocr_data: r.ocr_data })
+            .eq("id", matchedId)
+            .eq("business_id", ctx.businessId);
+          expenseId = matchedId;
 
-      } else if (matchedTo === "appointment" || matchedTo === "unknown") {
-        // Create a new expense entry
-        const ocr = r.ocr_data;
-        const amount      = expenseIn?.amount      ?? ocr.amount      ?? 0;
-        const date        = expenseIn?.date        ?? ocr.date        ?? new Date().toISOString().slice(0, 10);
-        const description = expenseIn?.description ?? ocr.merchant_name ?? "Receipt expense";
-        const category    = expenseIn?.category    ?? "other";
+        } else if (matchedTo === "appointment" || matchedTo === "unknown") {
+          const amount      = expenseIn?.amount      ?? ocr.amount      ?? 0;
+          const date        = expenseIn?.date        ?? ocr.date        ?? new Date().toISOString().slice(0, 10);
+          const description = expenseIn?.description ?? ocr.merchant_name ?? "Receipt expense";
+          const category    = expenseIn?.category    ?? "other";
 
-        const newExpense: Record<string, unknown> = {
-          business_id:  ctx.businessId,
-          category,
-          description,
-          amount,
-          currency_code: ocr.currency ?? "EUR",
-          tax_amount:    ocr.tax_amount ?? 0,
-          date,
-          receipt_url:   r.storage_path,
-          ocr_data:      r.ocr_data,
-        };
+          const newExpense: Record<string, unknown> = {
+            business_id:  ctx.businessId,
+            category,
+            description,
+            amount,
+            currency_code: ocr.currency ?? "EUR",
+            tax_amount:    ocr.tax_amount ?? 0,
+            date,
+            receipt_url:   r.storage_path,
+            ocr_data:      r.ocr_data,
+          };
 
-        if (matchedTo === "appointment" && matchedId) {
-          newExpense.appointment_id = matchedId;
+          if (matchedTo === "appointment" && matchedId) {
+            newExpense.appointment_id = matchedId;
+          }
+
+          const { data: created, error: expErr } = await supabaseAdmin
+            .from("expenses")
+            .insert(newExpense)
+            .select("id")
+            .single();
+
+          if (expErr) {
+            console.error("expense insert error:", expErr.message);
+            return serverError("Failed to create expense record");
+          }
+
+          expenseId = (created as { id: string }).id;
         }
-
-        const { data: created, error: expErr } = await supabaseAdmin
-          .from("expenses")
-          .insert(newExpense)
-          .select("id")
-          .single();
-
-        if (expErr) {
-          console.error("expense insert error:", expErr.message);
-          return serverError("Failed to create expense record");
-        }
-
-        expenseId = (created as { id: string }).id;
       }
 
       // Update receipt match status

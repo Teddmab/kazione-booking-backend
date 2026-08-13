@@ -930,10 +930,11 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
       const clearing = body.paid === false;
 
       const updateFields: Record<string, unknown> = clearing
-        ? { commission_paid_at: null, commission_pay_method: null }
+        ? { commission_paid_at: null, commission_pay_method: null, commission_amount_paid: null }
         : {
             commission_paid_at: new Date().toISOString(),
             commission_pay_method: (body.pay_method as string | undefined) ?? "manual",
+            commission_amount_paid: typeof body.amount === "number" ? body.amount : null,
           };
 
       const { error: updateErr } = await supabaseAdmin

@@ -1347,7 +1347,7 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
         // Build the list of items to deduct:
         // - If product_overrides is explicitly provided (even empty), use those
         // - Otherwise fall back to all service_product_usage rows
-        const deductItems: { product_id: string; quantity: number }[] = [];
+        const deductItems: { product_id: string; quantity: number; unit_cost?: number | null }[] = [];
 
         if (productOverrides !== null) {
           for (const o of productOverrides) {
@@ -1356,10 +1356,15 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
         } else if (serviceId) {
           const { data: usageRows } = await supabaseAdmin
             .from("service_product_usage")
-            .select("product_id, quantity_per_service")
+            .select("product_id, quantity_per_service, product:product_catalog(unit_cost)")
             .eq("service_id", serviceId);
           for (const u of (usageRows ?? []) as Record<string, unknown>[]) {
-            deductItems.push({ product_id: u.product_id as string, quantity: Number(u.quantity_per_service) });
+            const productData = u.product as Record<string, unknown> | null;
+            deductItems.push({
+              product_id: u.product_id as string,
+              quantity: Number(u.quantity_per_service),
+              unit_cost: (productData?.unit_cost as number | null) ?? null,
+            });
           }
         }
 
@@ -1369,6 +1374,7 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
             product_id: u.product_id,
             movement_type: "service_use",
             quantity: -u.quantity,
+            unit_cost: u.unit_cost ?? null,
             reference_id: id,
             reference_type: "appointment",
             created_by: changedBy ?? null,

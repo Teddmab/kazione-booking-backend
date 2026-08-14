@@ -907,8 +907,18 @@ Deno.serve(withLogging("training", async (req: Request) => {
 
       if (existing) return jsonCors(req, { redemption_id: existing.id, already_registered: true });
 
-      // Create redemption (free registration or pending payment)
-      const status = (offer.price === null || offer.price === 0) ? "active" : "pending";
+      // Staff members always get active status — they don't pay for internal training
+      const { data: membership } = await supabaseAdmin
+        .from("business_members")
+        .select("id")
+        .eq("user_id", user.id)
+        .eq("business_id", offer.business_id)
+        .eq("is_active", true)
+        .maybeSingle();
+      const isStaff = !!membership;
+
+      // Create redemption (free or staff → active, paid client → pending payment)
+      const status = isStaff || offer.price === null || offer.price === 0 ? "active" : "pending";
       const { data: redemption, error: rErr } = await supabaseAdmin
         .from("offer_redemptions")
         .insert({

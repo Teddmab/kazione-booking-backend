@@ -168,8 +168,8 @@ If a field cannot be determined, use null. If no line items, use [].`,
       // receipt_type may be passed explicitly; fall back to what was stored in ocr_data
       const bodyReceiptType = body.receipt_type as string | undefined;
 
-      if (!matchedTo || !["appointment", "expense", "unknown"].includes(matchedTo)) {
-        return badRequest("matched_to must be 'appointment', 'expense', or 'unknown'");
+      if (!matchedTo || !["appointment", "expense", "bank_transaction", "unknown"].includes(matchedTo)) {
+        return badRequest("matched_to must be 'appointment', 'expense', 'bank_transaction', or 'unknown'");
       }
 
       // Fetch receipt to get business_id + ocr_data
@@ -191,18 +191,63 @@ If a field cannot be determined, use null. If no line items, use [].`,
       const ocr = r.ocr_data as unknown as OcrData;
 
       if (receiptType === "income") {
-        // Income receipt (payment machine) — just store the link, no expense created
-        // For appointment match: confirms that cash/card payment was received for that appointment
-        // For unknown: stored as unmatched income receipt for manual review
+        // Income receipt (payment machine) — store the link only, no expense created
+        // If matched to a bank_transaction credit: reconcile that transaction as an appointment payment
+        if (matchedTo === "bank_transaction" && matchedId) {
+          await supabaseAdmin
+            .from("bank_transactions")
+            .update({ reconciled_appointment_id: null }) // no appointment id available here
+            .eq("id", matchedId)
+            .eq("business_id", ctx.businessId);
+          // We simply mark the bank_transaction as acknowledged via the receipts.matched_id link
+        }
       } else {
         // Expense receipt — create or link an expense record
         if (matchedTo === "expense" && matchedId) {
+          // Link receipt to an existing expense record (duplicate / already-entered)
           await supabaseAdmin
             .from("expenses")
             .update({ receipt_url: r.storage_path, ocr_data: r.ocr_data })
             .eq("id", matchedId)
             .eq("business_id", ctx.businessId);
           expenseId = matchedId;
+
+        } else if (matchedTo === "bank_transaction" && matchedId) {
+          // Receipt matches a bank debit — create expense and reconcile the bank transaction
+          const amount      = expenseIn?.amount      ?? ocr.amount      ?? 0;
+          const date        = expenseIn?.date        ?? ocr.date        ?? new Date().toISOString().slice(0, 10);
+          const description = expenseIn?.description ?? ocr.merchant_name ?? "Receipt expense";
+          const category    = expenseIn?.category    ?? "other";
+
+          const { data: created, error: expErr } = await supabaseAdmin
+            .from("expenses")
+            .insert({
+              business_id:  ctx.businessId,
+              category,
+              description,
+              amount,
+              currency_code: ocr.currency ?? "EUR",
+              tax_amount:    ocr.tax_amount ?? 0,
+              date,
+              receipt_url:   r.storage_path,
+              ocr_data:      r.ocr_data,
+            })
+            .select("id")
+            .single();
+
+          if (expErr) {
+            console.error("expense insert error:", expErr.message);
+            return serverError("Failed to create expense record");
+          }
+
+          expenseId = (created as { id: string }).id;
+
+          // Reconcile the bank transaction → expense
+          await supabaseAdmin
+            .from("bank_transactions")
+            .update({ reconciled_expense_id: expenseId })
+            .eq("id", matchedId)
+            .eq("business_id", ctx.businessId);
 
         } else if (matchedTo === "appointment" || matchedTo === "unknown") {
           const amount      = expenseIn?.amount      ?? ocr.amount      ?? 0;

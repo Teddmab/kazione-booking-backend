@@ -595,6 +595,85 @@ Deno.serve(withLogging("training", async (req: Request) => {
       return jsonCors(req, { trainings });
     }
 
+    // ── GET ?action=staff-training — staff: list published training for their business ─
+    if (method === "GET" && action === "staff-training") {
+      const businessId = url.searchParams.get("business_id");
+      if (!businessId) return badRequest(req, "business_id is required");
+
+      const user = await verifyAuth(req);
+
+      // Confirm caller is a member of this business
+      const { data: member } = await supabaseAdmin
+        .from("business_members")
+        .select("id")
+        .eq("user_id", user.id)
+        .eq("business_id", businessId)
+        .eq("is_active", true)
+        .maybeSingle();
+
+      if (!member) return forbidden(req, "Not a member of this business");
+
+      // All published training offers targeted at staff or both
+      const { data: offers } = await supabaseAdmin
+        .from("business_offers")
+        .select("id, title, description, sessions_total, type, publish_status, target_audience")
+        .eq("business_id", businessId)
+        .eq("type", "training")
+        .eq("publish_status", "published")
+        .in("target_audience", ["staff", "both"])
+        .eq("is_active", true);
+
+      if (!offers || offers.length === 0) return jsonCors(req, { items: [] });
+
+      // Get courses for these offers
+      const offerIds = offers.map((o) => o.id);
+      const { data: courses } = await supabaseAdmin
+        .from("training_courses")
+        .select("id, offer_id, title, description")
+        .in("offer_id", offerIds);
+      const courseByOfferId = new Map((courses ?? []).map((c) => [c.offer_id, c]));
+
+      // Check for existing redemptions via any client records this user has
+      const { data: clientRows } = await supabaseAdmin
+        .from("clients")
+        .select("id")
+        .eq("user_id", user.id)
+        .eq("business_id", businessId);
+
+      const clientIds = (clientRows ?? []).map((c) => c.id);
+
+      let redemptionByOfferId = new Map<string, { id: string; status: string; sessions_used: number }>();
+      if (clientIds.length > 0) {
+        const { data: redemptions } = await supabaseAdmin
+          .from("offer_redemptions")
+          .select("id, offer_id, status, sessions_used")
+          .in("client_id", clientIds)
+          .in("offer_id", offerIds);
+        redemptionByOfferId = new Map(
+          (redemptions ?? []).map((r) => [r.offer_id as string, {
+            id: r.id as string,
+            status: r.status as string,
+            sessions_used: (r.sessions_used as number) ?? 0,
+          }]),
+        );
+      }
+
+      const items = offers.map((o) => {
+        const r = redemptionByOfferId.get(o.id);
+        return {
+          offer_id:       o.id,
+          offer_title:    o.title,
+          sessions_total: o.sessions_total ?? null,
+          redemption_id:  r?.id ?? null,
+          status:         r?.status ?? "not_started",
+          sessions_used:  r?.sessions_used ?? 0,
+          course:         courseByOfferId.get(o.id) ?? null,
+        };
+      });
+
+      return jsonCors(req, { items });
+    }
+
     // ── POST ?action=progress — client: mark section complete ─────────────────
     if (method === "POST" && action === "progress") {
       const body = await req.json().catch(() => null) as {

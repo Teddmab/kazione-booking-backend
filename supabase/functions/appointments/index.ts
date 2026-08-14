@@ -1406,22 +1406,41 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
       if (status === "completed") {
         try {
           const apptRow = data as Record<string, unknown>;
+          // Optional manual overrides: [{ staff_profile_id, amount }]
+          const commissionOverrides = (body.commission_overrides ?? null) as
+            Array<{ staff_profile_id: string; amount: number }> | null;
+
           const staffIds = [
             existingRow.staff_profile_id,
             existingRow.staff_profile_id_2,
           ].filter(Boolean) as string[];
 
           for (const staffId of staffIds) {
-            const { data: sp } = await supabaseAdmin
-              .from("staff_profiles")
-              .select("display_name, commission_rate")
-              .eq("id", staffId)
-              .single();
+            const override = commissionOverrides?.find((o) => o.staff_profile_id === staffId);
+            let commissionAmount: number;
+            let displayName: string;
 
-            const spRow = sp as { display_name: string; commission_rate: number | null } | null;
-            if (!spRow || !spRow.commission_rate) continue;
+            if (override) {
+              // Operator entered amount manually — look up name only
+              const { data: sp } = await supabaseAdmin
+                .from("staff_profiles")
+                .select("display_name")
+                .eq("id", staffId)
+                .single();
+              displayName = (sp as { display_name: string } | null)?.display_name ?? staffId;
+              commissionAmount = override.amount;
+            } else {
+              const { data: sp } = await supabaseAdmin
+                .from("staff_profiles")
+                .select("display_name, commission_rate")
+                .eq("id", staffId)
+                .single();
+              const spRow = sp as { display_name: string; commission_rate: number | null } | null;
+              if (!spRow || !spRow.commission_rate) continue;
+              displayName = spRow.display_name;
+              commissionAmount = Number(existingRow.price ?? 0) * (spRow.commission_rate / 100);
+            }
 
-            const commissionAmount = Number(existingRow.price ?? 0) * (spRow.commission_rate / 100);
             if (commissionAmount <= 0) continue;
 
             await supabaseAdmin.from("owner_tasks").insert({
@@ -1429,9 +1448,9 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
               type: "commission_payment",
               ref_id: id,
               ref_type: "appointment",
-              title: `Commission due: ${spRow.display_name}`,
+              title: `Commission due: ${displayName}`,
               body: {
-                staff_name: spRow.display_name,
+                staff_name: displayName,
                 staff_profile_id: staffId,
                 commission_amount: commissionAmount,
                 appointment_id: id,

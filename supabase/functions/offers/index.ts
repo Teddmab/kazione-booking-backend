@@ -470,12 +470,8 @@ Deno.serve(withLogging("offers", async (req: Request) => {
       if (offerErr || !offer) return notFound(req, "Offer not found");
       if (!offer.is_active)   return badRequest(req, "Offer is no longer active");
 
-      // Validity window check
-      const today = new Date().toISOString().slice(0, 10);
-      if (offer.valid_from && today < offer.valid_from)
-        return badRequest(req, "Offer is not yet valid");
-      if (offer.valid_until && today > offer.valid_until)
-        return badRequest(req, "Offer has expired");
+      // Validity window is a marketplace restriction — skip it for owner-initiated sales.
+      // Owners can sell any active offer to a client regardless of valid_from / valid_until.
 
       // Max redemptions check
       if (offer.max_redemptions != null) {

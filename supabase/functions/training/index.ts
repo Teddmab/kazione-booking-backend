@@ -722,7 +722,8 @@ Deno.serve(withLogging("training", async (req: Request) => {
             courseComplete = true;
             const newUsed = (redemption.sessions_used ?? 0) + 1;
             const updates: Record<string, unknown> = { sessions_used: newUsed };
-            if (redemption.sessions_total && newUsed >= redemption.sessions_total) {
+            // Complete if: self-paced (no session limit) OR used all required sessions
+            if (!redemption.sessions_total || newUsed >= redemption.sessions_total) {
               updates.status       = "completed";
               updates.completed_at = new Date().toISOString();
             }

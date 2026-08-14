@@ -71,11 +71,33 @@ Deno.serve(withLogging("reviews", async (req: Request) => {
       const page = parseInt(url.searchParams.get("page") ?? "1", 10);
       const limit = parseInt(url.searchParams.get("limit") ?? "20", 10);
       const from = (page - 1) * limit;
+      const staffProfileId = url.searchParams.get("staff_profile_id");
 
-      const { data, error, count } = await supabaseAdmin
+      // When filtering by staff member, do a two-step query:
+      // 1. get appointment IDs for this staff, 2. filter reviews by those IDs
+      let apptIdFilter: string[] | null = null;
+      if (staffProfileId) {
+        const { data: apptRows } = await supabaseAdmin
+          .from("appointments")
+          .select("id")
+          .eq("business_id", businessId)
+          .or(`staff_profile_id.eq.${staffProfileId},staff_profile_id_2.eq.${staffProfileId}`);
+        apptIdFilter = (apptRows ?? []).map((r: { id: string }) => r.id);
+      }
+
+      let query = supabaseAdmin
         .from("reviews")
         .select(REVIEW_SELECT, { count: "exact" })
-        .eq("business_id", businessId)
+        .eq("business_id", businessId);
+
+      if (apptIdFilter !== null) {
+        if (apptIdFilter.length === 0) {
+          return jsonCors(req, { reviews: [], total: 0 });
+        }
+        query = query.in("appointment_id", apptIdFilter);
+      }
+
+      const { data, error, count } = await query
         .order("created_at", { ascending: false })
         .range(from, from + limit - 1);
 

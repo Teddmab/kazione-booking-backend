@@ -678,22 +678,30 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
 
       const { data: existing, error: fetchErr } = await supabaseAdmin
         .from("appointments")
-        .select("business_id, status, staff_profile_id")
+        .select("business_id, status, staff_profile_id, staff_profile_id_2")
         .eq("id", id)
         .maybeSingle();
 
       if (fetchErr || !existing) return notFound("Appointment not found");
 
-      const ex = existing as { business_id: string; status: string; staff_profile_id: string | null };
+      const ex = existing as {
+        business_id: string;
+        status: string;
+        staff_profile_id: string | null;
+        staff_profile_id_2: string | null;
+      };
 
       if (ex.status !== "offered") {
         return badRequest(`Cannot respond — appointment is '${ex.status}', not 'offered'`);
       }
 
-      // Check if caller is owner/manager; if not, verify they are the assigned staff
+      // Track which staff slot the caller occupies (needed for decline clearing)
+      let callerIsSecondaryStaff = false;
+
+      // Check if caller is owner/manager; if not, verify they are assigned staff (primary or secondary)
       const ownerResult = await requireOwnerOrManagerCtx(req, ex.business_id);
       if (ownerResult instanceof Response) {
-        // Not owner/manager — must be the assigned staff member
+        // Not owner/manager — must be one of the assigned staff members
         try {
           const user = await verifyAuth(req);
           const { data: memberRow } = await supabaseAdmin
@@ -716,9 +724,13 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
             .maybeSingle();
 
           const callerStaffId = (sp as { id: string } | null)?.id ?? null;
-          if (!callerStaffId || callerStaffId !== ex.staff_profile_id) {
-            return forbidden("You can only respond to your own appointment offers");
+          const isPrimary   = callerStaffId === ex.staff_profile_id;
+          const isSecondary = callerStaffId === ex.staff_profile_id_2;
+
+          if (!callerStaffId || (!isPrimary && !isSecondary)) {
+            return forbidden(req, "You can only respond to your own appointment offers");
           }
+          callerIsSecondaryStaff = isSecondary;
         } catch (e) {
           if (e instanceof Response) return e;
           return ownerResult;
@@ -727,7 +739,14 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
 
       const newStatus = response === "accepted" ? "confirmed" : "pending";
       const updatePayload: Record<string, unknown> = { status: newStatus };
-      if (response === "declined") updatePayload.staff_profile_id = null;
+      if (response === "declined") {
+        // Clear only the slot that belongs to the decliner
+        if (callerIsSecondaryStaff) {
+          updatePayload.staff_profile_id_2 = null;
+        } else {
+          updatePayload.staff_profile_id = null;
+        }
+      }
 
       const { data: updated, error: updateErr } = await supabaseAdmin
         .from("appointments")

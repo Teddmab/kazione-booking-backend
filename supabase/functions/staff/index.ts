@@ -93,6 +93,12 @@ Deno.serve(withLogging("staff", async (req: Request) => {
           avatar_url,
           specialties,
           is_active,
+          commission_rate,
+          bank_account_iban,
+          bank_account_bank_name,
+          bank_account_holder_name,
+          bank_account_is_entrepreneur,
+          bank_account_ee_accepted_at,
           staff_working_hours (
             day_of_week,
             is_working,
@@ -148,12 +154,81 @@ Deno.serve(withLogging("staff", async (req: Request) => {
         position: (row.position as string | null) ?? null,
         specialties: (row.specialties as string[]) ?? [],
         business_id: businessId,
+        commission_rate: (row.commission_rate as number | null) ?? 0,
+        bank_account_iban: (row.bank_account_iban as string | null) ?? null,
+        bank_account_bank_name: (row.bank_account_bank_name as string | null) ?? null,
+        bank_account_holder_name: (row.bank_account_holder_name as string | null) ?? null,
+        bank_account_is_entrepreneur: Boolean(row.bank_account_is_entrepreneur),
+        bank_account_ee_accepted_at: (row.bank_account_ee_accepted_at as string | null) ?? null,
         working_hours: workingHours.map((wh) => ({
           day: Number(wh.day_of_week),
           is_working: Boolean(wh.is_working),
           start_time: (wh.start_time as string | null) ?? null,
           end_time: (wh.end_time as string | null) ?? null,
         })),
+      });
+    }
+
+    // ── GET /staff?id=X — single staff full profile (owner view with bank account) ─
+    if (method === "GET" && !action && staffId) {
+      const { data: sp, error: spErr } = await supabaseAdmin
+        .from("staff_profiles")
+        .select(`
+          id, display_name, position, bio, avatar_url, specialties,
+          is_active, commission_rate, calendar_color,
+          bank_account_iban, bank_account_bank_name,
+          bank_account_holder_name, bank_account_is_entrepreneur,
+          bank_account_ee_accepted_at,
+          business_id, business_member_id
+        `)
+        .eq("id", staffId)
+        .maybeSingle();
+
+      if (spErr) return serverError(spErr.message);
+      if (!sp) return notFound("Staff member not found");
+
+      const spRow = sp as Record<string, unknown>;
+      const ctx = await requireOwnerOrManagerCtx(req, spRow.business_id as string);
+      if (ctx instanceof Response) return ctx;
+
+      // Resolve email + phone + name from users table via business_members
+      let email: string | null = null;
+      let phone: string | null = null;
+      let firstName: string | null = null;
+      let lastName: string | null = null;
+      const memberId = spRow.business_member_id as string | null;
+      if (memberId) {
+        const { data: memberRow } = await supabaseAdmin
+          .from("business_members")
+          .select("users(email, phone, first_name, last_name)")
+          .eq("id", memberId)
+          .maybeSingle();
+        const u = (memberRow as Record<string, unknown> | null)?.users as Record<string, unknown> | null;
+        email = (u?.email as string) ?? null;
+        phone = (u?.phone as string) ?? null;
+        firstName = (u?.first_name as string) ?? null;
+        lastName = (u?.last_name as string) ?? null;
+      }
+
+      return jsonCors(req, {
+        id: spRow.id,
+        display_name: spRow.display_name,
+        position: spRow.position ?? null,
+        bio: spRow.bio ?? null,
+        avatar_url: spRow.avatar_url ?? null,
+        specialties: (spRow.specialties as string[]) ?? [],
+        is_active: spRow.is_active,
+        calendar_color: spRow.calendar_color ?? null,
+        commission_rate: (spRow.commission_rate as number | null) ?? 0,
+        email,
+        phone,
+        first_name: firstName,
+        last_name: lastName,
+        bank_account_iban: (spRow.bank_account_iban as string | null) ?? null,
+        bank_account_bank_name: (spRow.bank_account_bank_name as string | null) ?? null,
+        bank_account_holder_name: (spRow.bank_account_holder_name as string | null) ?? null,
+        bank_account_is_entrepreneur: Boolean(spRow.bank_account_is_entrepreneur),
+        bank_account_ee_accepted_at: (spRow.bank_account_ee_accepted_at as string | null) ?? null,
       });
     }
 
@@ -1631,6 +1706,243 @@ Deno.serve(withLogging("staff", async (req: Request) => {
         email: staffEmail,
         display_name: profile.display_name,
       });
+    }
+
+    // ── GET /staff?action=my-commissions — staff views own commission history ────
+    if (method === "GET" && action === "my-commissions") {
+      let user;
+      try { user = await verifyAuth(req); } catch (e) { return e instanceof Response ? e : forbidden(req, "Authentication required"); }
+
+      // Resolve business and staff_profile_id
+      let bizId = url.searchParams.get("business_id") ?? undefined;
+      if (!bizId) {
+        const { data: bm } = await supabaseAdmin.from("business_members").select("business_id").eq("user_id", user.id).eq("is_active", true).limit(1).maybeSingle();
+        if (!bm) return forbidden(req, "No active business membership");
+        bizId = (bm as Record<string, unknown>).business_id as string;
+      }
+
+      const { data: sp } = await supabaseAdmin.from("staff_profiles").select("id, commission_rate").eq("business_id", bizId).eq("business_member_id",
+        (await supabaseAdmin.from("business_members").select("id").eq("user_id", user.id).eq("business_id", bizId).eq("is_active", true).maybeSingle()).data?.id ?? ""
+      ).maybeSingle();
+      if (!sp) return notFound(req, "Staff profile not found");
+
+      const mySpId = (sp as Record<string, unknown>).id as string;
+      const commRate = Number((sp as Record<string, unknown>).commission_rate ?? 0);
+
+      const fromDate = url.searchParams.get("from");
+      const toDate = url.searchParams.get("to");
+      const statusFilter = url.searchParams.get("status") ?? "all";
+
+      let query = supabaseAdmin
+        .from("appointments")
+        .select(`
+          id, starts_at, price, status,
+          commission_paid_at, commission_pay_method, commission_amount_paid,
+          client:clients(first_name, last_name),
+          service:services(name, staff_commission_type, staff_commission_value)
+        `)
+        .eq("staff_profile_id", mySpId)
+        .eq("business_id", bizId)
+        .eq("status", "completed")
+        .is("deleted_at", null)
+        .order("starts_at", { ascending: false })
+        .limit(200);
+
+      if (fromDate) query = query.gte("starts_at", `${fromDate}T00:00:00`);
+      if (toDate) query = query.lte("starts_at", `${toDate}T23:59:59`);
+      if (statusFilter === "unpaid") query = query.is("commission_paid_at", null);
+
+      const { data: appts, error: apptErr } = await query;
+      if (apptErr) return serverError(apptErr.message);
+
+      const rows = (appts ?? []) as Record<string, unknown>[];
+      const commissions = rows.map((a) => {
+        const svc = a.service as Record<string, unknown> | null;
+        const commType = (svc?.staff_commission_type as string) ?? "none";
+        const commValue = Number(svc?.staff_commission_value ?? 0);
+        const price = Number(a.price ?? 0);
+        let commAmt = 0;
+        if (commType === "percentage" && commValue > 0) commAmt = price * commValue / 100;
+        else if (commType === "fixed" && commValue > 0) commAmt = commValue;
+        else if (commRate > 0) commAmt = price * commRate / 100;
+        const client = a.client as Record<string, unknown> | null;
+        return {
+          appointment_id: a.id as string,
+          starts_at: a.starts_at as string,
+          client_name: client ? `${client.first_name ?? ""} ${client.last_name ?? ""}`.trim() : "Client",
+          service_name: (svc?.name as string) ?? "Service",
+          price,
+          commission_type: commType !== "none" ? commType : commRate > 0 ? "percentage" : "none",
+          commission_value: commType !== "none" ? commValue : commRate,
+          commission_amount: Math.round(commAmt * 100) / 100,
+          commission_paid_at: (a.commission_paid_at as string | null) ?? null,
+          commission_pay_method: (a.commission_pay_method as string | null) ?? null,
+          commission_amount_paid: a.commission_amount_paid != null ? Number(a.commission_amount_paid) : null,
+        };
+      }).filter((c) => c.commission_amount > 0);
+
+      const totalEarned = commissions.reduce((s, c) => s + c.commission_amount, 0);
+      const totalPaid = commissions.filter((c) => c.commission_paid_at).reduce((s, c) => s + (c.commission_amount_paid ?? c.commission_amount), 0);
+      return jsonCors(req, {
+        commissions,
+        summary: {
+          total_earned: Math.round(totalEarned * 100) / 100,
+          total_paid: Math.round(totalPaid * 100) / 100,
+          total_unpaid: Math.round((totalEarned - totalPaid) * 100) / 100,
+        },
+      });
+    }
+
+    // ── GET /staff?action=commissions&staff_id=X — owner views one staff's commissions ─
+    if (method === "GET" && action === "commissions") {
+      const targetStaffId = url.searchParams.get("staff_id");
+      if (!targetStaffId) return badRequest(req, "staff_id is required");
+
+      const { data: sp, error: spErr } = await supabaseAdmin
+        .from("staff_profiles")
+        .select("id, business_id, commission_rate")
+        .eq("id", targetStaffId)
+        .maybeSingle();
+      if (spErr) return serverError(spErr.message);
+      if (!sp) return notFound(req, "Staff member not found");
+
+      const ctx = await requireOwnerOrManagerCtx(req, (sp as Record<string, unknown>).business_id as string);
+      if (ctx instanceof Response) return ctx;
+
+      const commRate = Number((sp as Record<string, unknown>).commission_rate ?? 0);
+      const fromDate = url.searchParams.get("from");
+      const toDate = url.searchParams.get("to");
+      const statusFilter = url.searchParams.get("status") ?? "all";
+
+      let query = supabaseAdmin
+        .from("appointments")
+        .select(`
+          id, starts_at, price, status,
+          commission_paid_at, commission_pay_method, commission_amount_paid,
+          client:clients(first_name, last_name),
+          service:services(name, staff_commission_type, staff_commission_value)
+        `)
+        .eq("staff_profile_id", targetStaffId)
+        .eq("business_id", ctx.businessId)
+        .eq("status", "completed")
+        .is("deleted_at", null)
+        .order("starts_at", { ascending: false })
+        .limit(200);
+
+      if (fromDate) query = query.gte("starts_at", `${fromDate}T00:00:00`);
+      if (toDate) query = query.lte("starts_at", `${toDate}T23:59:59`);
+      if (statusFilter === "unpaid") query = query.is("commission_paid_at", null);
+
+      const { data: appts, error: apptErr } = await query;
+      if (apptErr) return serverError(apptErr.message);
+
+      const rows = (appts ?? []) as Record<string, unknown>[];
+      const commissions = rows.map((a) => {
+        const svc = a.service as Record<string, unknown> | null;
+        const commType = (svc?.staff_commission_type as string) ?? "none";
+        const commValue = Number(svc?.staff_commission_value ?? 0);
+        const price = Number(a.price ?? 0);
+        let commAmt = 0;
+        if (commType === "percentage" && commValue > 0) commAmt = price * commValue / 100;
+        else if (commType === "fixed" && commValue > 0) commAmt = commValue;
+        else if (commRate > 0) commAmt = price * commRate / 100;
+        const client = a.client as Record<string, unknown> | null;
+        return {
+          appointment_id: a.id as string,
+          starts_at: a.starts_at as string,
+          client_name: client ? `${client.first_name ?? ""} ${client.last_name ?? ""}`.trim() : "Client",
+          service_name: (svc?.name as string) ?? "Service",
+          price,
+          commission_type: commType !== "none" ? commType : commRate > 0 ? "percentage" : "none",
+          commission_value: commType !== "none" ? commValue : commRate,
+          commission_amount: Math.round(commAmt * 100) / 100,
+          commission_paid_at: (a.commission_paid_at as string | null) ?? null,
+          commission_pay_method: (a.commission_pay_method as string | null) ?? null,
+          commission_amount_paid: a.commission_amount_paid != null ? Number(a.commission_amount_paid) : null,
+        };
+      }).filter((c) => c.commission_amount > 0);
+
+      const totalEarned = commissions.reduce((s, c) => s + c.commission_amount, 0);
+      const totalPaid = commissions.filter((c) => c.commission_paid_at).reduce((s, c) => s + (c.commission_amount_paid ?? c.commission_amount), 0);
+      return jsonCors(req, {
+        commissions,
+        summary: {
+          total_earned: Math.round(totalEarned * 100) / 100,
+          total_paid: Math.round(totalPaid * 100) / 100,
+          total_unpaid: Math.round((totalEarned - totalPaid) * 100) / 100,
+        },
+      });
+    }
+
+    // ── PATCH /staff?action=pay-commissions — owner bulk marks commissions paid ─
+    if (method === "PATCH" && action === "pay-commissions") {
+      const body = await req.json() as Record<string, unknown>;
+      const ctx = await requireOwnerOrManagerCtx(req, body.business_id as string | undefined);
+      if (ctx instanceof Response) return ctx;
+
+      const appointmentIds = body.appointment_ids as string[] | undefined;
+      const payMethod = body.pay_method as string | undefined;
+
+      if (!Array.isArray(appointmentIds) || appointmentIds.length === 0) {
+        return badRequest(req, "appointment_ids must be a non-empty array");
+      }
+      if (!payMethod || !["cash", "bank_transfer", "offset"].includes(payMethod)) {
+        return badRequest(req, "pay_method must be 'cash', 'bank_transfer', or 'offset'");
+      }
+
+      const now = new Date().toISOString();
+      const { data: updated, error: updateErr } = await supabaseAdmin
+        .from("appointments")
+        .update({ commission_paid_at: now, commission_pay_method: payMethod })
+        .in("id", appointmentIds)
+        .eq("business_id", ctx.businessId)
+        .eq("status", "completed")
+        .is("commission_paid_at", null)
+        .select("id");
+
+      if (updateErr) return serverError(updateErr.message);
+      return jsonCors(req, { paid_count: (updated ?? []).length });
+    }
+
+    // ── PATCH /staff?action=update-bank-account — staff saves own bank details ─
+    if (method === "PATCH" && action === "update-bank-account") {
+      let user;
+      try { user = await verifyAuth(req); } catch (e) { return e instanceof Response ? e : forbidden(req, "Authentication required"); }
+
+      let body: Record<string, unknown> = {};
+      try { body = await req.json(); } catch { /* empty body */ }
+
+      // Resolve membership and staff_profile_id
+      let bizId = (body.business_id as string | undefined);
+      if (!bizId) {
+        const { data: bm } = await supabaseAdmin.from("business_members").select("business_id").eq("user_id", user.id).eq("is_active", true).limit(1).maybeSingle();
+        if (!bm) return forbidden(req, "No active business membership");
+        bizId = (bm as Record<string, unknown>).business_id as string;
+      }
+
+      const { data: bmRow } = await supabaseAdmin.from("business_members").select("id").eq("user_id", user.id).eq("business_id", bizId).eq("is_active", true).maybeSingle();
+      if (!bmRow) return forbidden(req, "No active membership for this business");
+
+      const { data: sp } = await supabaseAdmin.from("staff_profiles").select("id, bank_account_ee_accepted_at").eq("business_id", bizId).eq("business_member_id", (bmRow as Record<string, unknown>).id as string).maybeSingle();
+      if (!sp) return notFound(req, "Staff profile not found");
+
+      const spRow = sp as Record<string, unknown>;
+      const update: Record<string, unknown> = {};
+
+      if (body.iban !== undefined) update.bank_account_iban = String(body.iban ?? "").trim().replace(/\s+/g, "") || null;
+      if (body.bank_name !== undefined) update.bank_account_bank_name = String(body.bank_name ?? "").trim() || null;
+      if (body.holder_name !== undefined) update.bank_account_holder_name = String(body.holder_name ?? "").trim() || null;
+      if (body.is_entrepreneur !== undefined) update.bank_account_is_entrepreneur = Boolean(body.is_entrepreneur);
+      // Set ee_accepted_at only on first acceptance (do not clear if already set)
+      if (body.ee_accepted && !spRow.bank_account_ee_accepted_at) {
+        update.bank_account_ee_accepted_at = new Date().toISOString();
+      }
+
+      if (Object.keys(update).length === 0) return badRequest(req, "No valid fields to update");
+
+      const { error: upErr } = await supabaseAdmin.from("staff_profiles").update(update).eq("id", spRow.id as string);
+      if (upErr) return serverError(upErr.message);
+      return jsonCors(req, { success: true });
     }
 
     return badRequest(`Method ${method} is not supported`);

@@ -470,20 +470,8 @@ Deno.serve(withLogging("offers", async (req: Request) => {
       if (offerErr || !offer) return notFound(req, "Offer not found");
       if (!offer.is_active)   return badRequest(req, "Offer is no longer active");
 
-      // Validity window is a marketplace restriction — skip it for owner-initiated sales.
-      // Owners can sell any active offer to a client regardless of valid_from / valid_until.
-
-      // Max redemptions check
-      if (offer.max_redemptions != null) {
-        const { count, error: cntErr } = await supabaseAdmin
-          .from("offer_redemptions")
-          .select("id", { count: "exact", head: true })
-          .eq("offer_id", offer_id)
-          .neq("status", "cancelled");
-        if (cntErr) return serverError(req, cntErr.message);
-        if ((count ?? 0) >= offer.max_redemptions)
-          return badRequest(req, "This offer has reached its maximum number of redemptions");
-      }
+      // Validity window and max_redemptions are marketplace restrictions.
+      // Owners bypass both — they can sell any active offer to any client directly.
 
       // Build redemption row
       const redemptionRow: Record<string, unknown> = {

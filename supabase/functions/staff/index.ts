@@ -1780,9 +1780,9 @@ Deno.serve(withLogging("staff", async (req: Request) => {
           commission_pay_method: (a.commission_pay_method as string | null) ?? null,
           commission_amount_paid: a.commission_amount_paid != null ? Number(a.commission_amount_paid) : null,
         };
-      }).filter((c) => c.commission_amount > 0);
+      }).filter((c) => c.commission_amount > 0 || !!c.commission_paid_at);
 
-      const totalEarned = commissions.reduce((s, c) => s + c.commission_amount, 0);
+      const totalEarned = commissions.reduce((s, c) => s + (c.commission_amount_paid ?? c.commission_amount), 0);
       const totalPaid = commissions.filter((c) => c.commission_paid_at).reduce((s, c) => s + (c.commission_amount_paid ?? c.commission_amount), 0);
       return jsonCors(req, {
         commissions,
@@ -1861,9 +1861,9 @@ Deno.serve(withLogging("staff", async (req: Request) => {
           commission_pay_method: (a.commission_pay_method as string | null) ?? null,
           commission_amount_paid: a.commission_amount_paid != null ? Number(a.commission_amount_paid) : null,
         };
-      }).filter((c) => c.commission_amount > 0);
+      }).filter((c) => c.commission_amount > 0 || !!c.commission_paid_at);
 
-      const totalEarned = commissions.reduce((s, c) => s + c.commission_amount, 0);
+      const totalEarned = commissions.reduce((s, c) => s + (c.commission_amount_paid ?? c.commission_amount), 0);
       const totalPaid = commissions.filter((c) => c.commission_paid_at).reduce((s, c) => s + (c.commission_amount_paid ?? c.commission_amount), 0);
       return jsonCors(req, {
         commissions,

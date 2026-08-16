@@ -548,10 +548,10 @@ Deno.serve(withLogging("offers", async (req: Request) => {
       const ctx = await requireOwnerOrManagerCtx(req, business_id);
       if (ctx instanceof Response) return ctx;
 
-      // Fetch the redemption + its offer
+      // Fetch the redemption + its offer (include discount fields for appointment_discount type)
       const { data: redemption, error: rErr } = await supabaseAdmin
         .from("offer_redemptions")
-        .select("*, business_offers(type, sessions_total)")
+        .select("*, business_offers(type, sessions_total, discount_type, discount_value)")
         .eq("id", redemption_id)
         .eq("business_id", business_id)
         .single();
@@ -562,11 +562,27 @@ Deno.serve(withLogging("offers", async (req: Request) => {
 
       const offerType = redemption.business_offers?.type as OfferType;
       const updates: Record<string, unknown> = {};
+      let offerDiscount: number | null = null;
 
       if (offerType === "appointment_discount") {
         // Discount offers are single-use — mark completed immediately
         updates.status = "completed";
         updates.completed_at = new Date().toISOString();
+        // Compute the monetary discount against the appointment price
+        if (appointment_id) {
+          const { data: apptRow } = await supabaseAdmin
+            .from("appointments")
+            .select("price")
+            .eq("id", appointment_id)
+            .eq("business_id", business_id)
+            .single();
+          const apptPrice = Number((apptRow as { price?: number } | null)?.price ?? 0);
+          const dType  = (redemption.business_offers as Record<string, unknown>)?.discount_type as string | null;
+          const dValue = Number((redemption.business_offers as Record<string, unknown>)?.discount_value ?? 0);
+          offerDiscount = dType === "percentage"
+            ? +(apptPrice * dValue / 100).toFixed(2)
+            : Math.min(dValue, apptPrice);
+        }
       } else if (offerType === "package" || offerType === "training") {
         const newUsed = Number(redemption.sessions_used) + 1;
         updates.sessions_used = newUsed;
@@ -584,6 +600,7 @@ Deno.serve(withLogging("offers", async (req: Request) => {
           updates.status = "completed";
           updates.completed_at = new Date().toISOString();
         }
+        offerDiscount = +applyAmt.toFixed(2);
       }
 
       const { error: updErr } = await supabaseAdmin
@@ -594,9 +611,11 @@ Deno.serve(withLogging("offers", async (req: Request) => {
 
       // Stamp the appointment if provided
       if (appointment_id) {
+        const apptStamp: Record<string, unknown> = { offer_redemption_id: redemption_id };
+        if (offerDiscount !== null) apptStamp.offer_discount = offerDiscount;
         const { error: apptErr } = await supabaseAdmin
           .from("appointments")
-          .update({ offer_redemption_id: redemption_id })
+          .update(apptStamp)
           .eq("id", appointment_id)
           .eq("business_id", business_id);
         if (apptErr) return serverError(req, apptErr.message);

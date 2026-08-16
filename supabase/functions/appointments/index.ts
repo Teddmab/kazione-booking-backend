@@ -25,7 +25,8 @@ const APPT_SELECT = `
   staff:staff_profiles!staff_profile_id(id, display_name, avatar_url, commission_rate),
   staff2:staff_profiles!staff_profile_id_2(id, display_name, avatar_url, commission_rate),
   referrer_staff:staff_profiles!referrer_staff_id(id, display_name, avatar_url),
-  payment:payments(status, amount, method, paid_at)
+  payment:payments(status, amount, method, paid_at),
+  applied_offer:offer_redemptions!offer_redemption_id(id, status, offer:business_offers(id, type, title, discount_type, discount_value))
 `;
 
 function normalizePayment(row: Record<string, unknown>) {

@@ -756,34 +756,33 @@ Deno.serve(withLogging("offers", async (req: Request) => {
         .single();
       const offerDiscount = Number((apptRow as Record<string, unknown> | null)?.offer_discount ?? 0);
 
-      // Get the redemption + offer type
+      // Get the redemption + offer type (sessions_total/voucher_value live on offer_redemptions.*)
       const { data: redemption, error: rErr } = await supabaseAdmin
         .from("offer_redemptions")
-        .select("*, business_offers(type, sessions_total, voucher_value)")
+        .select("*, business_offers(type)")
         .eq("id", redemption_id)
         .eq("business_id", business_id)
         .single();
       if (rErr || !redemption) return notFound(req, "Redemption not found");
 
-      const offerType = (redemption.business_offers as Record<string, unknown> | null)?.type as string | undefined;
+      const row = redemption as Record<string, unknown>;
+      const offerType = (row.business_offers as Record<string, unknown> | null)?.type as string | undefined;
       const reversal: Record<string, unknown> = {};
 
       if (offerType === "appointment_discount") {
         reversal.status = "active";
         reversal.completed_at = null;
       } else if (offerType === "package" || offerType === "training") {
-        const newUsed = Math.max(0, Number(redemption.sessions_used) - 1);
+        const newUsed = Math.max(0, Number(row.sessions_used) - 1);
         reversal.sessions_used = newUsed;
-        const sessionsTotal = Number((redemption.business_offers as Record<string, unknown>)?.sessions_total ?? 0);
-        if (sessionsTotal > newUsed) {
+        if (Number(row.sessions_total) > newUsed) {
           reversal.status = "active";
           reversal.completed_at = null;
         }
       } else if (offerType === "gift_voucher") {
-        const newVoucherUsed = Math.max(0, Number(redemption.voucher_used) - offerDiscount);
+        const newVoucherUsed = Math.max(0, Number(row.voucher_used) - offerDiscount);
         reversal.voucher_used = +newVoucherUsed.toFixed(2);
-        const voucherValue = Number((redemption.business_offers as Record<string, unknown>)?.voucher_value ?? 0);
-        if (voucherValue > newVoucherUsed) {
+        if (Number(row.voucher_value) > newVoucherUsed) {
           reversal.status = "active";
           reversal.completed_at = null;
         }

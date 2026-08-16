@@ -15,6 +15,9 @@ import { requireOwnerOrManagerCtx } from "../_shared/auth.ts";
  * GET  ?action=bookkeeping&business_id=&from=&to=
  * GET  ?action=staff-performance&business_id=&from=&to=
  * GET  ?action=supplier-spend&business_id=&from=&to=
+ * GET  ?action=annual-summary&business_id=&year=YYYY
+ * GET  ?action=bank-coverage&business_id=&year=YYYY
+ * GET  ?action=payroll-summary&business_id=&year=YYYY
  * POST ?action=expense        → create expense (body: business_id + fields, no file upload)
  * PATCH ?action=expense&id=   → update expense
  * DELETE ?id=                 → delete expense
@@ -231,6 +234,272 @@ Deno.serve(withLogging("finance", async (req: Request) => {
         });
         if (error) return serverError(error.message);
         return jsonCors(req, data ?? []);
+      }
+
+      if (action === "annual-summary") {
+        const year = parseInt(url.searchParams.get("year") ?? "0", 10);
+        if (!year) return badRequest("year is required");
+
+        const yearStart = `${year}-01-01`;
+        const yearEnd = `${year + 1}-01-01`;
+
+        const [apptResult, paymentResult, expenseResult, commPaidResult] = await Promise.all([
+          supabaseAdmin
+            .from("appointments")
+            .select("price, starts_at")
+            .eq("business_id", businessId)
+            .eq("status", "completed")
+            .is("deleted_at", null)
+            .gte("starts_at", yearStart)
+            .lt("starts_at", yearEnd),
+          supabaseAdmin
+            .from("payments")
+            .select("amount, tax_amount, paid_at")
+            .eq("business_id", businessId)
+            .eq("status", "paid")
+            .gte("paid_at", yearStart)
+            .lt("paid_at", yearEnd),
+          supabaseAdmin
+            .from("expenses")
+            .select("amount, tax_amount, date, receipt_url")
+            .eq("business_id", businessId)
+            .is("deleted_at", null)
+            .gte("date", yearStart)
+            .lt("date", yearEnd),
+          supabaseAdmin
+            .from("appointments")
+            .select("commission_amount_paid")
+            .eq("business_id", businessId)
+            .eq("status", "completed")
+            .not("commission_paid_at", "is", null)
+            .gte("commission_paid_at", yearStart)
+            .lt("commission_paid_at", yearEnd),
+        ]);
+
+        if (apptResult.error)    return serverError(apptResult.error.message);
+        if (paymentResult.error) return serverError(paymentResult.error.message);
+        if (expenseResult.error) return serverError(expenseResult.error.message);
+        if (commPaidResult.error) return serverError(commPaidResult.error.message);
+
+        // Revenue by month (gross from appointments, vat from payments)
+        const revByMonth: Record<number, { gross: number; vat: number }> = {};
+        for (let m = 1; m <= 12; m++) revByMonth[m] = { gross: 0, vat: 0 };
+        for (const a of apptResult.data ?? []) {
+          const m = new Date(a.starts_at as string).getMonth() + 1;
+          revByMonth[m].gross += Number(a.price ?? 0);
+        }
+        for (const p of paymentResult.data ?? []) {
+          const m = new Date(p.paid_at as string).getMonth() + 1;
+          revByMonth[m].vat += Number(p.tax_amount ?? 0);
+        }
+        const totalGross = Object.values(revByMonth).reduce((s, v) => s + v.gross, 0);
+        const totalVat   = Object.values(revByMonth).reduce((s, v) => s + v.vat, 0);
+
+        // Expenses by month
+        const expByMonth: Record<number, { total: number; count: number; missing_invoices: number }> = {};
+        for (let m = 1; m <= 12; m++) expByMonth[m] = { total: 0, count: 0, missing_invoices: 0 };
+        let totalExpenses = 0;
+        let totalVatDeductible = 0;
+        let missingInvoiceCount = 0;
+        for (const e of expenseResult.data ?? []) {
+          const m = new Date(e.date as string).getMonth() + 1;
+          const amt = Number(e.amount ?? 0);
+          const tax = Number(e.tax_amount ?? 0);
+          expByMonth[m].total += amt;
+          expByMonth[m].count += 1;
+          totalExpenses += amt;
+          totalVatDeductible += tax;
+          if (!e.receipt_url) { expByMonth[m].missing_invoices += 1; missingInvoiceCount += 1; }
+        }
+
+        // Commissions paid this year
+        const commissionsPaid = (commPaidResult.data ?? []).reduce(
+          (s, a) => s + Number(a.commission_amount_paid ?? 0), 0,
+        );
+
+        // Unpaid commissions (need service join)
+        const { data: bizRow } = await supabaseAdmin
+          .from("businesses").select("commission_rate").eq("id", businessId).maybeSingle();
+        const bizRate = Number((bizRow as Record<string, unknown> | null)?.commission_rate ?? 0);
+
+        const { data: unpaidAppts, error: unpaidErr } = await supabaseAdmin
+          .from("appointments")
+          .select("price, service:services(staff_commission_type, staff_commission_value)")
+          .eq("business_id", businessId)
+          .eq("status", "completed")
+          .is("commission_paid_at", null)
+          .is("deleted_at", null);
+        if (unpaidErr) return serverError(unpaidErr.message);
+
+        let commissionsUnpaid = 0;
+        for (const a of unpaidAppts ?? []) {
+          const svc = (a as Record<string, unknown>).service as Record<string, unknown> | null;
+          const price = Number(a.price ?? 0);
+          const commType = (svc?.staff_commission_type as string) ?? "none";
+          const commVal = Number(svc?.staff_commission_value ?? 0);
+          let commAmt = 0;
+          if (commType === "percentage") commAmt = (price * commVal) / 100;
+          else if (commType === "fixed") commAmt = commVal;
+          else commAmt = (price * bizRate) / 100;
+          commissionsUnpaid += Math.max(0, commAmt);
+        }
+
+        const r = (n: number) => Math.round(n * 100) / 100;
+        const netRevenue  = r(totalGross - totalVat);
+        const netExpenses = r(totalExpenses - totalVatDeductible);
+        const netProfit   = r(netRevenue - netExpenses - commissionsPaid);
+        const vatNet      = r(totalVat - totalVatDeductible);
+
+        return jsonCors(req, {
+          year,
+          revenue: {
+            total_gross: r(totalGross),
+            total_vat_collected: r(totalVat),
+            total_net: netRevenue,
+            by_month: Object.entries(revByMonth).map(([m, v]) => ({
+              month: Number(m), gross: r(v.gross), vat: r(v.vat),
+            })),
+          },
+          expenses: {
+            total_gross: r(totalExpenses),
+            total_vat_deductible: r(totalVatDeductible),
+            total_net: netExpenses,
+            count: (expenseResult.data ?? []).length,
+            missing_invoice_count: missingInvoiceCount,
+            by_month: Object.entries(expByMonth).map(([m, v]) => ({
+              month: Number(m), total: r(v.total), count: v.count, missing_invoices: v.missing_invoices,
+            })),
+          },
+          payroll: {
+            commissions_paid: r(commissionsPaid),
+            commissions_unpaid: r(commissionsUnpaid),
+            staff_count: 0,
+          },
+          vat: { collected: r(totalVat), deductible: r(totalVatDeductible), net_payable: vatNet },
+          profit: {
+            gross: r(totalGross - totalExpenses - commissionsPaid),
+            net: netProfit,
+            margin_pct: totalGross > 0 ? r((netProfit / totalGross) * 100) : 0,
+          },
+        });
+      }
+
+      if (action === "bank-coverage") {
+        const year = parseInt(url.searchParams.get("year") ?? "0", 10);
+        if (!year) return badRequest("year is required");
+
+        const { data: txRows, error: txErr } = await supabaseAdmin
+          .from("bank_transactions")
+          .select("date")
+          .eq("business_id", businessId)
+          .gte("date", `${year}-01-01`)
+          .lt("date", `${year + 1}-01-01`)
+          .order("date", { ascending: true });
+        if (txErr) return serverError(txErr.message);
+
+        const MONTHS = ["January","February","March","April","May","June",
+          "July","August","September","October","November","December"];
+
+        const monthData: Record<number, { count: number; import_date: string | null }> = {};
+        for (let m = 1; m <= 12; m++) monthData[m] = { count: 0, import_date: null };
+
+        for (const tx of txRows ?? []) {
+          const m = new Date(tx.date as string).getMonth() + 1;
+          monthData[m].count += 1;
+          if (!monthData[m].import_date) monthData[m].import_date = tx.date as string;
+        }
+
+        const months = Object.entries(monthData).map(([m, v]) => ({
+          month: Number(m),
+          label: MONTHS[Number(m) - 1],
+          has_statement: v.count > 0,
+          transaction_count: v.count,
+          import_date: v.import_date,
+        }));
+
+        return jsonCors(req, {
+          year,
+          months,
+          covered_months: months.filter(m => m.has_statement).length,
+          missing_months: months.filter(m => !m.has_statement).map(m => m.month),
+        });
+      }
+
+      if (action === "payroll-summary") {
+        const year = parseInt(url.searchParams.get("year") ?? "0", 10);
+        if (!year) return badRequest("year is required");
+
+        const yearStart = `${year}-01-01`;
+        const yearEnd = `${year + 1}-01-01`;
+
+        const { data: bizRow2 } = await supabaseAdmin
+          .from("businesses").select("commission_rate").eq("id", businessId).maybeSingle();
+        const bizRate2 = Number((bizRow2 as Record<string, unknown> | null)?.commission_rate ?? 0);
+
+        const [paidResult, unpaidResult] = await Promise.all([
+          supabaseAdmin
+            .from("appointments")
+            .select("staff_profile_id, commission_amount_paid, staff_profile:staff_profiles(display_name)")
+            .eq("business_id", businessId)
+            .eq("status", "completed")
+            .not("commission_paid_at", "is", null)
+            .gte("commission_paid_at", yearStart)
+            .lt("commission_paid_at", yearEnd),
+          supabaseAdmin
+            .from("appointments")
+            .select("staff_profile_id, price, staff_profile:staff_profiles(display_name), service:services(staff_commission_type, staff_commission_value)")
+            .eq("business_id", businessId)
+            .eq("status", "completed")
+            .not("staff_profile_id", "is", null)
+            .is("commission_paid_at", null)
+            .is("deleted_at", null),
+        ]);
+
+        if (paidResult.error)   return serverError(paidResult.error.message);
+        if (unpaidResult.error) return serverError(unpaidResult.error.message);
+
+        const staffMap: Record<string, { display_name: string; paid: number; unpaid: number; appointment_count: number }> = {};
+
+        for (const a of paidResult.data ?? []) {
+          const id = a.staff_profile_id as string | null;
+          if (!id) continue;
+          const sp = (a as Record<string, unknown>).staff_profile as Record<string, unknown> | null;
+          if (!staffMap[id]) staffMap[id] = { display_name: (sp?.display_name as string) ?? "Unknown", paid: 0, unpaid: 0, appointment_count: 0 };
+          staffMap[id].paid += Number(a.commission_amount_paid ?? 0);
+          staffMap[id].appointment_count += 1;
+        }
+
+        for (const a of unpaidResult.data ?? []) {
+          const id = a.staff_profile_id as string | null;
+          if (!id) continue;
+          const sp = (a as Record<string, unknown>).staff_profile as Record<string, unknown> | null;
+          const svc = (a as Record<string, unknown>).service as Record<string, unknown> | null;
+          const price = Number(a.price ?? 0);
+          const commType = (svc?.staff_commission_type as string) ?? "none";
+          const commVal = Number(svc?.staff_commission_value ?? 0);
+          let commAmt = 0;
+          if (commType === "percentage") commAmt = (price * commVal) / 100;
+          else if (commType === "fixed") commAmt = commVal;
+          else commAmt = (price * bizRate2) / 100;
+          if (!staffMap[id]) staffMap[id] = { display_name: (sp?.display_name as string) ?? "Unknown", paid: 0, unpaid: 0, appointment_count: 0 };
+          staffMap[id].unpaid += Math.max(0, commAmt);
+        }
+
+        const r2 = (n: number) => Math.round(n * 100) / 100;
+        const breakdown = Object.entries(staffMap).map(([id, v]) => ({
+          staff_profile_id: id,
+          display_name: v.display_name,
+          paid: r2(v.paid),
+          unpaid: r2(v.unpaid),
+          appointment_count: v.appointment_count,
+        }));
+
+        return jsonCors(req, {
+          year,
+          commissions_paid: r2(breakdown.reduce((s, v) => s + v.paid, 0)),
+          commissions_unpaid: r2(breakdown.reduce((s, v) => s + v.unpaid, 0)),
+          staff_breakdown: breakdown,
+        });
       }
 
       return badRequest(`Unknown action: ${action}`);

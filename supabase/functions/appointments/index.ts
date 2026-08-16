@@ -13,6 +13,7 @@ import {
   ownerPendingCompletionEmail,
   staffCompletionConfirmedEmail,
   reviewRequestEmail,
+  bookingConfirmationEmail,
   sendEmail,
 } from "../_shared/resend.ts";
 import { generateIcs, icsToBase64, googleCalendarUrl } from "../_shared/ics.ts";
@@ -533,6 +534,26 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
               [{ filename: "appointment.ics", content: icsToBase64(icsString) }],
             ).catch((err) => console.error("Staff new-booking email failed:", err));
           }
+        }
+
+        // Client confirmation email
+        const clientEmailAddr = (clientRow.email as string | null) ?? null;
+        if (clientEmailAddr) {
+          const clientEmailData = bookingConfirmationEmail({
+            clientName,
+            salonName,
+            salonLogoUrl: biz?.logo_url ?? null,
+            serviceName,
+            staffName: staffDisplayName,
+            date: formattedDate,
+            time: formattedTime,
+            reference: bookingReference,
+            price: priceDisplay,
+            manageUrl: `${appUrl}/booking/${bookingReference}`,
+          });
+          sendEmail(clientEmailAddr, clientEmailData.subject, clientEmailData.html).catch(
+            (err) => console.error("Client confirmation email (manual booking) failed:", err),
+          );
         }
       }
 

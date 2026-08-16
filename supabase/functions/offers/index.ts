@@ -731,6 +731,84 @@ Deno.serve(withLogging("offers", async (req: Request) => {
       return jsonCors(req, { success: true });
     }
 
+    // ── POST /offers?action=remove-from-appointment ───────────────────────────
+    if (method === "POST" && action === "remove-from-appointment") {
+      const body = await req.json().catch(() => null) as {
+        business_id?: string;
+        redemption_id?: string;
+        appointment_id?: string;
+      } | null;
+      if (!body) return badRequest(req, "Invalid JSON body");
+      const { business_id, redemption_id, appointment_id } = body;
+      if (!business_id)   return badRequest(req, "business_id is required");
+      if (!redemption_id) return badRequest(req, "redemption_id is required");
+      if (!appointment_id) return badRequest(req, "appointment_id is required");
+
+      const ctx = await requireOwnerOrManagerCtx(req, business_id);
+      if (ctx instanceof Response) return ctx;
+
+      // Verify appointment has this redemption applied
+      const { data: apptRow } = await supabaseAdmin
+        .from("appointments")
+        .select("id, offer_redemption_id, offer_discount")
+        .eq("id", appointment_id)
+        .eq("business_id", business_id)
+        .single();
+      if (!apptRow || (apptRow as Record<string, unknown>).offer_redemption_id !== redemption_id) {
+        return badRequest(req, "This offer redemption is not applied to this appointment");
+      }
+      const offerDiscount = Number((apptRow as Record<string, unknown>).offer_discount ?? 0);
+
+      // Get the redemption + offer type
+      const { data: redemption, error: rErr } = await supabaseAdmin
+        .from("offer_redemptions")
+        .select("*, business_offers(type, sessions_total, voucher_value)")
+        .eq("id", redemption_id)
+        .eq("business_id", business_id)
+        .single();
+      if (rErr || !redemption) return notFound(req, "Redemption not found");
+
+      const offerType = (redemption.business_offers as Record<string, unknown> | null)?.type as string | undefined;
+      const reversal: Record<string, unknown> = {};
+
+      if (offerType === "appointment_discount") {
+        reversal.status = "active";
+        reversal.completed_at = null;
+      } else if (offerType === "package" || offerType === "training") {
+        const newUsed = Math.max(0, Number(redemption.sessions_used) - 1);
+        reversal.sessions_used = newUsed;
+        const sessionsTotal = Number((redemption.business_offers as Record<string, unknown>)?.sessions_total ?? 0);
+        if (sessionsTotal > newUsed) {
+          reversal.status = "active";
+          reversal.completed_at = null;
+        }
+      } else if (offerType === "gift_voucher") {
+        const newVoucherUsed = Math.max(0, Number(redemption.voucher_used) - offerDiscount);
+        reversal.voucher_used = +newVoucherUsed.toFixed(2);
+        const voucherValue = Number((redemption.business_offers as Record<string, unknown>)?.voucher_value ?? 0);
+        if (voucherValue > newVoucherUsed) {
+          reversal.status = "active";
+          reversal.completed_at = null;
+        }
+      }
+
+      if (Object.keys(reversal).length > 0) {
+        const { error: updErr } = await supabaseAdmin
+          .from("offer_redemptions")
+          .update(reversal)
+          .eq("id", redemption_id);
+        if (updErr) return serverError(req, updErr.message);
+      }
+
+      await supabaseAdmin
+        .from("appointments")
+        .update({ offer_redemption_id: null, offer_discount: null })
+        .eq("id", appointment_id)
+        .eq("business_id", business_id);
+
+      return jsonCors(req, { success: true });
+    }
+
     return badRequest(req, "Unknown route");
   } catch (err) {
     console.error("offers error:", err);

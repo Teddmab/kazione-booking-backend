@@ -747,15 +747,14 @@ Deno.serve(withLogging("offers", async (req: Request) => {
       const ctx = await requireOwnerOrManagerCtx(req, business_id);
       if (ctx instanceof Response) return ctx;
 
-      // Verify appointment belongs to this business and get offer_discount for voucher reversal
+      // Get offer_discount for gift_voucher reversal (no business_id filter — same pattern
+      // as the use action; security guaranteed by requireOwnerOrManagerCtx + redemption scope)
       const { data: apptRow } = await supabaseAdmin
         .from("appointments")
         .select("id, offer_discount")
         .eq("id", appointment_id)
-        .eq("business_id", business_id)
         .single();
-      if (!apptRow) return notFound(req, "Appointment not found");
-      const offerDiscount = Number((apptRow as Record<string, unknown>).offer_discount ?? 0);
+      const offerDiscount = Number((apptRow as Record<string, unknown> | null)?.offer_discount ?? 0);
 
       // Get the redemption + offer type
       const { data: redemption, error: rErr } = await supabaseAdmin

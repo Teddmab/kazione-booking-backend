@@ -3,6 +3,7 @@ import { handleCors, jsonCors } from "../_shared/cors.ts";
 import { badRequest, notFound, serverError } from "../_shared/errors.ts";
 import { requireOwnerOrManagerCtx } from "../_shared/auth.ts";
 import { withLogging } from "../_shared/logger.ts";
+import { offerAssignedEmail, sendEmail } from "../_shared/resend.ts";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -190,6 +191,37 @@ Deno.serve(withLogging("entitlements", async (req: Request) => {
         .single();
 
       if (error) return serverError(req, error.message);
+
+      // Fire-and-forget: notify the client by email
+      {
+        const [clientRes, bizRes] = await Promise.all([
+          supabaseAdmin.from("clients").select("email, first_name, last_name").eq("id", client_id).maybeSingle(),
+          supabaseAdmin.from("businesses").select("name, logo_url").eq("id", business_id).maybeSingle(),
+        ]);
+        const clientEmail = clientRes.data?.email as string | null ?? null;
+        if (clientEmail) {
+          const clientName = `${clientRes.data?.first_name ?? ""} ${clientRes.data?.last_name ?? ""}`.trim() || "Client";
+          const salonName = bizRes.data?.name as string ?? "Your salon";
+          const descriptionMap: Record<EntitlementType, string> = {
+            appointment_discount: body.discount_type === "percentage" ? `${body.discount_value}% off your next visit` : `€${(body.discount_value ?? 0).toFixed(2)} off your next visit`,
+            package: `${body.total_sessions} session package`,
+            training: `${body.total_sessions} training session${(body.total_sessions ?? 1) > 1 ? "s" : ""}`,
+            gift_voucher: `€${(body.original_value ?? 0).toFixed(2)} gift voucher`,
+          };
+          const emailData = offerAssignedEmail({
+            clientName,
+            salonName,
+            salonLogoUrl: bizRes.data?.logo_url as string | null ?? null,
+            offerName: name,
+            offerDescription: descriptionMap[type],
+            expiresAt: body.expires_at ?? null,
+          });
+          sendEmail(clientEmail, emailData.subject, emailData.html).catch(
+            (err) => console.error("Entitlement assignment email failed:", err),
+          );
+        }
+      }
+
       return jsonCors(req, { entitlement: data }, 201);
     }
 

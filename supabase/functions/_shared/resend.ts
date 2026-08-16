@@ -1262,6 +1262,43 @@ interface OverdueCompletionReminderData {
   dashboardUrl: string;
 }
 
+// ---------------------------------------------------------------------------
+// Offer / entitlement assigned to client
+// ---------------------------------------------------------------------------
+
+interface OfferAssignedData {
+  clientName: string;
+  salonName: string;
+  salonLogoUrl?: string | null;
+  offerName: string;
+  offerDescription: string; // e.g. "10% off your next visit" or "5 sessions remaining"
+  expiresAt?: string | null; // ISO date string, optional
+}
+
+export function offerAssignedEmail(data: OfferAssignedData): { subject: string; html: string } {
+  const subject = `You received ${data.offerName} from ${data.salonName}`;
+  const expiryLine = data.expiresAt
+    ? `<br/>Valid until: <strong>${new Date(data.expiresAt).toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric" })}</strong>`
+    : "";
+  return {
+    subject,
+    html: renderEmail({
+      salonName: data.salonName,
+      salonLogoUrl: data.salonLogoUrl ?? undefined,
+      subject,
+      body: `
+        ${heading(`You've got a gift, ${data.clientName}!`)}
+        ${paragraph(`<strong>${data.salonName}</strong> has given you the following offer:`)}
+        ${detailTable([
+          ["Offer", `<strong>${data.offerName}</strong>`],
+          ["Details", `${data.offerDescription}${expiryLine}`],
+        ])}
+        ${paragraph("Show this to your stylist at your next visit or it will be applied automatically when you book online.")}
+      `,
+    }),
+  };
+}
+
 export function overdueCompletionReminderEmail(data: OverdueCompletionReminderData): { subject: string; html: string } {
   const subject = `[Reminder ${data.reminderNumber}/5] Appointment not yet completed — ${data.reference}`;
   return {

@@ -1914,7 +1914,6 @@ Deno.serve(withLogging("staff", async (req: Request) => {
         if (commType === "percentage" && commValue > 0) commAmt = price * commValue / 100;
         else if (commType === "fixed" && commValue > 0) commAmt = commValue;
         else if (bizCommRate > 0) commAmt = price * bizCommRate / 100;
-        if (commAmt <= 0) return null;
         return {
           appointment_id: a.id as string,
           starts_at: a.starts_at as string,

@@ -1291,6 +1291,42 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
           });
         }
 
+        // Auto-pay commission if the business has enabled it
+        if (existingRow.staff_profile_id) {
+          const { data: bizSettings } = await supabaseAdmin
+            .from("business_settings")
+            .select("commission_auto_pay, commission_auto_pay_method")
+            .eq("business_id", businessIdForPayment)
+            .maybeSingle();
+          const autoPayRow = bizSettings as { commission_auto_pay: boolean; commission_auto_pay_method: string } | null;
+          if (autoPayRow?.commission_auto_pay) {
+            const [svcRes, spRes] = await Promise.all([
+              supabaseAdmin.from("services").select("staff_commission_type, staff_commission_value").eq("id", existingRow.service_id!).maybeSingle(),
+              supabaseAdmin.from("staff_profiles").select("commission_rate").eq("id", existingRow.staff_profile_id).maybeSingle(),
+            ]);
+            const svc = svcRes.data as { staff_commission_type: string | null; staff_commission_value: number | null } | null;
+            const sp = spRes.data as { commission_rate: number | null } | null;
+            const commType = svc?.staff_commission_type ?? "none";
+            const commValue = Number(svc?.staff_commission_value ?? 0);
+            const staffRate = Number(sp?.commission_rate ?? 0);
+            let commissionAmount = 0;
+            if (commType === "percentage" && commValue > 0) {
+              commissionAmount = Math.round(price * commValue / 100 * 100) / 100;
+            } else if (commType === "fixed" && commValue > 0) {
+              commissionAmount = commValue;
+            } else if (staffRate > 0) {
+              commissionAmount = Math.round(price * staffRate / 100 * 100) / 100;
+            }
+            if (commissionAmount > 0) {
+              await supabaseAdmin.from("appointments").update({
+                commission_paid_at: new Date().toISOString(),
+                commission_pay_method: autoPayRow.commission_auto_pay_method,
+                commission_amount_paid: commissionAmount,
+              }).eq("id", id).is("commission_paid_at", null);
+            }
+          }
+        }
+
         // Notify staff when owner confirms completion
         const staffProfileIdForComplete = existingRow.staff_profile_id as string | null;
         if (staffProfileIdForComplete) {

@@ -263,7 +263,6 @@ Deno.serve(withLogging("finance", async (req: Request) => {
             .from("expenses")
             .select("amount, tax_amount, date, receipt_url")
             .eq("business_id", businessId)
-            .is("deleted_at", null)
             .gte("date", yearStart)
             .lt("date", yearEnd),
           supabaseAdmin
@@ -439,7 +438,7 @@ Deno.serve(withLogging("finance", async (req: Request) => {
         const [paidResult, unpaidResult] = await Promise.all([
           supabaseAdmin
             .from("appointments")
-            .select("staff_profile_id, commission_amount_paid, staff_profile:staff_profiles(display_name)")
+            .select("staff_profile_id, commission_amount_paid, staff_profile:staff_profiles!staff_profile_id(display_name)")
             .eq("business_id", businessId)
             .eq("status", "completed")
             .not("commission_paid_at", "is", null)
@@ -447,7 +446,7 @@ Deno.serve(withLogging("finance", async (req: Request) => {
             .lt("commission_paid_at", yearEnd),
           supabaseAdmin
             .from("appointments")
-            .select("staff_profile_id, price, staff_profile:staff_profiles(display_name), service:services(staff_commission_type, staff_commission_value)")
+            .select("staff_profile_id, price, staff_profile:staff_profiles!staff_profile_id(display_name), service:services(staff_commission_type, staff_commission_value)")
             .eq("business_id", businessId)
             .eq("status", "completed")
             .not("staff_profile_id", "is", null)

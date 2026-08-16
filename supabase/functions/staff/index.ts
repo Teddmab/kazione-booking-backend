@@ -16,7 +16,7 @@ async function resolveCallerBusiness(
   try {
     user = await verifyAuth(req);
   } catch (e) {
-    return e instanceof Response ? e : forbidden("Authentication required");
+    return e instanceof Response ? e : forbidden(req, "Authentication required");
   }
 
   const { data, error } = await supabaseAdmin
@@ -29,8 +29,8 @@ async function resolveCallerBusiness(
     .limit(1)
     .maybeSingle();
 
-  if (error) return serverError(error.message);
-  if (!data) return forbidden("No active owner or manager membership found");
+  if (error) return serverError(req, error.message);
+  if (!data) return forbidden(req, "No active owner or manager membership found");
 
   return { userId: user.id, businessId: data.business_id as string, role: data.role as string };
 }
@@ -1095,8 +1095,9 @@ Deno.serve(withLogging("staff", async (req: Request) => {
 
     // ── PATCH /staff?id= (update profile / role) ──────────────────────────────
     // business_id comes from the staff record in DB — never trusted from body.
-    if (method === "PATCH") {
-      if (!staffId) return badRequest("id query param is required");
+    // ── PATCH /staff?id= (no action) — update staff profile by ID ────────────
+    if (method === "PATCH" && !action) {
+      if (!staffId) return badRequest(req, "id query param is required");
       const body = await req.json() as Record<string, unknown>;
 
       const { data: existing, error: existingErr } = await supabaseAdmin
@@ -1105,8 +1106,8 @@ Deno.serve(withLogging("staff", async (req: Request) => {
         .eq("id", staffId)
         .maybeSingle();
 
-      if (existingErr) return serverError(existingErr.message);
-      if (!existing) return notFound("Staff member not found");
+      if (existingErr) return serverError(req, existingErr.message);
+      if (!existing) return notFound(req, "Staff member not found");
 
       // Auth: verify caller is owner/manager of the staff member's business
       const ctx = await requireOwnerOrManagerCtx(
@@ -1118,7 +1119,7 @@ Deno.serve(withLogging("staff", async (req: Request) => {
       const profileUpdate: Record<string, unknown> = {};
       if (body.display_name !== undefined) {
         const dn = String(body.display_name).trim();
-        if (!dn) return badRequest("display_name cannot be empty");
+        if (!dn) return badRequest(req, "display_name cannot be empty");
         profileUpdate.display_name = dn;
       }
       if (body.position !== undefined) {
@@ -1139,7 +1140,7 @@ Deno.serve(withLogging("staff", async (req: Request) => {
 
       const newRole = body.role as string | undefined;
       if (Object.keys(profileUpdate).length === 0 && !newRole) {
-        return badRequest("No updatable fields provided");
+        return badRequest(req, "No updatable fields provided");
       }
 
       if (Object.keys(profileUpdate).length > 0) {
@@ -1148,7 +1149,7 @@ Deno.serve(withLogging("staff", async (req: Request) => {
           .update(profileUpdate)
           .eq("id", staffId)
           .eq("business_id", ctx.businessId);
-        if (updateErr) return serverError(updateErr.message);
+        if (updateErr) return serverError(req, updateErr.message);
       }
 
       // Update role in business_members if provided
@@ -1156,7 +1157,7 @@ Deno.serve(withLogging("staff", async (req: Request) => {
         .business_member_id as string | null;
       if (newRole && memberId) {
         if (!["owner", "manager", "staff", "receptionist"].includes(newRole)) {
-          return badRequest(
+          return badRequest(req,
             "role must be one of: owner, manager, staff, receptionist",
           );
         }
@@ -1188,7 +1189,7 @@ Deno.serve(withLogging("staff", async (req: Request) => {
         .eq("id", staffId)
         .single();
 
-      if (fetchErr) return serverError(fetchErr.message);
+      if (fetchErr) return serverError(req, fetchErr.message);
       return jsonCors(req, updated);
     }
 
@@ -2027,15 +2028,16 @@ Deno.serve(withLogging("staff", async (req: Request) => {
       if (Object.keys(update).length === 0) return badRequest(req, "No valid fields to update");
 
       const { error: upErr } = await supabaseAdmin.from("staff_profiles").update(update).eq("id", spRow.id as string);
-      if (upErr) return serverError(upErr.message);
+      if (upErr) return serverError(req, upErr.message);
       return jsonCors(req, { success: true });
     }
 
-    return badRequest(`Method ${method} is not supported`);
+    return badRequest(req, `Method ${method} is not supported`);
   } catch (err) {
     if (err instanceof Response) return err;
     console.error("[staff] Unhandled error:", err);
     return serverError(
+      req,
       err instanceof Error ? err.message : "Internal server error",
     );
   }

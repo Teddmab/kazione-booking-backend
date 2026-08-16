@@ -1874,34 +1874,121 @@ Deno.serve(withLogging("staff", async (req: Request) => {
       });
     }
 
+    // ── GET /staff?action=unassigned-commissions — owner views completed appointments with no staff ─
+    if (method === "GET" && action === "unassigned-commissions") {
+      const ctx = await requireOwnerOrManagerCtx(req, url.searchParams.get("business_id") ?? undefined);
+      if (ctx instanceof Response) return ctx;
+
+      const { data: bizRow } = await supabaseAdmin
+        .from("businesses")
+        .select("commission_rate")
+        .eq("id", ctx.businessId)
+        .maybeSingle();
+      const bizCommRate = Number((bizRow as Record<string, unknown> | null)?.commission_rate ?? 0);
+
+      const { data: appts, error: apptErr } = await supabaseAdmin
+        .from("appointments")
+        .select(`
+          id, starts_at, price,
+          client:clients(first_name, last_name),
+          service:services(name, staff_commission_type, staff_commission_value)
+        `)
+        .eq("business_id", ctx.businessId)
+        .eq("status", "completed")
+        .is("staff_profile_id", null)
+        .is("commission_paid_at", null)
+        .is("deleted_at", null)
+        .order("starts_at", { ascending: false })
+        .limit(200);
+
+      if (apptErr) return serverError(apptErr.message);
+
+      const rows = (appts ?? []) as Record<string, unknown>[];
+      const commissions = rows.map((a) => {
+        const svc = a.service as Record<string, unknown> | null;
+        const client = a.client as Record<string, unknown> | null;
+        const price = Number(a.price ?? 0);
+        const commType = (svc?.staff_commission_type as string) ?? "none";
+        const commValue = Number(svc?.staff_commission_value ?? 0);
+        let commAmt = 0;
+        if (commType === "percentage" && commValue > 0) commAmt = price * commValue / 100;
+        else if (commType === "fixed" && commValue > 0) commAmt = commValue;
+        else if (bizCommRate > 0) commAmt = price * bizCommRate / 100;
+        if (commAmt <= 0) return null;
+        return {
+          appointment_id: a.id as string,
+          starts_at: a.starts_at as string,
+          client_name: client
+            ? `${(client.first_name as string) ?? ""} ${(client.last_name as string) ?? ""}`.trim()
+            : "Client",
+          service_name: (svc?.name as string) ?? "Service",
+          price,
+          commission_amount: Math.round(commAmt * 100) / 100,
+        };
+      }).filter(Boolean);
+
+      return jsonCors(req, { commissions });
+    }
+
     // ── PATCH /staff?action=pay-commissions — owner bulk marks commissions paid ─
     if (method === "PATCH" && action === "pay-commissions") {
       const body = await req.json() as Record<string, unknown>;
       const ctx = await requireOwnerOrManagerCtx(req, body.business_id as string | undefined);
       if (ctx instanceof Response) return ctx;
 
-      const appointmentIds = body.appointment_ids as string[] | undefined;
       const payMethod = body.pay_method as string | undefined;
-
-      if (!Array.isArray(appointmentIds) || appointmentIds.length === 0) {
-        return badRequest(req, "appointment_ids must be a non-empty array");
-      }
       if (!payMethod || !["cash", "bank_transfer", "offset"].includes(payMethod)) {
         return badRequest(req, "pay_method must be 'cash', 'bank_transfer', or 'offset'");
       }
 
-      const now = new Date().toISOString();
-      const { data: updated, error: updateErr } = await supabaseAdmin
-        .from("appointments")
-        .update({ commission_paid_at: now, commission_pay_method: payMethod })
-        .in("id", appointmentIds)
-        .eq("business_id", ctx.businessId)
-        .eq("status", "completed")
-        .is("commission_paid_at", null)
-        .select("id");
+      // Support new per-amount format: payments: [{appointment_id, amount, assign_staff_id?}]
+      // Also support legacy format: appointment_ids: string[]
+      type PaymentItem = { appointment_id: string; amount: number; assign_staff_id?: string };
+      let payments: PaymentItem[];
 
-      if (updateErr) return serverError(updateErr.message);
-      return jsonCors(req, { paid_count: (updated ?? []).length });
+      if (Array.isArray(body.payments)) {
+        payments = (body.payments as Array<Record<string, unknown>>)
+          .map((p) => ({
+            appointment_id: String(p.appointment_id ?? ""),
+            amount: Math.max(0, Number(p.amount ?? 0)),
+            assign_staff_id: p.assign_staff_id ? String(p.assign_staff_id) : undefined,
+          }))
+          .filter((p) => p.appointment_id);
+      } else if (Array.isArray(body.appointment_ids)) {
+        payments = (body.appointment_ids as string[])
+          .filter(Boolean)
+          .map((id) => ({ appointment_id: id, amount: 0 }));
+      } else {
+        return badRequest(req, "payments or appointment_ids must be a non-empty array");
+      }
+
+      if (payments.length === 0) return badRequest(req, "No payments to process");
+
+      const now = new Date().toISOString();
+      let paidCount = 0;
+
+      for (const payment of payments) {
+        const updatePayload: Record<string, unknown> = {
+          commission_paid_at: now,
+          commission_pay_method: payMethod,
+        };
+        if (payment.amount > 0) updatePayload.commission_amount_paid = payment.amount;
+        if (payment.assign_staff_id) updatePayload.staff_profile_id = payment.assign_staff_id;
+
+        const { data: updated, error: updateErr } = await supabaseAdmin
+          .from("appointments")
+          .update(updatePayload)
+          .eq("id", payment.appointment_id)
+          .eq("business_id", ctx.businessId)
+          .eq("status", "completed")
+          .is("commission_paid_at", null)
+          .select("id");
+
+        if (updateErr) return serverError(updateErr.message);
+        paidCount += (updated ?? []).length;
+      }
+
+      return jsonCors(req, { paid_count: paidCount });
     }
 
     // ── PATCH /staff?action=update-bank-account — staff saves own bank details ─

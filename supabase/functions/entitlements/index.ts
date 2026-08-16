@@ -422,6 +422,90 @@ Deno.serve(withLogging("entitlements", async (req: Request) => {
       return jsonCors(req, { success: true });
     }
 
+    // ── POST /entitlements?action=remove-from-appointment ────────────────────
+    if (method === "POST" && action === "remove-from-appointment") {
+      const body = await req.json().catch(() => null) as {
+        business_id?: string;
+        entitlement_id?: string;
+        appointment_id?: string;
+      } | null;
+      if (!body) return badRequest(req, "Invalid JSON body");
+      const { business_id, entitlement_id, appointment_id } = body;
+      if (!business_id)    return badRequest(req, "business_id is required");
+      if (!entitlement_id) return badRequest(req, "entitlement_id is required");
+      if (!appointment_id) return badRequest(req, "appointment_id is required");
+
+      const ctx = await requireOwnerOrManagerCtx(req, business_id);
+      if (ctx instanceof Response) return ctx;
+
+      // Verify appointment has this entitlement applied
+      const { data: appt } = await supabaseAdmin
+        .from("appointments")
+        .select("id, entitlement_id, entitlement_discount")
+        .eq("id", appointment_id)
+        .eq("business_id", business_id)
+        .single();
+      if (!appt || (appt as Record<string, unknown>).entitlement_id !== entitlement_id) {
+        return badRequest(req, "This entitlement is not applied to this appointment");
+      }
+
+      // Get the redemption log to know what was applied
+      const { data: redemption } = await supabaseAdmin
+        .from("entitlement_redemptions")
+        .select("id, discount_applied, amount_redeemed")
+        .eq("entitlement_id", entitlement_id)
+        .eq("appointment_id", appointment_id)
+        .maybeSingle();
+
+      // Get current entitlement state
+      const { data: ent } = await supabaseAdmin
+        .from("client_entitlements")
+        .select("type, sessions_used, total_sessions, remaining_balance, status")
+        .eq("id", entitlement_id)
+        .eq("business_id", business_id)
+        .single();
+      if (!ent) return notFound(req, "Entitlement not found");
+
+      const entRow = ent as Record<string, unknown>;
+      const redemptionRow = redemption as Record<string, unknown> | null;
+      const discountApplied = Number(redemptionRow?.discount_applied ?? 0);
+
+      const reversal: Record<string, unknown> = { status: "active" };
+
+      if (entRow.type === "appointment_discount") {
+        // single-use — restore to active
+      } else if (entRow.type === "package" || entRow.type === "training") {
+        const newUsed = Math.max(0, Number(entRow.sessions_used) - 1);
+        reversal.sessions_used = newUsed;
+        if (Number(entRow.total_sessions) <= newUsed) {
+          // still fully used — keep used status
+          delete reversal.status;
+        }
+      } else if (entRow.type === "gift_voucher") {
+        reversal.remaining_balance = +(Number(entRow.remaining_balance) + discountApplied).toFixed(2);
+      }
+
+      await supabaseAdmin
+        .from("client_entitlements")
+        .update(reversal)
+        .eq("id", entitlement_id);
+
+      if (redemptionRow?.id) {
+        await supabaseAdmin
+          .from("entitlement_redemptions")
+          .delete()
+          .eq("id", redemptionRow.id as string);
+      }
+
+      await supabaseAdmin
+        .from("appointments")
+        .update({ entitlement_id: null, entitlement_discount: null })
+        .eq("id", appointment_id)
+        .eq("business_id", business_id);
+
+      return jsonCors(req, { success: true });
+    }
+
     return badRequest(req, "Unknown route");
   } catch (err) {
     console.error("entitlements error:", err);

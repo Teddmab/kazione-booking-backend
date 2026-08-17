@@ -633,6 +633,82 @@ Deno.serve(withLogging("offers", async (req: Request) => {
       });
     }
 
+    // ── POST /offers?action=apply-discount — one-step sell+apply for appointment_discount ──
+    // Lets the owner apply any active discount offer directly to an appointment without
+    // first needing to sell/assign it to the client.
+    if (method === "POST" && action === "apply-discount") {
+      const body = await req.json().catch(() => null) as {
+        business_id?: string; offer_id?: string; appointment_id?: string;
+      } | null;
+      if (!body) return badRequest(req, "Invalid JSON body");
+      const { business_id, offer_id, appointment_id } = body;
+      if (!business_id)    return badRequest(req, "business_id is required");
+      if (!offer_id)       return badRequest(req, "offer_id is required");
+      if (!appointment_id) return badRequest(req, "appointment_id is required");
+
+      const ctx = await requireOwnerOrManagerCtx(req, business_id);
+      if (ctx instanceof Response) return ctx;
+
+      // Validate offer
+      const { data: offer, error: offerErr } = await supabaseAdmin
+        .from("business_offers")
+        .select("id, type, is_active, discount_type, discount_value, title")
+        .eq("id", offer_id)
+        .eq("business_id", business_id)
+        .single();
+      if (offerErr || !offer) return notFound(req, "Offer not found");
+      if (!offer.is_active)   return badRequest(req, "Offer is not active");
+      if (offer.type !== "appointment_discount") return badRequest(req, "Only appointment_discount offers can be applied this way");
+
+      // Fetch appointment price + client
+      const { data: appt } = await supabaseAdmin
+        .from("appointments")
+        .select("price, client_id, offer_redemption_id")
+        .eq("id", appointment_id)
+        .is("deleted_at", null)
+        .single();
+      if (!appt) return notFound(req, "Appointment not found");
+      if ((appt as Record<string, unknown>).offer_redemption_id) return badRequest(req, "This appointment already has an offer applied");
+
+      const apptRow = appt as { price: number; client_id: string | null; offer_redemption_id: string | null };
+      const price   = Number(apptRow.price ?? 0);
+      const dType   = offer.discount_type as string | null;
+      const dValue  = Number(offer.discount_value ?? 0);
+      const offerDiscount = dType === "percentage"
+        ? +(price * dValue / 100).toFixed(2)
+        : Math.min(dValue, price);
+
+      // Create redemption (already completed — single-use discount applied immediately)
+      const { data: redemption, error: redemptionErr } = await supabaseAdmin
+        .from("offer_redemptions")
+        .insert({
+          offer_id,
+          business_id,
+          client_id:     apptRow.client_id ?? null,
+          status:        "completed",
+          completed_at:  new Date().toISOString(),
+          sessions_total: null,
+          sessions_used:  0,
+          voucher_value:  null,
+          voucher_used:   0,
+        })
+        .select("id")
+        .single();
+      if (redemptionErr || !redemption) return serverError(req, redemptionErr?.message ?? "Failed to create redemption");
+
+      const redemptionId = (redemption as { id: string }).id;
+
+      // Stamp appointment
+      const { error: apptErr } = await supabaseAdmin
+        .from("appointments")
+        .update({ offer_redemption_id: redemptionId, offer_discount: offerDiscount })
+        .eq("id", appointment_id)
+        .eq("business_id", business_id);
+      if (apptErr) return serverError(req, apptErr.message);
+
+      return jsonCors(req, { success: true, redemption_id: redemptionId, offer_discount: offerDiscount });
+    }
+
     // ── PATCH /offers?id= — update offer template ─────────────────────────────
     if (method === "PATCH" && id && !action) {
       const body = await req.json().catch(() => null) as Record<string, unknown> | null;

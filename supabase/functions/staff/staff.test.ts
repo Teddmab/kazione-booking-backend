@@ -175,3 +175,43 @@ Deno.test("staff: PATCH assign-services invalid service_ids → 400", async () =
   if (![400, 404].includes(res.status)) throw new Error(`Expected 400 or 404, got ${res.status}`)
   await res.body?.cancel()
 })
+
+// ── GET /staff?action=magic-link — S57 finding 6: audit trail + staff notification ──
+
+Deno.test("staff: GET magic-link without auth → 401 or 403", async () => {
+  const res = await call("GET", undefined, undefined, { action: "magic-link", staff_profile_id: "00000000-0000-0000-0000-000000000001" })
+  if (![401, 403].includes(res.status)) throw new Error(`Expected 401 or 403, got ${res.status}`)
+  await res.body?.cancel()
+})
+
+Deno.test("staff: GET magic-link missing staff_profile_id → 400", async () => {
+  if (!OWNER_TOKEN) return
+  const res = await call("GET", OWNER_TOKEN, undefined, { action: "magic-link" })
+  assertEquals(res.status, 400)
+  await res.body?.cancel()
+})
+
+Deno.test("staff: GET magic-link — valid request writes a staff_action_log row and returns a link", async () => {
+  // Requires a real active staff profile in the owner's own business.
+  const staffProfileId = Deno.env.get("TEST_STAFF_ID") || ""
+  if (!OWNER_TOKEN || !staffProfileId) return
+
+  const res = await call("GET", OWNER_TOKEN, undefined, { action: "magic-link", staff_profile_id: staffProfileId })
+  assertEquals(res.status, 200)
+  const body = await res.json()
+  if (!body.email) throw new Error("Expected an email in the magic-link response")
+
+  // Verify the audit trail directly via PostgREST (no dedicated read endpoint
+  // exists for staff_action_log yet — RLS lets an owner/manager read their
+  // own business's rows).
+  const restBase = BASE.replace("/functions/v1", "/rest/v1")
+  const logRes = await fetch(
+    `${restBase}/staff_action_log?staff_profile_id=eq.${staffProfileId}&action=eq.STAFF_MAGIC_LINK_ISSUED&order=created_at.desc&limit=1`,
+    { headers: { apikey: ANON_KEY, Authorization: `Bearer ${OWNER_TOKEN}` } },
+  )
+  assertEquals(logRes.status, 200)
+  const rows = await logRes.json()
+  if (!Array.isArray(rows) || rows.length === 0) {
+    throw new Error("Expected a STAFF_MAGIC_LINK_ISSUED row in staff_action_log for this staff_profile_id")
+  }
+})

@@ -3,7 +3,15 @@ import { handleCors, jsonCors } from "../_shared/cors.ts";
 import { badRequest, forbidden, notFound, serverError } from "../_shared/errors.ts";
 import { requireOwnerOrManagerCtx, verifyAuth, verifyBusinessMember } from "../_shared/auth.ts";
 import { withLogging } from "../_shared/logger.ts";
-import { sendEmail, staffInviteEmail, staffServiceOfferAcceptedEmail, staffServiceOfferEmail } from "../_shared/resend.ts";
+import {
+  sendEmail,
+  staffInviteEmail,
+  staffMagicLinkIssuedEmail,
+  staffServiceOfferAcceptedEmail,
+  staffServiceOfferEmail,
+} from "../_shared/resend.ts";
+import { logStaffAction } from "../_shared/staffAudit.ts";
+import { getCallerIp } from "../_shared/adminAuth.ts";
 
 /**
  * Resolve the caller's primary owner/manager business from their JWT.
@@ -1677,15 +1685,17 @@ Deno.serve(withLogging("staff", async (req: Request) => {
       if ((profile.business_id as string) !== ctx.businessId) return forbidden("Staff not in this business");
       if (!profile.is_active) return badRequest("Staff member is not yet active — invite must be accepted first");
 
-      // Resolve the staff member's email
+      // Resolve the staff member's user_id + email
+      let staffUserId: string | null = null;
       let staffEmail: string | null = null;
       if (profile.business_member_id) {
         const { data: memberRow } = await supabaseAdmin
           .from("business_members")
-          .select("user:users(email)")
+          .select("user_id, user:users(email)")
           .eq("id", profile.business_member_id as string)
           .maybeSingle();
         const userObj = (memberRow as Record<string, unknown> | null)?.user as Record<string, unknown> | null;
+        staffUserId = (memberRow as Record<string, unknown> | null)?.user_id as string ?? null;
         staffEmail = (userObj?.email as string) ?? null;
       }
       if (!staffEmail) staffEmail = profile.invited_email as string | null;
@@ -1699,6 +1709,53 @@ Deno.serve(withLogging("staff", async (req: Request) => {
       });
 
       if (linkErr) return serverError(linkErr.message);
+
+      // Audit trail (tenant-scoped) + a heads-up to the staff member — this
+      // capability lets an owner/manager sign in as any staff account, so it
+      // must never be silent. Neither the audit write nor the notification
+      // blocks the response (fire-and-forget, matching the rest of the
+      // codebase's sendEmail/notifications pattern) — only the two lookups
+      // needed to build their content are awaited.
+      void logStaffAction({
+        businessId: ctx.businessId,
+        actorUserId: ctx.userId,
+        action: "STAFF_MAGIC_LINK_ISSUED",
+        staffProfileId: staffProfileId,
+        targetMeta: { staff_display_name: profile.display_name, staff_email: staffEmail },
+        ipAddress: getCallerIp(req),
+      });
+
+      const [{ data: business }, { data: actor }] = await Promise.all([
+        supabaseAdmin.from("businesses").select("name").eq("id", ctx.businessId).maybeSingle(),
+        supabaseAdmin.from("users").select("first_name, last_name, email").eq("id", ctx.userId).maybeSingle(),
+      ]);
+      const issuedByName = actor
+        ? [actor.first_name, actor.last_name].filter(Boolean).join(" ").trim() || (actor.email as string)
+        : "Your salon owner/manager";
+      const issuedAt = new Date().toISOString();
+
+      if (staffUserId) {
+        supabaseAdmin.from("notifications").insert({
+          business_id: ctx.businessId,
+          user_id: staffUserId,
+          type: "staff_magic_link_issued",
+          title: "A sign-in link for your account was generated",
+          body: `${issuedByName} generated a one-time sign-in link for your staff account.`,
+          metadata: { issued_by: ctx.userId, issued_at: issuedAt },
+        }).then(({ error: notifErr }) => {
+          if (notifErr) console.error("staff magic-link notification insert failed:", notifErr);
+        });
+      }
+
+      const { subject, html } = staffMagicLinkIssuedEmail({
+        staffName: (profile.display_name as string) ?? "there",
+        salonName: (business?.name as string) ?? "your salon",
+        issuedByName,
+        issuedAt,
+      });
+      sendEmail(staffEmail, subject, html).catch((err) =>
+        console.error("staff magic-link notification email failed:", err)
+      );
 
       return jsonCors(req, {
         url: (linkData as Record<string, unknown>).properties

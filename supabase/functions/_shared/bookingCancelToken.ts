@@ -1,3 +1,5 @@
+import { constantTimeEquals } from "./constantTime.ts";
+
 interface CancelTokenPayload {
   aid: string;
   br: string;
@@ -22,12 +24,20 @@ async function sign(data: string, secret: string): Promise<Uint8Array> {
   return new Uint8Array(signature);
 }
 
+/**
+ * Fails closed: throws if neither env var is set, rather than falling back
+ * to a hardcoded value that would be public in this repository. A booking
+ * cancel token signed with a known secret is forgeable — issuing or
+ * verifying tokens must never silently degrade to that state.
+ */
 function getSecret(): string {
-  return (
-    Deno.env.get("BOOKING_CANCEL_TOKEN_SECRET") ??
-    Deno.env.get("SUPABASE_JWT_SECRET") ??
-    "local-dev-cancel-token-secret"
-  );
+  const secret = Deno.env.get("BOOKING_CANCEL_TOKEN_SECRET") ?? Deno.env.get("SUPABASE_JWT_SECRET");
+  if (!secret) {
+    throw new Error(
+      "BOOKING_CANCEL_TOKEN_SECRET (or SUPABASE_JWT_SECRET) is not configured — refusing to issue or verify cancel tokens",
+    );
+  }
+  return secret;
 }
 
 export async function issueCancelToken(
@@ -53,7 +63,7 @@ export async function verifyCancelToken(token: string): Promise<CancelTokenPaylo
 
   const [payloadPart, sigPart] = parts;
   const expectedSig = toHex(await sign(payloadPart, getSecret()));
-  if (sigPart !== expectedSig) return null;
+  if (!constantTimeEquals(sigPart, expectedSig)) return null;
 
   try {
     const payloadStr = decodeURIComponent(payloadPart);

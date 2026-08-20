@@ -1299,6 +1299,39 @@ export function offerAssignedEmail(data: OfferAssignedData): { subject: string; 
   };
 }
 
+interface StaffMagicLinkIssuedData {
+  staffName: string;
+  salonName: string;
+  salonLogoUrl?: string | null;
+  issuedByName: string;
+  issuedAt: string; // ISO datetime
+}
+
+/**
+ * Sent to a staff member whenever an owner/manager generates a one-time
+ * sign-in link for their account, so this is never silent to them.
+ */
+export function staffMagicLinkIssuedEmail(data: StaffMagicLinkIssuedData): { subject: string; html: string } {
+  const subject = `A sign-in link for your account was generated`;
+  return {
+    subject,
+    html: renderEmail({
+      salonName: data.salonName,
+      salonLogoUrl: data.salonLogoUrl ?? undefined,
+      subject,
+      body: `
+        ${heading(`Hi ${data.staffName},`)}
+        ${paragraph(`${data.issuedByName} at <strong>${data.salonName}</strong> just generated a one-time sign-in link for your staff account.`)}
+        ${detailTable([
+          ["When", new Date(data.issuedAt).toLocaleString("en-GB", { day: "numeric", month: "long", year: "numeric", hour: "2-digit", minute: "2-digit" })],
+          ["Requested by", data.issuedByName],
+        ])}
+        ${paragraph("If you weren't expecting this, contact your salon owner or manager.")}
+      `,
+    }),
+  };
+}
+
 export function overdueCompletionReminderEmail(data: OverdueCompletionReminderData): { subject: string; html: string } {
   const subject = `[Reminder ${data.reminderNumber}/5] Appointment not yet completed — ${data.reference}`;
   return {

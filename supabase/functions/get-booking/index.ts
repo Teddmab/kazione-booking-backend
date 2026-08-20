@@ -46,7 +46,7 @@ Deno.serve(withLogging("get-booking", async (req: Request) => {
         id, business_id, client_id, staff_profile_id, service_id,
         status, starts_at, ends_at, price, deposit_amount,
         booking_reference, booking_source, notes,
-        client:clients(user_id, first_name, last_name, email, phone),
+        client:clients(first_name, last_name, email, phone),
         service:services(name),
         staff:staff_profiles(display_name, avatar_url),
         business:businesses(name, country)
@@ -84,8 +84,18 @@ Deno.serve(withLogging("get-booking", async (req: Request) => {
     if (!authorized) {
       try {
         const user = await verifyAuth(req);
-        const client = booking.client as unknown as { user_id: string | null } | null;
-        if (client?.user_id && client.user_id === user.id) {
+
+        let isOwnClient = false;
+        if (booking.client_id) {
+          const { data: clientRow } = await supabaseAdmin
+            .from("clients")
+            .select("user_id")
+            .eq("id", booking.client_id as string)
+            .maybeSingle();
+          isOwnClient = !!clientRow?.user_id && clientRow.user_id === user.id;
+        }
+
+        if (isOwnClient) {
           authorized = true;
         } else {
           await verifyBusinessMember(user.id, booking.business_id as string);

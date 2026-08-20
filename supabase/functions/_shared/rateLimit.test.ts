@@ -26,13 +26,23 @@ Deno.test("checkRateLimit: allows requests under the limit", () => {
 });
 
 Deno.test("checkRateLimit: blocks once the limit is exceeded, within the same window", () => {
-  const ip = "203.0.113.11";
-  for (let i = 0; i < 5; i++) {
-    const res = checkRateLimit(requestFrom(ip), 5, 60_000);
-    assertEquals(res, null);
+  // checkRateLimit deliberately no-ops when Deno.env.get("CI") === "true" (see
+  // rateLimit.ts) — and GitHub Actions sets CI=true in every step's shell env,
+  // which this deno test process inherits. Clear it for this one assertion so
+  // the blocking behavior itself is genuinely exercised, then restore it.
+  const priorCi = Deno.env.get("CI");
+  Deno.env.delete("CI");
+  try {
+    const ip = "203.0.113.11";
+    for (let i = 0; i < 5; i++) {
+      const res = checkRateLimit(requestFrom(ip), 5, 60_000);
+      assertEquals(res, null);
+    }
+    const blocked = checkRateLimit(requestFrom(ip), 5, 60_000);
+    assertEquals(blocked?.status, 429);
+  } finally {
+    if (priorCi !== undefined) Deno.env.set("CI", priorCi);
   }
-  const blocked = checkRateLimit(requestFrom(ip), 5, 60_000);
-  assertEquals(blocked?.status, 429);
 });
 
 Deno.test("checkRateLimit: is keyed independently per path+IP", () => {

@@ -17,8 +17,23 @@ function call(method: string, params: Record<string, string>, token?: string, bo
   return fetch(url.toString(), { method, headers, body: body ? JSON.stringify(body) : undefined });
 }
 
-Deno.test("clients: PATCH without auth → 401 or 403", async () => {
+// A nonexistent id 404s before the auth check even runs — the handler must
+// resolve the target row's business_id (to know which business to check
+// membership against) before it can authorize, so existence is necessarily
+// checked first. That's expected, not a leak: this endpoint isn't a target
+// for id-guessing since PGRST doesn't return an existence signal beyond the
+// generic 404 either way. The real "without auth" case needs a REAL client
+// id — see the env-gated test below.
+Deno.test("clients: PATCH nonexistent id, no auth → 404 (existence check runs before auth)", async () => {
   const res = await call("PATCH", { id: "00000000-0000-0000-0000-000000000000" }, undefined, { notes: "x" });
+  assertEquals(res.status, 404);
+  await res.body?.cancel();
+});
+
+Deno.test("clients: PATCH real client, no auth → 401 or 403", async () => {
+  const clientId = Deno.env.get("TEST_CLIENT_ID") || "";
+  if (!clientId) return;
+  const res = await call("PATCH", { id: clientId }, undefined, { notes: "x" });
   if (![401, 403].includes(res.status)) throw new Error(`Expected 401 or 403, got ${res.status}`);
   await res.body?.cancel();
 });

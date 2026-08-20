@@ -40,29 +40,24 @@ Deno.serve(withLogging("get-booking", async (req: Request) => {
       return badRequest("Missing required query parameter: id or booking_reference");
     }
 
-    const baseQuery = supabaseAdmin
+    // ── Step 1: cheap existence + authorization lookup, no embeds ─────────
+    // Deliberately flat (no joined relations) so the not-found/unauthorized
+    // path never touches the embedded-relation query below at all.
+    const coreQuery = supabaseAdmin
       .from("appointments")
-      .select(`
-        id, business_id, client_id, staff_profile_id, service_id,
-        status, starts_at, ends_at, price, deposit_amount,
-        booking_reference, booking_source, notes,
-        client:clients(first_name, last_name, email, phone),
-        service:services(name),
-        staff:staff_profiles(display_name, avatar_url),
-        business:businesses(name, country)
-      `);
+      .select("id, business_id, client_id, booking_reference");
 
-    const filteredQuery = id
-      ? baseQuery.eq("id", id)
-      : baseQuery.eq("booking_reference", bookingRef!);
+    const filteredCoreQuery = id
+      ? coreQuery.eq("id", id)
+      : coreQuery.eq("booking_reference", bookingRef!);
 
-    const { data: booking, error } = await filteredQuery.maybeSingle();
-    if (error) {
-      console.error("get-booking query error:", error);
+    const { data: core, error: coreError } = await filteredCoreQuery.maybeSingle();
+    if (coreError) {
+      console.error("get-booking core query error:", coreError);
       return serverError("Failed to fetch booking");
     }
 
-    if (!booking) {
+    if (!core) {
       return notFound(BOOKING_NOT_FOUND);
     }
 
@@ -78,7 +73,7 @@ Deno.serve(withLogging("get-booking", async (req: Request) => {
     if (cancelToken) {
       const payload = await verifyCancelToken(cancelToken);
       authorized = !!payload &&
-        (payload.aid === booking.id || payload.br === booking.booking_reference);
+        (payload.aid === core.id || payload.br === core.booking_reference);
     }
 
     if (!authorized) {
@@ -86,11 +81,11 @@ Deno.serve(withLogging("get-booking", async (req: Request) => {
         const user = await verifyAuth(req);
 
         let isOwnClient = false;
-        if (booking.client_id) {
+        if (core.client_id) {
           const { data: clientRow } = await supabaseAdmin
             .from("clients")
             .select("user_id")
-            .eq("id", booking.client_id as string)
+            .eq("id", core.client_id as string)
             .maybeSingle();
           isOwnClient = !!clientRow?.user_id && clientRow.user_id === user.id;
         }
@@ -98,7 +93,7 @@ Deno.serve(withLogging("get-booking", async (req: Request) => {
         if (isOwnClient) {
           authorized = true;
         } else {
-          await verifyBusinessMember(user.id, booking.business_id as string);
+          await verifyBusinessMember(user.id, core.business_id as string);
           authorized = true;
         }
       } catch {
@@ -108,6 +103,26 @@ Deno.serve(withLogging("get-booking", async (req: Request) => {
 
     if (!authorized) {
       return notFound(BOOKING_NOT_FOUND);
+    }
+
+    // ── Step 2: full response payload, only fetched once authorized ───────
+    const { data: booking, error } = await supabaseAdmin
+      .from("appointments")
+      .select(`
+        id, business_id, client_id, staff_profile_id, service_id,
+        status, starts_at, ends_at, price, deposit_amount,
+        booking_reference, booking_source, notes,
+        client:clients(first_name, last_name, email, phone),
+        service:services(name),
+        staff:staff_profiles(display_name, avatar_url),
+        business:businesses(name, country)
+      `)
+      .eq("id", core.id)
+      .single();
+
+    if (error) {
+      console.error("get-booking detail query error:", error);
+      return serverError("Failed to fetch booking");
     }
 
     return new Response(JSON.stringify({ booking }), {

@@ -231,7 +231,9 @@ Deno.test("staff: GET magic-link — valid request writes a staff_action_log row
     )
   }
   const body = await res.json()
-  if (!body.email) throw new Error("Expected an email in the magic-link response")
+  // Set via seed.sql (S74) — Fatima K.'s profile has no linked
+  // business_member_id, so this comes from her invited_email fallback.
+  assertEquals(body.email, "fatima.k@test.kazione.local")
 
   // Verify the audit trail directly via PostgREST (no dedicated read endpoint
   // exists for staff_action_log yet — RLS lets an owner/manager read their

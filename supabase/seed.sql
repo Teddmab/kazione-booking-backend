@@ -319,3 +319,16 @@ BEGIN
 
   RAISE NOTICE 'Foreign test business + client seeded (S74 cross-business fixtures).';
 END $$;
+
+-- ── Give a seeded staff profile a resolvable email (S74) ──────────────────────
+-- Fatima K.'s profile (migration 014_seed_data.sql) has no linked
+-- business_member_id and no invited_email — fine for display/booking
+-- purposes (she's never meant to log in), but staff?action=magic-link
+-- (S57) needs SOME resolvable email to send a sign-in link to. Confirmed
+-- via CI (S74) that this — not a missing row — was why that test 404'd:
+-- the profile exists and is active, it just had nowhere to send a link.
+UPDATE staff_profiles
+SET invited_email = 'fatima.k@test.kazione.local'
+WHERE id = 'd0000000-0000-4000-8000-000000000001'
+  AND business_member_id IS NULL
+  AND invited_email IS NULL;

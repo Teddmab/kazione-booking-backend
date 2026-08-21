@@ -200,19 +200,42 @@ Deno.test("staff: GET magic-link missing staff_profile_id → 400", async () => 
 Deno.test("staff: GET magic-link — valid request writes a staff_action_log row and returns a link", async () => {
   if (!OWNER_TOKEN) return
 
+  // Diagnostic: confirm the seed fixture itself exists and is active before
+  // blaming the handler for a 404 — makes a future failure here
+  // self-explanatory instead of an opaque status mismatch.
+  const restBase = BASE.replace("/functions/v1", "/rest/v1")
+  const seedCheckRes = await fetch(
+    `${restBase}/staff_profiles?id=eq.${TEST_STAFF_ID}&select=id,business_id,is_active,display_name`,
+    { headers: { apikey: ANON_KEY, Authorization: `Bearer ${OWNER_TOKEN}` } },
+  )
+  const seedRows = await seedCheckRes.json()
+  if (!Array.isArray(seedRows) || seedRows.length === 0) {
+    throw new Error(
+      `Seed fixture missing: no staff_profiles row with id=${TEST_STAFF_ID}. ` +
+      `(PostgREST status ${seedCheckRes.status}, body: ${JSON.stringify(seedRows)}) ` +
+      `Expected this to come from migration 014_seed_data.sql ("Fatima K."). ` +
+      `If this fires, the fixture itself needs investigating — not the magic-link handler.`,
+    )
+  }
+
   const res = await call("GET", OWNER_TOKEN, undefined, {
     action: "magic-link",
     staff_profile_id: TEST_STAFF_ID,
     business_id: TEST_BUSINESS_ID,
   })
-  assertEquals(res.status, 200)
+  if (res.status !== 200) {
+    const errBody = await res.json().catch(() => null)
+    throw new Error(
+      `Expected 200, got ${res.status}. Seed row found: ${JSON.stringify(seedRows[0])}. ` +
+      `Response body: ${JSON.stringify(errBody)}`,
+    )
+  }
   const body = await res.json()
   if (!body.email) throw new Error("Expected an email in the magic-link response")
 
   // Verify the audit trail directly via PostgREST (no dedicated read endpoint
   // exists for staff_action_log yet — RLS lets an owner/manager read their
-  // own business's rows).
-  const restBase = BASE.replace("/functions/v1", "/rest/v1")
+  // own business's rows). Reuses restBase from the diagnostic check above.
   const logRes = await fetch(
     `${restBase}/staff_action_log?staff_profile_id=eq.${TEST_STAFF_ID}&action=eq.STAFF_MAGIC_LINK_ISSUED&order=created_at.desc&limit=1`,
     { headers: { apikey: ANON_KEY, Authorization: `Bearer ${OWNER_TOKEN}` } },

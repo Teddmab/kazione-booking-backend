@@ -55,6 +55,19 @@ export function checkRateLimit(
   const isCi = Deno.env.get("CI") === "true";
   if (isLoopback || isPrivate || isCi) return null;
 
+  // (S74) Consequence of the exemptions above, worth being explicit about:
+  // no test in this repo can get a real 429 out of a rate-limited endpoint
+  // (e.g. get-booking) by hitting it over HTTP in local dev or CI — every
+  // such request arrives as loopback and/or with CI=true. That's
+  // intentional: narrowing these exemptions just to make one HTTP-level
+  // assertion possible would reintroduce shared IP/window flakiness for
+  // every other test in the suite. The accepted verification method is the
+  // mechanism-level unit test (_shared/rateLimit.test.ts, which calls this
+  // function directly with a synthetic public IP) plus code review
+  // confirming the call site's budget — not an end-to-end 429. Verify the
+  // real threshold manually against a deployed preview/staging environment
+  // before each pilot launch instead.
+
   const path = new URL(req.url).pathname;
   const key = `${path}:${ip}`;
   const now = Date.now();

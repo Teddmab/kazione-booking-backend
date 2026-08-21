@@ -4,6 +4,11 @@ import { assertEquals } from "std/assert"
 const BASE = "http://127.0.0.1:54321/functions/v1"
 const ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9.CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0"
 const OWNER_TOKEN = Deno.env.get("TEST_OWNER_TOKEN") || ""
+// Seed fixture (supabase/seed.sql) — Fatima K., an active staff profile on
+// Afrotouch Tallinn. Hardcoded (deterministic seed data, not a secret) so
+// the magic-link audit test below actually runs in CI instead of silently
+// skipping behind an unset env var (S74).
+const TEST_STAFF_ID = "d0000000-0000-4000-8000-000000000001"
 
 function call(method: string, token?: string, body?: unknown, params?: Record<string, string>) {
   const headers: Record<string, string> = { "Content-Type": "application/json", "apikey": ANON_KEY }
@@ -192,11 +197,9 @@ Deno.test("staff: GET magic-link missing staff_profile_id → 400", async () => 
 })
 
 Deno.test("staff: GET magic-link — valid request writes a staff_action_log row and returns a link", async () => {
-  // Requires a real active staff profile in the owner's own business.
-  const staffProfileId = Deno.env.get("TEST_STAFF_ID") || ""
-  if (!OWNER_TOKEN || !staffProfileId) return
+  if (!OWNER_TOKEN) return
 
-  const res = await call("GET", OWNER_TOKEN, undefined, { action: "magic-link", staff_profile_id: staffProfileId })
+  const res = await call("GET", OWNER_TOKEN, undefined, { action: "magic-link", staff_profile_id: TEST_STAFF_ID })
   assertEquals(res.status, 200)
   const body = await res.json()
   if (!body.email) throw new Error("Expected an email in the magic-link response")
@@ -206,7 +209,7 @@ Deno.test("staff: GET magic-link — valid request writes a staff_action_log row
   // own business's rows).
   const restBase = BASE.replace("/functions/v1", "/rest/v1")
   const logRes = await fetch(
-    `${restBase}/staff_action_log?staff_profile_id=eq.${staffProfileId}&action=eq.STAFF_MAGIC_LINK_ISSUED&order=created_at.desc&limit=1`,
+    `${restBase}/staff_action_log?staff_profile_id=eq.${TEST_STAFF_ID}&action=eq.STAFF_MAGIC_LINK_ISSUED&order=created_at.desc&limit=1`,
     { headers: { apikey: ANON_KEY, Authorization: `Bearer ${OWNER_TOKEN}` } },
   )
   assertEquals(logRes.status, 200)

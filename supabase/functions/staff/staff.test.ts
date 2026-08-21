@@ -9,6 +9,7 @@ const OWNER_TOKEN = Deno.env.get("TEST_OWNER_TOKEN") || ""
 // the magic-link audit test below actually runs in CI instead of silently
 // skipping behind an unset env var (S74).
 const TEST_STAFF_ID = "d0000000-0000-4000-8000-000000000001"
+const TEST_BUSINESS_ID = "b0000000-0000-4000-8000-000000000001"
 
 function call(method: string, token?: string, body?: unknown, params?: Record<string, string>) {
   const headers: Record<string, string> = { "Content-Type": "application/json", "apikey": ANON_KEY }
@@ -199,7 +200,11 @@ Deno.test("staff: GET magic-link missing staff_profile_id → 400", async () => 
 Deno.test("staff: GET magic-link — valid request writes a staff_action_log row and returns a link", async () => {
   if (!OWNER_TOKEN) return
 
-  const res = await call("GET", OWNER_TOKEN, undefined, { action: "magic-link", staff_profile_id: TEST_STAFF_ID })
+  const res = await call("GET", OWNER_TOKEN, undefined, {
+    action: "magic-link",
+    staff_profile_id: TEST_STAFF_ID,
+    business_id: TEST_BUSINESS_ID,
+  })
   assertEquals(res.status, 200)
   const body = await res.json()
   if (!body.email) throw new Error("Expected an email in the magic-link response")

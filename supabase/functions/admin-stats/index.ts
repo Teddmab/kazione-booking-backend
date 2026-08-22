@@ -1,6 +1,5 @@
 import { supabaseAdmin } from "../_shared/supabaseAdmin.ts";
-import { handleAdminCors, adminJson } from "../_shared/adminCors.ts";
-import { serverError } from "../_shared/errors.ts";
+import { handleAdminCors, adminJson, adminErrors } from "../_shared/adminCors.ts";
 import { requirePlatformAdmin } from "../_shared/adminAuth.ts";
 import { logAdminAction } from "../_shared/adminAudit.ts";
 import { getCallerIp } from "../_shared/adminAuth.ts";
@@ -60,6 +59,6 @@ Deno.serve(withLogging("admin-stats", async (req: Request) => {
     });
   } catch (err) {
     console.error("[admin-stats]", err);
-    return serverError();
+    return adminErrors.serverError(err instanceof Error ? err.message : "Internal error");
   }
 }));

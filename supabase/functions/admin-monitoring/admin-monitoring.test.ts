@@ -16,11 +16,12 @@ const ANON_KEY =
 const ADMIN_TOKEN = Deno.env.get("TEST_ADMIN_TOKEN") || ""
 const OWNER_TOKEN = Deno.env.get("TEST_OWNER_TOKEN") || ""
 
-function call(range?: string, token?: string) {
+function call(range?: string, token?: string, origin?: string) {
   const url = new URL(`${BASE}/admin-monitoring`)
   if (range !== undefined) url.searchParams.set("range", range)
   const headers: Record<string, string> = { apikey: ANON_KEY }
   if (token) headers["Authorization"] = `Bearer ${token}`
+  if (origin) headers["Origin"] = origin
   return fetch(url.toString(), { headers })
 }
 
@@ -41,6 +42,21 @@ Deno.test("admin-monitoring: invalid range → 400", async () => {
   if (!ADMIN_TOKEN) return
   const res = await call("invalid", ADMIN_TOKEN)
   assertEquals(res.status, 400)
+  await res.body?.cancel()
+})
+
+Deno.test("admin-monitoring: error responses carry the admin app's CORS origin, not the main app's", async () => {
+  // Same regression as admin-alert-settings.test.ts's CORS test — this
+  // endpoint's error path used the generic serverError(), which falls back
+  // to a static Access-Control-Allow-Origin hardcoded to kazione.app when
+  // called without the Request object. Real-world symptom that surfaced
+  // this: the admin portal's Monitoring/Audit page couldn't read a real
+  // 400/500 response at all — "blocked by CORS policy" in the browser.
+  if (!ADMIN_TOKEN) return
+  const adminOrigin = "https://kazione-booking-admin.pages.dev"
+  const res = await call("invalid", ADMIN_TOKEN, adminOrigin)
+  assertEquals(res.status, 400)
+  assertEquals(res.headers.get("access-control-allow-origin"), adminOrigin)
   await res.body?.cancel()
 })
 

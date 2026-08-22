@@ -1,6 +1,5 @@
 import { supabaseAdmin } from "../_shared/supabaseAdmin.ts";
-import { handleAdminCors, adminJson } from "../_shared/adminCors.ts";
-import { badRequest, serverError } from "../_shared/errors.ts";
+import { handleAdminCors, adminJson, adminErrors } from "../_shared/adminCors.ts";
 import { requirePlatformAdmin } from "../_shared/adminAuth.ts";
 import { logAdminAction } from "../_shared/adminAudit.ts";
 import { getCallerIp } from "../_shared/adminAuth.ts";
@@ -18,13 +17,13 @@ Deno.serve(withLogging("admin-businesses", async (req: Request) => {
   // ── PATCH: toggle is_active or payment settings ───────────────────────────
   if (req.method === "PATCH") {
     const id = url.searchParams.get("id");
-    if (!id) return badRequest("id is required");
+    if (!id) return adminErrors.badRequest("id is required");
 
     let body: { is_active?: boolean; stripe_enabled?: boolean; pawapay_enabled?: boolean; accept_cash?: boolean };
     try {
       body = await req.json();
     } catch {
-      return badRequest("Invalid JSON body");
+      return adminErrors.badRequest("Invalid JSON body");
     }
 
     // Toggle business active/inactive
@@ -38,7 +37,7 @@ Deno.serve(withLogging("admin-businesses", async (req: Request) => {
 
       if (error) {
         console.error("[admin-businesses] update error:", error.message);
-        return serverError();
+        return adminErrors.serverError(error.message);
       }
 
       logAdminAction({
@@ -60,7 +59,7 @@ Deno.serve(withLogging("admin-businesses", async (req: Request) => {
     if (typeof body.accept_cash === "boolean") paymentUpdate.accept_cash = body.accept_cash;
 
     if (Object.keys(paymentUpdate).length === 0) {
-      return badRequest("No valid fields to update");
+      return adminErrors.badRequest("No valid fields to update");
     }
 
     const { error: settingsError } = await supabaseAdmin
@@ -70,7 +69,7 @@ Deno.serve(withLogging("admin-businesses", async (req: Request) => {
 
     if (settingsError) {
       console.error("[admin-businesses] payment settings error:", settingsError.message);
-      return serverError();
+      return adminErrors.serverError(settingsError.message);
     }
 
     logAdminAction({
@@ -112,7 +111,7 @@ Deno.serve(withLogging("admin-businesses", async (req: Request) => {
     const { data, count, error } = await query;
     if (error) {
       console.error("[admin-businesses] list error:", error.message);
-      return serverError();
+      return adminErrors.serverError(error.message);
     }
 
     logAdminAction({
@@ -129,6 +128,6 @@ Deno.serve(withLogging("admin-businesses", async (req: Request) => {
     });
   } catch (err) {
     console.error("[admin-businesses]", err);
-    return serverError();
+    return adminErrors.serverError(err instanceof Error ? err.message : "Internal error");
   }
 }));

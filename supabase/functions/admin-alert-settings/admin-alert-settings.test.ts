@@ -8,9 +8,10 @@ const ANON_KEY =
 const ADMIN_TOKEN = Deno.env.get("TEST_ADMIN_TOKEN") || ""
 const OWNER_TOKEN = Deno.env.get("TEST_OWNER_TOKEN") || ""
 
-function call(method: string, token?: string, body?: unknown) {
+function call(method: string, token?: string, body?: unknown, origin?: string) {
   const headers: Record<string, string> = { apikey: ANON_KEY, "Content-Type": "application/json" }
   if (token) headers["Authorization"] = `Bearer ${token}`
+  if (origin) headers["Origin"] = origin
   return fetch(`${BASE}/admin-alert-settings`, {
     method,
     headers,
@@ -46,6 +47,23 @@ Deno.test("admin-alert-settings: PATCH invalid email → 400", async () => {
   if (!ADMIN_TOKEN) return
   const res = await call("PATCH", ADMIN_TOKEN, { alert_email: "not-an-email" })
   assertEquals(res.status, 400)
+  await res.body?.cancel()
+})
+
+Deno.test("admin-alert-settings: error responses carry the admin app's CORS origin, not the main app's", async () => {
+  // Regression test: this endpoint's error path used to call the generic
+  // serverError() (from _shared/errors.ts), which falls back to a static
+  // Access-Control-Allow-Origin hardcoded to the main app's origin
+  // (kazione.app) whenever it's called without the Request object — every
+  // admin-* function's error responses were CORS-blocked from the real
+  // admin app's origin as a result. Real-world symptom: the browser
+  // couldn't even read a 400/500 body — "blocked by CORS policy" — from
+  // https://kazione-booking-admin.pages.dev.
+  if (!ADMIN_TOKEN) return
+  const adminOrigin = "https://kazione-booking-admin.pages.dev"
+  const res = await call("PATCH", ADMIN_TOKEN, { alert_email: "not-an-email" }, adminOrigin)
+  assertEquals(res.status, 400)
+  assertEquals(res.headers.get("access-control-allow-origin"), adminOrigin)
   await res.body?.cancel()
 })
 

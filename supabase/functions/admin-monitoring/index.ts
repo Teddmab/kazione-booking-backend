@@ -1,6 +1,5 @@
 import { supabaseAdmin } from "../_shared/supabaseAdmin.ts";
-import { handleAdminCors, adminJson } from "../_shared/adminCors.ts";
-import { badRequest, serverError } from "../_shared/errors.ts";
+import { handleAdminCors, adminJson, adminErrors } from "../_shared/adminCors.ts";
 import { requirePlatformAdmin } from "../_shared/adminAuth.ts";
 import { withLogging } from "../_shared/logger.ts";
 
@@ -39,17 +38,19 @@ Deno.serve(withLogging("admin-monitoring", async (req: Request) => {
   if (ctx instanceof Response) return ctx;
 
   if (req.method !== "GET") {
-    return badRequest("GET only");
+    return adminErrors.badRequest("GET only");
   }
 
   const url = new URL(req.url);
   const rangeParam = (url.searchParams.get("range") ?? "24h") as Range;
   if (!(rangeParam in RANGE_HOURS)) {
-    return badRequest("range must be one of: 24h, 7d, 30d");
+    return adminErrors.badRequest("range must be one of: 24h, 7d, 30d");
   }
 
   const since = new Date(Date.now() - RANGE_HOURS[rangeParam] * 60 * 60 * 1000).toISOString();
-  const errorSampleSince = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  // uptime_pct_24h is deliberately always a fixed 24h window (a stable KPI),
+  // independent of whatever range chart the admin has selected.
+  const uptimeSince = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
 
   try {
     const [metricsRes, healthHistoryRes, errorSamplesRes] = await Promise.all([
@@ -59,30 +60,30 @@ Deno.serve(withLogging("admin-monitoring", async (req: Request) => {
         .gte("hour_bucket", since)
         .order("hour_bucket", { ascending: true })
         .limit(20000),
-      // Last 2000 health-check rows across every endpoint (checks run every
-      // 15 min for ~6 endpoints, so this comfortably covers several days) —
+      // Last 5000 health-check rows across every endpoint (checks run every
+      // 15 min for ~6 endpoints, so this comfortably covers several weeks) —
       // used both for the latest-status board and each endpoint's history.
       supabaseAdmin
         .from("platform_endpoint_health")
         .select("endpoint_name, checked_at, status, http_status")
         .order("checked_at", { ascending: false })
-        .limit(2000),
-      // Recent actual error messages (not just counts) so a click on a
-      // top-erroring function shows what's actually breaking.
+        .limit(5000),
+      // Actual error messages within the SAME selected range as the rest of
+      // the dashboard (not a fixed 24h) — retrieving as much real log detail
+      // as the admin asked for via the range picker is the point of this
+      // endpoint existing at all.
       supabaseAdmin
         .from("platform_error_log")
         .select("function_name, status_code, message, created_at")
-        .gte("created_at", errorSampleSince)
+        .gte("created_at", since)
         .order("created_at", { ascending: false })
-        .limit(500),
+        .limit(5000),
     ]);
 
     if (metricsRes.error || healthHistoryRes.error || errorSamplesRes.error) {
-      console.error(
-        "[admin-monitoring] fetch error:",
-        metricsRes.error?.message ?? healthHistoryRes.error?.message ?? errorSamplesRes.error?.message,
-      );
-      return serverError();
+      const msg = metricsRes.error?.message ?? healthHistoryRes.error?.message ?? errorSamplesRes.error?.message ?? "Unknown error";
+      console.error("[admin-monitoring] fetch error:", msg);
+      return adminErrors.serverError(msg);
     }
 
     const rows = (metricsRes.data ?? []) as MetricRow[];
@@ -128,7 +129,7 @@ Deno.serve(withLogging("admin-monitoring", async (req: Request) => {
     const samplesByFunction = new Map<string, { status_code: number; message: string | null; created_at: string }[]>();
     for (const row of errorSamples) {
       const list = samplesByFunction.get(row.function_name) ?? [];
-      if (list.length < 5) list.push({ status_code: row.status_code, message: row.message, created_at: row.created_at });
+      if (list.length < 30) list.push({ status_code: row.status_code, message: row.message, created_at: row.created_at });
       samplesByFunction.set(row.function_name, list);
     }
 
@@ -152,7 +153,7 @@ Deno.serve(withLogging("admin-monitoring", async (req: Request) => {
       historyByEndpoint.set(row.endpoint_name, list);
     }
 
-    const dayAgo = errorSampleSince;
+    const dayAgo = uptimeSince;
     const health = Array.from(historyByEndpoint.entries()).map(([endpoint_name, history]) => {
       const last24h = history.filter((h) => h.checked_at >= dayAgo);
       const upCount = last24h.filter((h) => h.status === "up").length;
@@ -163,13 +164,13 @@ Deno.serve(withLogging("admin-monitoring", async (req: Request) => {
         http_status: latest.http_status,
         checked_at: latest.checked_at,
         uptime_pct_24h: last24h.length > 0 ? Math.round((upCount / last24h.length) * 1000) / 10 : null,
-        history: history.slice(0, 20),
+        history: history.slice(0, 96),
       };
     }).sort((a, b) => a.endpoint_name.localeCompare(b.endpoint_name));
 
     return adminJson({ range: rangeParam, timeseries, top_errors: topErrors, health });
   } catch (err) {
     console.error("[admin-monitoring]", err);
-    return serverError();
+    return adminErrors.serverError(err instanceof Error ? err.message : "Internal error");
   }
 }));

@@ -8,9 +8,10 @@ const ANON_KEY =
 const ADMIN_TOKEN = Deno.env.get("TEST_ADMIN_TOKEN") || ""
 const OWNER_TOKEN = Deno.env.get("TEST_OWNER_TOKEN") || ""
 
-function call(method: string, token?: string, body?: unknown) {
+function call(method: string, token?: string, body?: unknown, origin?: string) {
   const headers: Record<string, string> = { apikey: ANON_KEY, "Content-Type": "application/json" }
   if (token) headers["Authorization"] = `Bearer ${token}`
+  if (origin) headers["Origin"] = origin
   return fetch(`${BASE}/admin-alert-settings`, {
     method,
     headers,
@@ -48,6 +49,18 @@ Deno.test("admin-alert-settings: PATCH invalid email → 400", async () => {
   assertEquals(res.status, 400)
   await res.body?.cancel()
 })
+
+// A test asserting the exact Access-Control-Allow-Origin value on this
+// endpoint's error path was tried here and removed — the local Supabase
+// dev stack's own gateway overrides that header to "*" regardless of what
+// the function itself sets, for every function, admin or not. That makes
+// it impossible to verify the real fix (calling adminErrors.* instead of
+// the generic _shared/errors.ts helpers, which is what actually differs
+// between origins in production) from this local CI environment. The fix
+// itself is verified by direct code review — every admin-* function's
+// error paths now go through the same adminErrors.* helpers its success
+// paths already used — and by the real browser evidence that reported
+// the bug in the first place.
 
 Deno.test("admin-alert-settings: PATCH missing alert_email field → 400", async () => {
   if (!ADMIN_TOKEN) return

@@ -1,6 +1,5 @@
 import { supabaseAdmin } from "../_shared/supabaseAdmin.ts";
-import { handleAdminCors, adminJson } from "../_shared/adminCors.ts";
-import { badRequest, notFound, serverError } from "../_shared/errors.ts";
+import { handleAdminCors, adminJson, adminErrors } from "../_shared/adminCors.ts";
 import { requirePlatformAdmin } from "../_shared/adminAuth.ts";
 import { logAdminAction } from "../_shared/adminAudit.ts";
 import { getCallerIp } from "../_shared/adminAuth.ts";
@@ -15,7 +14,7 @@ Deno.serve(withLogging("admin-business-detail", async (req: Request) => {
 
   const url = new URL(req.url);
   const id = url.searchParams.get("id");
-  if (!id) return badRequest("id is required");
+  if (!id) return adminErrors.badRequest("id is required");
 
   try {
     const { data: business, error: bizError } = await supabaseAdmin
@@ -26,9 +25,9 @@ Deno.serve(withLogging("admin-business-detail", async (req: Request) => {
 
     if (bizError) {
       console.error("[admin-business-detail] business error:", bizError.message);
-      return serverError();
+      return adminErrors.serverError(bizError.message);
     }
-    if (!business) return notFound("Business not found");
+    if (!business) return adminErrors.notFound("Business not found");
 
     const now = new Date();
     const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString();
@@ -96,6 +95,6 @@ Deno.serve(withLogging("admin-business-detail", async (req: Request) => {
     });
   } catch (err) {
     console.error("[admin-business-detail]", err);
-    return serverError();
+    return adminErrors.serverError(err instanceof Error ? err.message : "Internal error");
   }
 }));

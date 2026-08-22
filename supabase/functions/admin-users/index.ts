@@ -1,6 +1,5 @@
 import { supabaseAdmin } from "../_shared/supabaseAdmin.ts";
 import { handleAdminCors, adminJson, adminErrors } from "../_shared/adminCors.ts";
-import { serverError, badRequest } from "../_shared/errors.ts";
 import { requirePlatformAdmin } from "../_shared/adminAuth.ts";
 import { logAdminAction } from "../_shared/adminAudit.ts";
 import { getCallerIp } from "../_shared/adminAuth.ts";
@@ -22,7 +21,7 @@ Deno.serve(withLogging("admin-users", async (req: Request) => {
       const { user_id, is_platform_admin } = body as { user_id?: string; is_platform_admin?: boolean };
 
       if (!user_id || typeof is_platform_admin !== "boolean") {
-        return badRequest("user_id and is_platform_admin are required");
+        return adminErrors.badRequest("user_id and is_platform_admin are required");
       }
       if (user_id === ctx.adminId) {
         return adminErrors.forbidden("Cannot change your own admin status");
@@ -35,7 +34,7 @@ Deno.serve(withLogging("admin-users", async (req: Request) => {
 
       if (error) {
         console.error("[admin-users] patch error:", error.message);
-        return serverError();
+        return adminErrors.serverError(error.message);
       }
 
       logAdminAction({
@@ -49,7 +48,7 @@ Deno.serve(withLogging("admin-users", async (req: Request) => {
       return adminJson({ success: true });
     } catch (err) {
       console.error("[admin-users] patch", err);
-      return serverError();
+      return adminErrors.serverError(err instanceof Error ? err.message : "Internal error");
     }
   }
 
@@ -71,9 +70,9 @@ Deno.serve(withLogging("admin-users", async (req: Request) => {
 
       if (error) {
         console.error("[admin-users] detail error:", error.message);
-        return serverError();
+        return adminErrors.serverError(error.message);
       }
-      if (!user) return adminErrors.unauthorized("User not found");
+      if (!user) return adminErrors.notFound("User not found");
 
       // Recent client appointments (if this user also has a client record)
       const { data: clientRow } = await supabaseAdmin
@@ -107,7 +106,7 @@ Deno.serve(withLogging("admin-users", async (req: Request) => {
       return adminJson({ user, recent_appointments: recentAppointments });
     } catch (err) {
       console.error("[admin-users] detail", err);
-      return serverError();
+      return adminErrors.serverError(err instanceof Error ? err.message : "Internal error");
     }
   }
 
@@ -135,7 +134,7 @@ Deno.serve(withLogging("admin-users", async (req: Request) => {
     const { data, count, error } = await query;
     if (error) {
       console.error("[admin-users] error:", error.message);
-      return serverError();
+      return adminErrors.serverError(error.message);
     }
 
     logAdminAction({
@@ -147,6 +146,6 @@ Deno.serve(withLogging("admin-users", async (req: Request) => {
     return adminJson({ data: data ?? [], total: count ?? 0, page, limit });
   } catch (err) {
     console.error("[admin-users]", err);
-    return serverError();
+    return adminErrors.serverError(err instanceof Error ? err.message : "Internal error");
   }
 }));

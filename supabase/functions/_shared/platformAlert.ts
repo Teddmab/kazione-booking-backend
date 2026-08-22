@@ -20,7 +20,10 @@ export function logPlatformError(
         function_name: functionName,
         method,
         status_code: status,
-        message: message?.slice(0, 500) ?? null,
+        // 2000 chars is enough for a real Postgres/PostgREST error (message +
+        // hint + detail concatenated) without letting one giant stack trace
+        // bloat the table — this is troubleshooting detail, not a full log.
+        message: message?.slice(0, 2000) ?? null,
       })
       .then(({ error }) => {
         if (error) console.error("[platformAlert] Insert failed:", error.message);

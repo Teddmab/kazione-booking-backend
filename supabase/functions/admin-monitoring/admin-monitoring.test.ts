@@ -16,11 +16,12 @@ const ANON_KEY =
 const ADMIN_TOKEN = Deno.env.get("TEST_ADMIN_TOKEN") || ""
 const OWNER_TOKEN = Deno.env.get("TEST_OWNER_TOKEN") || ""
 
-function call(range?: string, token?: string) {
+function call(range?: string, token?: string, origin?: string) {
   const url = new URL(`${BASE}/admin-monitoring`)
   if (range !== undefined) url.searchParams.set("range", range)
   const headers: Record<string, string> = { apikey: ANON_KEY }
   if (token) headers["Authorization"] = `Bearer ${token}`
+  if (origin) headers["Origin"] = origin
   return fetch(url.toString(), { headers })
 }
 
@@ -43,6 +44,13 @@ Deno.test("admin-monitoring: invalid range → 400", async () => {
   assertEquals(res.status, 400)
   await res.body?.cancel()
 })
+
+// A test asserting the exact Access-Control-Allow-Origin value on this
+// endpoint's error path was tried here and removed — see the same note in
+// admin-alert-settings.test.ts. The local Supabase dev stack's own gateway
+// overrides that header to "*" for every function regardless of what the
+// function itself sets, making it impossible to verify the real fix from
+// this local CI environment.
 
 Deno.test("admin-monitoring: platform admin, default range → 200 with well-formed shape", async () => {
   if (!ADMIN_TOKEN) return

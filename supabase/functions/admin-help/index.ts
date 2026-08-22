@@ -1,6 +1,5 @@
 import { supabaseAdmin } from "../_shared/supabaseAdmin.ts";
-import { handleAdminCors, adminJson } from "../_shared/adminCors.ts";
-import { badRequest, serverError, notFound } from "../_shared/errors.ts";
+import { handleAdminCors, adminJson, adminErrors } from "../_shared/adminCors.ts";
 import { requirePlatformAdmin } from "../_shared/adminAuth.ts";
 import { withLogging } from "../_shared/logger.ts";
 
@@ -23,7 +22,7 @@ Deno.serve(withLogging("admin-help", async (req: Request) => {
 
     if (error) {
       console.error("[admin-help] list error:", error.message);
-      return serverError();
+      return adminErrors.serverError(error.message);
     }
     return adminJson({ data });
   }
@@ -44,11 +43,11 @@ Deno.serve(withLogging("admin-help", async (req: Request) => {
     try {
       body = await req.json();
     } catch {
-      return badRequest("Invalid JSON body");
+      return adminErrors.badRequest("Invalid JSON body");
     }
 
-    if (!body.title?.trim()) return badRequest("title is required");
-    if (!body.target_path?.trim()) return badRequest("target_path is required");
+    if (!body.title?.trim()) return adminErrors.badRequest("title is required");
+    if (!body.target_path?.trim()) return adminErrors.badRequest("target_path is required");
 
     const { data, error } = await supabaseAdmin
       .from("contextual_help")
@@ -68,20 +67,20 @@ Deno.serve(withLogging("admin-help", async (req: Request) => {
 
     if (error) {
       console.error("[admin-help] insert error:", error.message);
-      return serverError();
+      return adminErrors.serverError(error.message);
     }
     return adminJson(data, 201);
   }
 
   // ── PATCH: update ────────────────────────────────────────────────────────
   if (req.method === "PATCH") {
-    if (!id) return badRequest("id is required");
+    if (!id) return adminErrors.badRequest("id is required");
 
     let body: Record<string, unknown>;
     try {
       body = await req.json();
     } catch {
-      return badRequest("Invalid JSON body");
+      return adminErrors.badRequest("Invalid JSON body");
     }
 
     const allowed = [
@@ -101,16 +100,16 @@ Deno.serve(withLogging("admin-help", async (req: Request) => {
       .single();
 
     if (error) {
-      if (error.code === "PGRST116") return notFound("Help item not found");
+      if (error.code === "PGRST116") return adminErrors.notFound("Help item not found");
       console.error("[admin-help] update error:", error.message);
-      return serverError();
+      return adminErrors.serverError(error.message);
     }
     return adminJson(data);
   }
 
   // ── DELETE ───────────────────────────────────────────────────────────────
   if (req.method === "DELETE") {
-    if (!id) return badRequest("id is required");
+    if (!id) return adminErrors.badRequest("id is required");
 
     const { error } = await supabaseAdmin
       .from("contextual_help")
@@ -119,10 +118,10 @@ Deno.serve(withLogging("admin-help", async (req: Request) => {
 
     if (error) {
       console.error("[admin-help] delete error:", error.message);
-      return serverError();
+      return adminErrors.serverError(error.message);
     }
     return adminJson({ deleted: true });
   }
 
-  return badRequest("Method not allowed");
+  return adminErrors.badRequest("Method not allowed");
 }));

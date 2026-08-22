@@ -83,8 +83,24 @@ Deno.test("admin-monitoring: health includes create-booking (a critical endpoint
   const res = await call("24h", ADMIN_TOKEN)
   assertEquals(res.status, 200)
   const body = await res.json()
-  const health = body.health as { endpoint_name: string; status: string; uptime_pct_24h: number | null }[]
+  const health = body.health as { endpoint_name: string; status: string; uptime_pct_24h: number | null; history: unknown[] }[]
   if (health.length === 0) return // digest hasn't run yet in this job — nothing to assert
   const createBooking = health.find((h) => h.endpoint_name === "create-booking")
   if (!createBooking) throw new Error("Expected a health row for create-booking once the digest has run")
+  if (!Array.isArray(createBooking.history) || createBooking.history.length === 0) {
+    throw new Error("Expected create-booking's health row to include a non-empty history array")
+  }
+})
+
+Deno.test("admin-monitoring: top_errors entries include recent_errors samples", async () => {
+  if (!ADMIN_TOKEN) return
+  const res = await call("24h", ADMIN_TOKEN)
+  assertEquals(res.status, 200)
+  const body = await res.json()
+  const topErrors = body.top_errors as { function_name: string; recent_errors: unknown[] }[]
+  for (const entry of topErrors) {
+    if (!Array.isArray(entry.recent_errors)) {
+      throw new Error(`Expected top_errors["${entry.function_name}"].recent_errors to be an array`)
+    }
+  }
 })

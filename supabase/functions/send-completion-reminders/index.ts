@@ -2,6 +2,7 @@ import { supabaseAdmin } from "../_shared/supabaseAdmin.ts";
 import { corsHeadersFor, handleCors, jsonCors } from "../_shared/cors.ts";
 import { serverError } from "../_shared/errors.ts";
 import { overdueCompletionReminderEmail, sendEmail } from "../_shared/resend.ts";
+import { logNotificationDelivery } from "../_shared/notificationLog.ts";
 
 /**
  * send-completion-reminders — finds overdue unfinished appointments and
@@ -116,8 +117,29 @@ Deno.serve(async (req: Request) => {
       dashboardUrl: `${APP_URL}/owner/appointments`,
     });
 
-    const emailResult = await sendEmail(ownerEmail, subject, html).catch(() => null);
-    if (!emailResult) { skipped++; continue; }
+    let sendOk = true;
+    let messageId: string | null = null;
+    let sendError: string | null = null;
+    try {
+      const result = await sendEmail(ownerEmail, subject, html);
+      messageId = result.id;
+    } catch (err) {
+      sendOk = false;
+      sendError = err instanceof Error ? err.message : "Email delivery failed";
+    }
+
+    logNotificationDelivery({
+      businessId,
+      appointmentId: row.id as string,
+      channel: "email",
+      recipientType: "owner",
+      purpose: "completion_reminder",
+      status: sendOk ? "sent" : "failed",
+      providerMessageId: sendOk ? messageId : null,
+      errorMessage: sendOk ? null : sendError,
+    });
+
+    if (!sendOk) { skipped++; continue; }
 
     // Update reminder tracking
     await supabaseAdmin

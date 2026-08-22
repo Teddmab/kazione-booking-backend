@@ -3,6 +3,7 @@ import { corsHeadersFor, handleCors } from "../_shared/cors.ts";
 import { badRequest, conflict, serverError } from "../_shared/errors.ts";
 import { requireOwnerOrManagerCtx } from "../_shared/auth.ts";
 import { sendEmail, staffInviteEmail } from "../_shared/resend.ts";
+import { logNotificationDelivery } from "../_shared/notificationLog.ts";
 import { withLogging } from "../_shared/logger.ts";
 
 // ---------------------------------------------------------------------------
@@ -185,22 +186,35 @@ Deno.serve(withLogging("invite-staff", async (req: Request) => {
 
     let inviteSent = true;
     let emailError: string | null = null;
+    let providerMessageId: string | null = null;
     try {
       if (!Deno.env.get("RESEND_API_KEY")) {
         inviteSent = false;
         emailError = "RESEND_API_KEY is not configured";
       } else {
-        await sendEmail(
+        const result = await sendEmail(
           body.email,
           emailData.subject,
           emailData.html,
         );
+        providerMessageId = result.id;
       }
     } catch (err) {
       inviteSent = false;
       emailError = err instanceof Error ? err.message : "Email delivery failed";
       console.error("invite-staff email send failed:", err);
     }
+
+    logNotificationDelivery({
+      businessId,
+      appointmentId: null,
+      channel: "email",
+      recipientType: "staff",
+      purpose: "staff_invite",
+      status: inviteSent ? "sent" : "failed",
+      providerMessageId,
+      errorMessage: inviteSent ? null : emailError,
+    });
 
     return new Response(
       JSON.stringify({

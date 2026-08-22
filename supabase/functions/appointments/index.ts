@@ -161,6 +161,34 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
         return jsonCors(req, (data ?? []).map(normalizePayment));
       }
 
+      // Notification delivery log for a given appointment — S62 support tool:
+      // "did we actually try to send this customer their reminder, and did it work."
+      if (action === "notification-log") {
+        const appointmentId = url.searchParams.get("appointment_id");
+        if (!appointmentId) return badRequest("appointment_id is required");
+
+        const { data: apptRow, error: apptErr } = await supabaseAdmin
+          .from("appointments")
+          .select("id, business_id")
+          .eq("id", appointmentId)
+          .maybeSingle();
+
+        if (apptErr) return serverError(apptErr.message);
+        if (!apptRow) return notFound("Appointment not found");
+
+        const ctx = await requireOwnerOrManagerCtx(req, (apptRow as { business_id: string }).business_id);
+        if (ctx instanceof Response) return ctx;
+
+        const { data: logRows, error: logErr } = await supabaseAdmin
+          .from("notification_delivery_log")
+          .select("id, channel, recipient_type, purpose, status, provider_message_id, error_message, created_at")
+          .eq("appointment_id", appointmentId)
+          .order("created_at", { ascending: false });
+
+        if (logErr) return serverError(logErr.message);
+        return jsonCors(req, logRows ?? []);
+      }
+
       // Single appointment lookup by id (no business_id param required).
       // We infer business_id from the row and then verify membership.
       if (id) {

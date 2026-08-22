@@ -16,6 +16,14 @@ const CLIENT_ID = "c1000000-0000-4000-8000-000000000001" // Amara Diallo from se
 const CLIENT_ID_2 = "c1000000-0000-4000-8000-000000000002" // Sophie Martin from seed
 const OWNER_TOKEN = Deno.env.get("TEST_OWNER_TOKEN") || ""
 
+// Well-known local dev service_role key — not a secret, same value hardcoded
+// in create-booking.test.ts. Needed to seed a notification_delivery_log
+// fixture directly: RLS only grants owner/manager SELECT on that table, no
+// authenticated INSERT (it's append-only from edge functions).
+const SUPABASE_URL = "http://127.0.0.1:54321"
+const SERVICE_KEY =
+  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU"
+
 function callFn(method: string, token?: string, body?: unknown, params?: Record<string, string>) {
   const headers: Record<string, string> = { "Content-Type": "application/json", "apikey": ANON_KEY }
   if (token) headers["Authorization"] = `Bearer ${token}`
@@ -230,3 +238,86 @@ Deno.test("appointments: complete — commission task uses the service's own com
 
 // The following require more setup for date filter
 // Deno.test("appointments: GET with date filter", async () => { ... })
+
+// ── S62: notification-log read endpoint ────────────────────────────────
+// "What did we try to send this customer, and did it work" — the concrete
+// support use case driving the sprint. Owner/manager only, scoped to one
+// appointment via requireOwnerOrManagerCtx (same auth pattern as every
+// other business-scoped branch in this file).
+
+Deno.test("appointments: GET ?action=notification-log without appointment_id → 400", async () => {
+  if (!OWNER_TOKEN) return
+  const res = await callFn("GET", OWNER_TOKEN, undefined, { action: "notification-log" })
+  assertEquals(res.status, 400)
+  await res.body?.cancel()
+})
+
+Deno.test("appointments: GET ?action=notification-log for a nonexistent appointment → 404", async () => {
+  if (!OWNER_TOKEN) return
+  const res = await callFn("GET", OWNER_TOKEN, undefined, {
+    action: "notification-log",
+    appointment_id: "f0000000-0000-4000-8000-00000000ffff",
+  })
+  assertEquals(res.status, 404)
+  await res.body?.cancel()
+})
+
+// TEST_ADMIN_TOKEN is a real, authenticated platform admin — but platform
+// admin status alone doesn't grant business membership. requireOwnerOrManagerCtx
+// rejects it exactly the way it would reject an owner from a different
+// business, so this proves the same tenant boundary without needing a
+// second fully-seeded business+appointment fixture just for this test.
+Deno.test("appointments: GET ?action=notification-log without business membership → 403", async () => {
+  const adminToken = Deno.env.get("TEST_ADMIN_TOKEN") || ""
+  if (!adminToken) return
+  const res = await callFn("GET", adminToken, undefined, {
+    action: "notification-log",
+    appointment_id: COMM_TEST_APPT_ID,
+  })
+  assertEquals(res.status, 403)
+  await res.body?.cancel()
+})
+
+Deno.test("appointments: GET ?action=notification-log returns delivery rows for the appointment's owner", async () => {
+  if (!OWNER_TOKEN) return
+
+  // Seed a deterministic delivery-log row directly (service role) so this
+  // test doesn't depend on a real Resend/MessageBird send having happened
+  // somewhere else in the CI run — RESEND_API_KEY isn't provisioned in CI,
+  // per CLAUDE.md Rule 7 (hardcoded fixtures over env-gated flakiness).
+  const marker = `test-msg-${Date.now()}`
+  const insertRes = await fetch(`${SUPABASE_URL}/rest/v1/notification_delivery_log`, {
+    method: "POST",
+    headers: {
+      apikey: SERVICE_KEY,
+      Authorization: `Bearer ${SERVICE_KEY}`,
+      "Content-Type": "application/json",
+      Prefer: "return=representation",
+    },
+    body: JSON.stringify({
+      business_id: BUSINESS_ID,
+      appointment_id: COMM_TEST_APPT_ID,
+      channel: "email",
+      recipient_type: "client",
+      purpose: "booking_reminder",
+      status: "sent",
+      provider_message_id: marker,
+    }),
+  })
+  if (insertRes.status !== 201) {
+    throw new Error(`Fixture insert failed: ${insertRes.status} ${await insertRes.text()}`)
+  }
+
+  const res = await callFn("GET", OWNER_TOKEN, undefined, {
+    action: "notification-log",
+    appointment_id: COMM_TEST_APPT_ID,
+  })
+  assertEquals(res.status, 200)
+  const rows = await res.json()
+  if (!Array.isArray(rows)) throw new Error("Expected an array")
+  const row = rows.find((r: { provider_message_id: string }) => r.provider_message_id === marker)
+  if (!row) throw new Error("Expected the seeded delivery-log row to be returned")
+  assertEquals(row.status, "sent")
+  assertEquals(row.channel, "email")
+  assertEquals(row.recipient_type, "client")
+})

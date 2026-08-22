@@ -19,29 +19,51 @@ function normalizePhone(raw: string): string | null {
   return digits;
 }
 
-export async function sendSms(to: string, body: string): Promise<void> {
+export interface SmsSendResult {
+  ok: boolean;
+  /** MessageBird's own message id, when available. */
+  messageId?: string | null;
+  /** Set when ok is false — config/validation issue or a non-2xx API response. */
+  error?: string;
+}
+
+export async function sendSms(to: string, body: string): Promise<SmsSendResult> {
   if (!API_KEY) {
     console.warn("[messagebird] MESSAGEBIRD_API_KEY not set — SMS skipped");
-    return;
+    return { ok: false, error: "MESSAGEBIRD_API_KEY not configured" };
   }
 
   const phone = normalizePhone(to);
   if (!phone) {
     console.warn("[messagebird] unparseable phone number — SMS skipped:", to);
-    return;
+    return { ok: false, error: "Unparseable phone number" };
   }
 
-  const res = await fetch("https://rest.messagebird.com/messages", {
-    method: "POST",
-    headers: {
-      Authorization: `AccessKey ${API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ originator: FROM, recipients: [phone], body }),
-  });
+  try {
+    const res = await fetch("https://rest.messagebird.com/messages", {
+      method: "POST",
+      headers: {
+        Authorization: `AccessKey ${API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ originator: FROM, recipients: [phone], body }),
+    });
 
-  if (!res.ok) {
     const text = await res.text();
-    console.error(`[messagebird] SMS to ${phone} failed (${res.status}):`, text);
+    if (!res.ok) {
+      console.error(`[messagebird] SMS to ${phone} failed (${res.status}):`, text);
+      return { ok: false, error: `MessageBird ${res.status}: ${text}` };
+    }
+
+    let messageId: string | null = null;
+    try {
+      messageId = (JSON.parse(text) as { id?: string })?.id ?? null;
+    } catch {
+      // Non-JSON success body — unexpected but not fatal, just no id to report.
+    }
+    return { ok: true, messageId };
+  } catch (err) {
+    console.error(`[messagebird] SMS to ${phone} request failed:`, err);
+    return { ok: false, error: err instanceof Error ? err.message : "MessageBird request failed" };
   }
 }

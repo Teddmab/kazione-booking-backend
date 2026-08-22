@@ -85,7 +85,7 @@ async function sendReminders(
       reminder_sms_sent_at, reminder_whatsapp_sent_at,
       client:clients!inner(email, phone, first_name, last_name, preferred_locale),
       service:services!inner(name),
-      staff:staff_profiles(display_name, invited_email, business_member_id),
+      staff:staff_profiles!staff_profile_id(display_name, invited_email, business_member_id),
       business:businesses!inner(name, timezone, storefronts(address, city))
     `)
     .eq("status", "confirmed");

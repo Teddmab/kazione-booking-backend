@@ -114,7 +114,7 @@ Deno.serve(withLogging("get-booking", async (req: Request) => {
         booking_reference, booking_source, notes,
         client:clients(first_name, last_name, email, phone),
         service:services(name),
-        staff:staff_profiles(display_name, avatar_url),
+        staff:staff_profiles!staff_profile_id(display_name, avatar_url),
         business:businesses(name, country, timezone)
       `)
       .eq("id", core.id)

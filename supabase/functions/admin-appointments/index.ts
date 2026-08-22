@@ -26,7 +26,7 @@ Deno.serve(withLogging("admin-appointments", async (req: Request) => {
            business:businesses(id, name, slug, country, currency_code),
            client:clients(id, first_name, last_name, email, phone),
            service:services(id, name, duration_minutes, price),
-           staff:staff_profiles(id, display_name),
+           staff:staff_profiles!staff_profile_id(id, display_name),
            payments(id, amount, tip_amount, currency_code, status, method, paid_at, created_at)`,
         )
         .eq("id", appointmentId)
@@ -70,7 +70,7 @@ Deno.serve(withLogging("admin-appointments", async (req: Request) => {
          business:businesses(id, name, slug),
          client:clients(id, first_name, last_name, email),
          service:services(id, name),
-         staff:staff_profiles(id, display_name)`,
+         staff:staff_profiles!staff_profile_id(id, display_name)`,
         { count: "exact" },
       )
       .order("starts_at", { ascending: false })

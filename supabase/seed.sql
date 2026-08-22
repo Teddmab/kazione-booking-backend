@@ -394,3 +394,30 @@ INSERT INTO services (id, business_id, name, duration_minutes, price, currency_c
 VALUES ('c0000000-0000-4000-8000-000000000005', 'b0000000-0000-4000-8000-000000000001',
         'S58 Test — Dual Staff Service', 60, 50.00, 'EUR', true, false, true)
 ON CONFLICT DO NOTHING;
+
+-- ── Fixed-id appointment with a staff member assigned (get-booking fix) ────
+-- get-booking.test.ts's real-fetch tests (the ones that actually exercise
+-- the authenticated 200 path — auth, cancel-token, embedded relations) were
+-- entirely gated behind TEST_APPT_ID/TEST_APPT_CANCEL_TOKEN/TEST_CLIENT_TOKEN
+-- env vars CI never sets, so they silently skipped forever. That's why a
+-- genuine bug (staff:staff_profiles(...) with no !staff_profile_id hint,
+-- ambiguous against staff_profile_id_2/referrer_staff_id since migration
+-- 086 — PostgREST 500s with "more than one relationship was found") shipped
+-- undetected. Fixed id + a real assigned staff member so a hardcoded test
+-- can exercise that exact embed instead of an env-gated skip.
+INSERT INTO appointments
+  (id, business_id, client_id, staff_profile_id, service_id, status,
+   starts_at, ends_at, duration_minutes, price, deposit_amount,
+   booking_source, booking_reference)
+VALUES (
+  'f0000000-0000-4000-8000-000000000099',
+  'b0000000-0000-4000-8000-000000000001',
+  'c1000000-0000-4000-8000-000000000001',
+  'd0000000-0000-4000-8000-000000000001',
+  'c0000000-0000-4000-8000-000000000001',
+  'confirmed',
+  '2026-10-05T10:00:00Z',
+  '2026-10-05T13:00:00Z',
+  180, 120.00, 30.00,
+  'online', 'KZB-TESTGB1'
+) ON CONFLICT DO NOTHING;

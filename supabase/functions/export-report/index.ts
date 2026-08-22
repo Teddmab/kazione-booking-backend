@@ -154,7 +154,7 @@ async function generateIncomeReport(
       appointment:appointments!inner(
         booking_reference, starts_at,
         service:services!inner(name),
-        staff:staff_profiles(display_name),
+        staff:staff_profiles!staff_profile_id(display_name),
         client:clients!inner(first_name, last_name)
       )
     `)

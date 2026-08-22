@@ -1,0 +1,21 @@
+-- 116_admin_audit_log_grant.sql
+--
+-- admin_audit_log (045_admin_audit_log.sql) has an RLS policy letting a
+-- platform admin SELECT their own audit trail, but the table itself
+-- predates 054_inventory_rls_and_grants.sql's `ALTER DEFAULT PRIVILEGES`
+-- fix — which only auto-grants privileges to tables created AFTER it ran.
+-- Without an explicit table-level GRANT, Postgres denies `authenticated`
+-- access before RLS is even evaluated (PostgREST surfaces this as a plain
+-- 403, independent of the RLS policy's own logic).
+--
+-- Net effect: no platform admin has ever actually been able to read
+-- admin_audit_log via PostgREST (the only read path — no dedicated read
+-- endpoint exists for it, same as staff_action_log). This went undetected
+-- because no test in this codebase authenticated as a real platform admin
+-- until S61 added the first one (no seeded admin user existed before).
+--
+-- service_role is unaffected (054's `GRANT ALL ON ALL TABLES ... TO
+-- service_role` already covered every table that existed at the time,
+-- including this one) — only the `authenticated` role was missing.
+
+GRANT SELECT ON admin_audit_log TO authenticated;

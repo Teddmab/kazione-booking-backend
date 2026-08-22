@@ -1,5 +1,6 @@
 import { serverError } from "./errors.ts";
 import { logPlatformError } from "./platformAlert.ts";
+import { recordPlatformMetric } from "./platformMetrics.ts";
 
 /**
  * Wrap an Edge Function handler with request logging and top-level error
@@ -10,6 +11,10 @@ import { logPlatformError } from "./platformAlert.ts";
  * platform-alert-digest to pick up — this is how an outage like a function
  * silently 500ing (or crashing) gets surfaced as an email alert instead of
  * only showing up in Supabase logs nobody is watching in real time.
+ *
+ * Every request (not just 5xx) is also rolled up into platform_metrics_hourly
+ * via an atomic upsert RPC — this feeds the admin Monitoring dashboard's
+ * request-volume/error-rate/latency charts.
  *
  * Usage:
  *   Deno.serve(withLogging("create-booking", handler));
@@ -47,6 +52,7 @@ export function withLogging(
       if (status >= 500) {
         logPlatformError(functionName, req.method, status, errorMessage);
       }
+      recordPlatformMetric(functionName, status >= 500, duration_ms);
     }
   };
 }

@@ -2,6 +2,7 @@ import { supabaseAdmin } from "../_shared/supabaseAdmin.ts";
 import { corsHeadersFor, handleCors } from "../_shared/cors.ts";
 import { badRequest, notFound, serverError } from "../_shared/errors.ts";
 import { withLogging } from "../_shared/logger.ts";
+import { constantTimeEquals } from "../_shared/constantTime.ts";
 
 // ---------------------------------------------------------------------------
 // CustomerBooking interface — mirrors frontend src/data/bookingsData.ts
@@ -70,30 +71,6 @@ function formatDuration(minutes: number): string {
   const hrs = minutes / 60;
   if (Number.isInteger(hrs)) return `${hrs} hrs`;
   return `${hrs.toFixed(1)} hrs`;
-}
-
-/**
- * Constant-time string comparison to prevent timing attacks.
- * Returns true if strings are equal.
- */
-function constantTimeEquals(a: string, b: string): boolean {
-  const aBuf = new TextEncoder().encode(a);
-  const bBuf = new TextEncoder().encode(b);
-
-  if (aBuf.length !== bBuf.length) {
-    // Still do a full comparison to avoid length-based timing leaks
-    let result = 1;
-    for (let i = 0; i < aBuf.length; i++) {
-      result |= aBuf[i] ^ (bBuf[i % bBuf.length] ?? 0);
-    }
-    return false;
-  }
-
-  let result = 0;
-  for (let i = 0; i < aBuf.length; i++) {
-    result |= aBuf[i] ^ bBuf[i];
-  }
-  return result === 0;
 }
 
 // Same generic 404 for not-found AND wrong email to prevent enumeration

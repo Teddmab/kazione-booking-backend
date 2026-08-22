@@ -4,6 +4,12 @@ import { assertEquals } from "std/assert"
 const BASE = "http://127.0.0.1:54321/functions/v1"
 const ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9.CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0"
 const OWNER_TOKEN = Deno.env.get("TEST_OWNER_TOKEN") || ""
+// Seed fixture (supabase/seed.sql) — Fatima K., an active staff profile on
+// Afrotouch Tallinn. Hardcoded (deterministic seed data, not a secret) so
+// the magic-link audit test below actually runs in CI instead of silently
+// skipping behind an unset env var (S74).
+const TEST_STAFF_ID = "d0000000-0000-4000-8000-000000000001"
+const TEST_BUSINESS_ID = "b0000000-0000-4000-8000-000000000001"
 
 function call(method: string, token?: string, body?: unknown, params?: Record<string, string>) {
   const headers: Record<string, string> = { "Content-Type": "application/json", "apikey": ANON_KEY }
@@ -174,4 +180,71 @@ Deno.test("staff: PATCH assign-services invalid service_ids → 400", async () =
   // 400 (invalid UUIDs) or 404 (staff not found under this business)
   if (![400, 404].includes(res.status)) throw new Error(`Expected 400 or 404, got ${res.status}`)
   await res.body?.cancel()
+})
+
+// ── GET /staff?action=magic-link — S57 finding 6: audit trail + staff notification ──
+
+Deno.test("staff: GET magic-link without auth → 401 or 403", async () => {
+  const res = await call("GET", undefined, undefined, { action: "magic-link", staff_profile_id: "00000000-0000-0000-0000-000000000001" })
+  if (![401, 403].includes(res.status)) throw new Error(`Expected 401 or 403, got ${res.status}`)
+  await res.body?.cancel()
+})
+
+Deno.test("staff: GET magic-link missing staff_profile_id → 400", async () => {
+  if (!OWNER_TOKEN) return
+  const res = await call("GET", OWNER_TOKEN, undefined, { action: "magic-link" })
+  assertEquals(res.status, 400)
+  await res.body?.cancel()
+})
+
+Deno.test("staff: GET magic-link — valid request writes a staff_action_log row and returns a link", async () => {
+  if (!OWNER_TOKEN) return
+
+  // Diagnostic: confirm the seed fixture itself exists and is active before
+  // blaming the handler for a 404 — makes a future failure here
+  // self-explanatory instead of an opaque status mismatch.
+  const restBase = BASE.replace("/functions/v1", "/rest/v1")
+  const seedCheckRes = await fetch(
+    `${restBase}/staff_profiles?id=eq.${TEST_STAFF_ID}&select=id,business_id,is_active,display_name`,
+    { headers: { apikey: ANON_KEY, Authorization: `Bearer ${OWNER_TOKEN}` } },
+  )
+  const seedRows = await seedCheckRes.json()
+  if (!Array.isArray(seedRows) || seedRows.length === 0) {
+    throw new Error(
+      `Seed fixture missing: no staff_profiles row with id=${TEST_STAFF_ID}. ` +
+      `(PostgREST status ${seedCheckRes.status}, body: ${JSON.stringify(seedRows)}) ` +
+      `Expected this to come from migration 014_seed_data.sql ("Fatima K."). ` +
+      `If this fires, the fixture itself needs investigating — not the magic-link handler.`,
+    )
+  }
+
+  const res = await call("GET", OWNER_TOKEN, undefined, {
+    action: "magic-link",
+    staff_profile_id: TEST_STAFF_ID,
+    business_id: TEST_BUSINESS_ID,
+  })
+  if (res.status !== 200) {
+    const errBody = await res.json().catch(() => null)
+    throw new Error(
+      `Expected 200, got ${res.status}. Seed row found: ${JSON.stringify(seedRows[0])}. ` +
+      `Response body: ${JSON.stringify(errBody)}`,
+    )
+  }
+  const body = await res.json()
+  // Set via seed.sql (S74) — Fatima K.'s profile has no linked
+  // business_member_id, so this comes from her invited_email fallback.
+  assertEquals(body.email, "fatima.k@test.kazione.local")
+
+  // Verify the audit trail directly via PostgREST (no dedicated read endpoint
+  // exists for staff_action_log yet — RLS lets an owner/manager read their
+  // own business's rows). Reuses restBase from the diagnostic check above.
+  const logRes = await fetch(
+    `${restBase}/staff_action_log?staff_profile_id=eq.${TEST_STAFF_ID}&action=eq.STAFF_MAGIC_LINK_ISSUED&order=created_at.desc&limit=1`,
+    { headers: { apikey: ANON_KEY, Authorization: `Bearer ${OWNER_TOKEN}` } },
+  )
+  assertEquals(logRes.status, 200)
+  const rows = await logRes.json()
+  if (!Array.isArray(rows) || rows.length === 0) {
+    throw new Error("Expected a STAFF_MAGIC_LINK_ISSUED row in staff_action_log for this staff_profile_id")
+  }
 })

@@ -290,3 +290,45 @@ BEGIN
 
   RAISE NOTICE 'Seed appointments + clients inserted for Afrotouch Tallinn.';
 END $$;
+
+-- ── Foreign test business + client (S74) ──────────────────────────────────────
+-- Exists purely so cross-business test cases (clients.test.ts) have a REAL,
+-- distinct business/client pair to assert against, instead of skipping when
+-- no such fixture is available. Deliberately minimal — no settings, services,
+-- or staff, since those tests never exercise this business's own operations.
+
+DO $$
+DECLARE
+  v_foreign_biz_id uuid := 'b0000000-0000-4000-8000-000000000002';
+  v_foreign_cl_id  uuid := 'c2000000-0000-4000-8000-000000000001';
+BEGIN
+  IF EXISTS (SELECT 1 FROM businesses WHERE id = v_foreign_biz_id) THEN
+    RAISE NOTICE 'Foreign test business already exists — skipping.';
+    RETURN;
+  END IF;
+
+  INSERT INTO businesses (id, name, slug, industry, timezone, locale, currency_code)
+  VALUES (v_foreign_biz_id, 'Foreign Test Salon', 'foreign-test-salon', 'afro_salon',
+          'Europe/Tallinn', 'en', 'EUR')
+  ON CONFLICT DO NOTHING;
+
+  INSERT INTO clients (id, business_id, first_name, last_name, email, phone, source)
+  VALUES (v_foreign_cl_id, v_foreign_biz_id, 'Foreign', 'Client',
+          'foreign.client@email.com', '+372 5111 9999', 'manual')
+  ON CONFLICT DO NOTHING;
+
+  RAISE NOTICE 'Foreign test business + client seeded (S74 cross-business fixtures).';
+END $$;
+
+-- ── Give a seeded staff profile a resolvable email (S74) ──────────────────────
+-- Fatima K.'s profile (migration 014_seed_data.sql) has no linked
+-- business_member_id and no invited_email — fine for display/booking
+-- purposes (she's never meant to log in), but staff?action=magic-link
+-- (S57) needs SOME resolvable email to send a sign-in link to. Confirmed
+-- via CI (S74) that this — not a missing row — was why that test 404'd:
+-- the profile exists and is active, it just had nowhere to send a link.
+UPDATE staff_profiles
+SET invited_email = 'fatima.k@test.kazione.local'
+WHERE id = 'd0000000-0000-4000-8000-000000000001'
+  AND business_member_id IS NULL
+  AND invited_email IS NULL;

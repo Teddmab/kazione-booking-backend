@@ -240,14 +240,41 @@ Deno.serve(withLogging("clients", async (req: Request) => {
       const ctx = await requireOwnerOrManagerCtx(req, (existing as Record<string, unknown>).business_id as string);
       if (ctx instanceof Response) return ctx;
 
+      // Explicit field allowlist — never let the request body write
+      // business_id, user_id, id, created_at, or gdpr_consent (that has its
+      // own dedicated flow in the gdpr function). Mirrors services/index.ts's
+      // updatePayload pattern.
+      const updatePayload: Record<string, unknown> = {};
+      if (body.first_name !== undefined) updatePayload.first_name = String(body.first_name).trim();
+      if (body.last_name !== undefined) updatePayload.last_name = String(body.last_name).trim();
+      if (body.email !== undefined) updatePayload.email = body.email === null ? null : String(body.email).trim().toLowerCase();
+      if (body.phone !== undefined) updatePayload.phone = body.phone === null ? null : String(body.phone).trim();
+      if (body.avatar_url !== undefined) updatePayload.avatar_url = body.avatar_url;
+      if (body.date_of_birth !== undefined) updatePayload.date_of_birth = body.date_of_birth;
+      if (body.notes !== undefined) updatePayload.notes = body.notes;
+      if (body.tags !== undefined) updatePayload.tags = body.tags;
+      if (body.preferred_staff_id !== undefined) updatePayload.preferred_staff_id = body.preferred_staff_id;
+      if (body.preferred_locale !== undefined) updatePayload.preferred_locale = body.preferred_locale;
+      if (body.marketing_opt_in !== undefined) updatePayload.marketing_opt_in = Boolean(body.marketing_opt_in);
+
+      if (Object.keys(updatePayload).length === 0) {
+        return badRequest("No editable fields provided");
+      }
+
+      // Scope the write to the caller's verified business — a client row
+      // can never be moved to a different business via this endpoint, even
+      // if a foreign business_id is present in the request body above.
       const { data: client, error } = await supabaseAdmin
         .from("clients")
-        .update(body)
+        .update(updatePayload)
         .eq("id", id)
+        .eq("business_id", ctx.businessId)
         .select("*")
         .single();
 
-      if (error) return serverError(error.message);
+      if (error) {
+        return error.code === "PGRST116" ? notFound("Client not found") : serverError(error.message);
+      }
       return jsonCors(req, client);
     }
 

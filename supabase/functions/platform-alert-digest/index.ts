@@ -98,6 +98,99 @@ async function recordHealthResults(results: { name: string; status: number | "un
 }
 
 // ---------------------------------------------------------------------------
+// Email body — grouped by function, then by (status, message) so a burst of
+// identical failures reads as one line with a count, but a function
+// throwing several distinct errors shows each one, not just the first
+// sample seen. This is the actual diagnostic detail an admin needs to fix
+// something, not just a count.
+// ---------------------------------------------------------------------------
+
+interface ErrorRow {
+  function_name: string;
+  method: string;
+  status_code: number;
+  message: string | null;
+  created_at: string;
+}
+
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function buildAlertEmailHtml(
+  errorRows: ErrorRow[],
+  unhealthy: { name: string; status: number | "unreachable" }[],
+): string {
+  const dashboardUrl = Deno.env.get("ADMIN_ALLOWED_ORIGIN") ?? "https://kazione-booking-admin.pages.dev";
+
+  const healthSection = unhealthy.length === 0 ? "" : `
+    <h3 style="margin-bottom:6px">Unreachable endpoints</h3>
+    <ul style="margin-top:0">
+      ${unhealthy.map((h) =>
+        `<li><strong>${escapeHtml(h.name)}</strong> — ${h.status === "unreachable" ? "unreachable (timeout or network error)" : `HTTP ${h.status}`}</li>`
+      ).join("")}
+    </ul>
+  `;
+
+  let errorSection = "";
+  if (errorRows.length > 0) {
+    // function_name → (status_code|message) → { count, method, lastSeen }
+    const byFunction = new Map<string, Map<string, { count: number; status: number; method: string; message: string | null; lastSeen: string }>>();
+    for (const row of errorRows) {
+      const fnMap = byFunction.get(row.function_name) ?? new Map();
+      const variantKey = `${row.status_code}|${row.message ?? ""}`;
+      const variant = fnMap.get(variantKey) ?? { count: 0, status: row.status_code, method: row.method, message: row.message, lastSeen: row.created_at };
+      variant.count += 1;
+      if (row.created_at > variant.lastSeen) variant.lastSeen = row.created_at;
+      fnMap.set(variantKey, variant);
+      byFunction.set(row.function_name, fnMap);
+    }
+
+    const functionBlocks = Array.from(byFunction.entries()).map(([fn, variants]) => {
+      const total = Array.from(variants.values()).reduce((s, v) => s + v.count, 0);
+      const variantLines = Array.from(variants.values())
+        .sort((a, b) => b.count - a.count)
+        .map((v) => `
+          <div style="margin:4px 0 4px 12px;padding:8px 10px;background:#FDF3F0;border-left:3px solid #E84E26;border-radius:4px">
+            <div style="font-size:12px;color:#6B4C42">
+              <strong style="color:#C43D1A">${v.status}</strong> · ${escapeHtml(v.method)} · ${v.count}× · last ${new Date(v.lastSeen).toLocaleString()}
+            </div>
+            <div style="font-family:ui-monospace,monospace;font-size:12px;color:#1A0F0A;margin-top:3px;word-break:break-word">
+              ${v.message ? escapeHtml(v.message) : "<em>(no message captured)</em>"}
+            </div>
+          </div>
+        `).join("");
+
+      return `
+        <div style="margin-bottom:10px">
+          <p style="margin:0 0 2px;font-size:14px"><strong>${escapeHtml(fn)}</strong> — ${total} error${total > 1 ? "s" : ""}</p>
+          ${variantLines}
+        </div>
+      `;
+    }).join("");
+
+    errorSection = `
+      <h3 style="margin-bottom:6px">Server errors (5xx) since last check</h3>
+      ${functionBlocks}
+    `;
+  }
+
+  return `
+    <h2>KaziOne platform alert</h2>
+    ${healthSection}
+    ${errorSection}
+    <p style="margin-top:16px">
+      <a href="${dashboardUrl}/monitoring" style="color:#E84E26">View live in the admin dashboard →</a>
+    </p>
+    <p style="color:#6B4C42;font-size:12px">Sent by platform-alert-digest, runs every 15 minutes.</p>
+  `;
+}
+
+// ---------------------------------------------------------------------------
 // Handler
 // ---------------------------------------------------------------------------
 
@@ -148,39 +241,10 @@ Deno.serve(withLogging("platform-alert-digest", async (req: Request) => {
     return jsonCors(req, { errors_found: errorRows.length, unhealthy_endpoints: unhealthy.length, emailed: false, reason: "no alert_email configured" });
   }
 
-  // Group errors by function so a burst of the same failure reads as one
-  // line, not 40.
-  const byFunction = new Map<string, { count: number; statuses: Set<number>; sample: string | null }>();
-  for (const row of errorRows) {
-    const key = row.function_name;
-    const agg = byFunction.get(key) ?? { count: 0, statuses: new Set<number>(), sample: null };
-    agg.count += 1;
-    agg.statuses.add(row.status_code);
-    agg.sample ??= row.message;
-    byFunction.set(key, agg);
-  }
-
-  const errorLines = Array.from(byFunction.entries())
-    .map(([fn, agg]) =>
-      `<li><strong>${fn}</strong> — ${agg.count} error(s), status ${[...agg.statuses].join(", ")}` +
-      (agg.sample ? `<br><span style="color:#6B4C42">${agg.sample}</span>` : "") + `</li>`
-    )
-    .join("");
-
-  const healthLines = unhealthy
-    .map((h) => `<li><strong>${h.name}</strong> — ${h.status === "unreachable" ? "unreachable" : `HTTP ${h.status}`}</li>`)
-    .join("");
-
+  const html = buildAlertEmailHtml(errorRows, unhealthy);
   const subject = unhealthy.length > 0
     ? `🔴 KaziOne: ${unhealthy.length} endpoint(s) down`
     : `⚠️ KaziOne: ${errorRows.length} server error(s) in the last check`;
-
-  const html = `
-    <h2>KaziOne platform alert</h2>
-    ${unhealthy.length > 0 ? `<h3>Unreachable endpoints</h3><ul>${healthLines}</ul>` : ""}
-    ${errorRows.length > 0 ? `<h3>Server errors (5xx) since last check</h3><ul>${errorLines}</ul>` : ""}
-    <p style="color:#6B4C42;font-size:12px">Sent by platform-alert-digest, runs every 15 minutes.</p>
-  `;
 
   try {
     await sendEmail(alertEmail, subject, html);

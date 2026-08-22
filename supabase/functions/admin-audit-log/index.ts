@@ -35,7 +35,11 @@ Deno.serve(withLogging("admin-audit-log", async (req: Request) => {
     const { data, count, error } = await query;
     if (error) {
       console.error("[admin-audit-log] error:", error.message);
-      return serverError();
+      // Safe to surface the real DB error here — this endpoint is already
+      // gated behind requirePlatformAdmin, so only trusted platform admins
+      // ever see this response, and it's what platform-alert-digest reads
+      // to show real detail instead of a generic "Internal server error".
+      return serverError(error.message);
     }
 
     logAdminAction({
@@ -52,6 +56,6 @@ Deno.serve(withLogging("admin-audit-log", async (req: Request) => {
     });
   } catch (err) {
     console.error("[admin-audit-log]", err);
-    return serverError();
+    return serverError(err instanceof Error ? err.message : "Internal error");
   }
 }));

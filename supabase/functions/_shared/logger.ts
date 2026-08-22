@@ -12,6 +12,17 @@ import { recordPlatformMetric } from "./platformMetrics.ts";
  * silently 500ing (or crashing) gets surfaced as an email alert instead of
  * only showing up in Supabase logs nobody is watching in real time.
  *
+ * Most functions in this codebase catch their own errors internally
+ * (console.error + return serverError(...)) rather than throwing all the
+ * way up to this wrapper's own catch block — that's the normal, correct
+ * pattern (CLAUDE.md Rule 4's error envelope). So the *usual* path for a
+ * 5xx is the try block's `return response` line, not the catch block, and
+ * errorMessage would otherwise stay empty for exactly the errors admins
+ * most need detail on. When a response comes back with status >= 500 and
+ * no message was already captured by the catch block, its own JSON body is
+ * read for { error: { message } } — recovering whatever detail the handler
+ * already put there, without changing what any caller actually receives.
+ *
  * Every request (not just 5xx) is also rolled up into platform_metrics_hourly
  * via an atomic upsert RPC — this feeds the admin Monitoring dashboard's
  * request-volume/error-rate/latency charts.
@@ -27,9 +38,10 @@ export function withLogging(
     const start = Date.now();
     let status = 500;
     let errorMessage: string | undefined;
+    let response: Response | undefined;
 
     try {
-      const response = await handler(req);
+      response = await handler(req);
       status = response.status;
       return response;
     } catch (err) {
@@ -50,6 +62,14 @@ export function withLogging(
         }),
       );
       if (status >= 500) {
+        if (!errorMessage && response) {
+          try {
+            const body = await response.clone().json();
+            if (typeof body?.error?.message === "string") errorMessage = body.error.message;
+          } catch {
+            // Not JSON, or already consumed — nothing more to recover.
+          }
+        }
         logPlatformError(functionName, req.method, status, errorMessage);
       }
       recordPlatformMetric(functionName, status >= 500, duration_ms);

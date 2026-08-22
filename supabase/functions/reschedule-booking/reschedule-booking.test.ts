@@ -113,6 +113,51 @@ Deno.test("reschedule-booking: new slot not available → 409", async () => {
   await res.body?.cancel()
 })
 
+// S58: the "new slot not available" test above only proves the pre-check
+// (get_available_slots) catches an ALREADY-taken slot — it doesn't exercise
+// the TOCTOU gap between that check and the final write, since the target
+// slot is occupied before either request starts. This test proves the gap
+// itself is closed: two DIFFERENT bookings race to reschedule into the SAME
+// currently-free slot at the same time. Before S58 (reschedule_appointment_
+// atomic, migration 112) this could double-book, since the final .update()
+// had no lock; now exactly one must succeed.
+Deno.test("reschedule-booking: concurrent reschedule into the same free slot → exactly one 200, one 409", async () => {
+  const slots = await findAvailableSlots()
+  if (slots.length < 2) {
+    console.warn("Not enough slots for concurrent reschedule test — skipping")
+    return
+  }
+  // Two independent source bookings, both destined for the SAME target slot.
+  const bookingA = await createGuestBooking(slots[0].date, slots[0].time, slots[0].staffId)
+  // Slot 0 and slot 1 may have different staff — pin the second source
+  // booking to the SAME staff as the target slot so both requests are
+  // racing for the identical (staff, time) key the advisory lock guards.
+  const bookingB = await createGuestBooking(slots[0].date, slots[0].time, slots[1].staffId)
+
+  const [resA, resB] = await Promise.all([
+    callFn({
+      booking_reference: bookingA.bookingReference,
+      email: bookingA.email,
+      new_date: slots[1].date,
+      new_time: slots[1].time,
+      staff_profile_id: slots[1].staffId,
+    }),
+    callFn({
+      booking_reference: bookingB.bookingReference,
+      email: bookingB.email,
+      new_date: slots[1].date,
+      new_time: slots[1].time,
+      staff_profile_id: slots[1].staffId,
+    }),
+  ])
+
+  const statuses = [resA.status, resB.status].sort()
+  assertEquals(statuses[0], 200, `Expected one 200, got statuses ${JSON.stringify(statuses)}`)
+  assertEquals(statuses[1], 409, `Expected one 409, got statuses ${JSON.stringify(statuses)}`)
+  await resA.body?.cancel().catch(() => {})
+  await resB.body?.cancel().catch(() => {})
+})
+
 Deno.test("reschedule-booking: valid reschedule → 200, starts_at updated, status_log entry", async () => {
   const slots = await findAvailableSlots()
   if (slots.length < 2) {

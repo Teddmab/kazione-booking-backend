@@ -10,12 +10,14 @@
 import { assertEquals } from "std/assert"
 
 const BASE = "http://127.0.0.1:54321/functions/v1"
+const ANON_KEY =
+  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9.CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0"
 // Local dev secret from .env — safe to hardcode (dev-only secret), same
 // value used by send-reminders.test.ts.
 const CRON_SECRET = Deno.env.get("CRON_SECRET") || "270d13cee3e549b6a57996077c1185a137f5b4f2b955dc9c504d9ec017186944"
 
 function callFn(token?: string) {
-  const headers: Record<string, string> = {}
+  const headers: Record<string, string> = { apikey: ANON_KEY }
   if (token) headers["Authorization"] = `Bearer ${token}`
   return fetch(`${BASE}/send-completion-reminders`, { method: "POST", headers })
 }

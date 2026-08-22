@@ -68,6 +68,15 @@ verify_jwt = false
 verify_jwt = false
 # schedule = "0 8 * * *"   # daily 08:00 UTC — requires Supabase Pro plan (cloud only)
 
+# send-completion-reminders is also cron-triggered, authenticating via its
+# own CRON_SECRET Bearer-token check (same pattern as send-reminders above)
+# rather than gateway JWT verification. This entry was missing entirely —
+# found via S62's new test, which failed with a gateway-level 401 before
+# ever reaching the function's own auth check, since verify_jwt defaults to
+# true for any function with no entry here.
+[functions.send-completion-reminders]
+verify_jwt = false
+
 # pawapay-webhook receives signed POSTs from PawaPay's servers, not authenticated users.
 # JWT verification is disabled; signature is verified via HMAC-SHA256 in the function.
 [functions.pawapay-webhook]

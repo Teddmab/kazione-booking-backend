@@ -73,6 +73,13 @@ verify_jwt = false
 [functions.pawapay-webhook]
 verify_jwt = false
 
+# platform-alert-digest is called on a cron schedule, not by an authenticated user.
+# JWT verification is disabled; it authenticates via the CRON_SECRET Bearer token instead
+# (same pattern as send-reminders above). Schedule: every 15 minutes, see
+# .github/workflows/alert-digest.yml.
+[functions.platform-alert-digest]
+verify_jwt = false
+
 # pawapay-payment is a public endpoint called by the frontend before the user has a JWT.
 [functions.pawapay-payment]
 verify_jwt = false

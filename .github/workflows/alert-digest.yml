@@ -1,0 +1,39 @@
+name: Platform Alert Digest
+
+on:
+  schedule:
+    # Every 15 minutes — drains platform_error_log into one summary email and
+    # health-checks business-critical endpoints (create-booking, etc.). See
+    # supabase/functions/platform-alert-digest/index.ts.
+    - cron: "*/15 * * * *"
+  # Allow manual trigger for testing
+  workflow_dispatch:
+
+jobs:
+  digest:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Validate secrets
+        run: |
+          if [ -z "$CRON_SECRET" ]; then
+            echo "::error::CRON_SECRET secret is not set. Add it under Settings → Environments → production → Secrets."
+            exit 1
+          fi
+          if [ -z "$SUPABASE_PROJECT_ID" ]; then
+            echo "::error::SUPABASE_PROJECT_ID secret is not set."
+            exit 1
+          fi
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          SUPABASE_PROJECT_ID: ${{ secrets.SUPABASE_PROJECT_ID }}
+
+      - name: Trigger platform-alert-digest edge function
+        run: |
+          curl --fail-with-body -X POST \
+            "https://${SUPABASE_PROJECT_ID}.supabase.co/functions/v1/platform-alert-digest" \
+            -H "Authorization: Bearer ${CRON_SECRET}" \
+            -H "Content-Type: application/json"
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          SUPABASE_PROJECT_ID: ${{ secrets.SUPABASE_PROJECT_ID }}

@@ -569,3 +569,17 @@ VALUES (
   60, 100.00, 0.00,
   'online', 'KZB-COMMTEST1'
 ) ON CONFLICT DO NOTHING;
+
+-- ── Test platform_error_log row, unnotified (platform alerting) ────────────
+-- Fixed id so platform-alert-digest.test.ts can assert THIS row transitions
+-- notified_at: null → non-null after invoking the digest, without depending
+-- on the table's total row count (which could include real rows from a
+-- genuine bug elsewhere in the suite). No RLS INSERT policy exists on
+-- platform_error_log for any non-service-role caller (writes only ever come
+-- from withLogging via supabaseAdmin), so this has to be a direct seed
+-- insert rather than something a test could create over the API.
+INSERT INTO platform_error_log (id, function_name, method, status_code, message)
+VALUES (
+  'a0000000-0000-4000-8000-000000000001',
+  'seed-test-fixture', 'GET', 500, 'Synthetic error for platform-alert-digest tests'
+) ON CONFLICT DO NOTHING;

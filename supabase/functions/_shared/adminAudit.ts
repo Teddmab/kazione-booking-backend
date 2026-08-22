@@ -20,7 +20,8 @@ export type AdminAction =
   | "REGION_DISABLED"
   | "REVIEWS_LISTED"
   | "REVIEW_HIDDEN"
-  | "REVIEW_UNHIDDEN";
+  | "REVIEW_UNHIDDEN"
+  | "ALERT_SETTINGS_UPDATED";
 
 export interface AuditEntry {
   adminId: string;

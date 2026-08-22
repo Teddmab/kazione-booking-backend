@@ -547,7 +547,7 @@ VALUES (
 INSERT INTO services (id, business_id, name, duration_minutes, price, currency_code,
                       is_active, is_public, staff_commission_type, staff_commission_value)
 VALUES (
-  'c0000000-0000-4000-8000-000000000006',
+  'c0000000-0000-4000-8000-000000000007',
   'b0000000-0000-4000-8000-000000000001',
   'Commission Test Service', 60, 100.00, 'EUR', true, false,
   'percentage', 25.00
@@ -562,7 +562,7 @@ VALUES (
   'b0000000-0000-4000-8000-000000000001',
   'c1000000-0000-4000-8000-000000000001',
   'd0000000-0000-4000-8000-000000000001',
-  'c0000000-0000-4000-8000-000000000006',
+  'c0000000-0000-4000-8000-000000000007',
   'confirmed',
   '2026-12-01T10:00:00Z',
   '2026-12-01T11:00:00Z',

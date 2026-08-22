@@ -405,6 +405,14 @@ ON CONFLICT DO NOTHING;
 -- 086 — PostgREST 500s with "more than one relationship was found") shipped
 -- undetected. Fixed id + a real assigned staff member so a hardcoded test
 -- can exercise that exact embed instead of an env-gated skip.
+--
+-- 2026-11-02 is deliberately outside every other test file's date range
+-- (create-booking: 2026-06-08 + 2026-10-12 Kampala; reschedule-booking:
+-- 2026-09; appointments.test.ts: 2026-10-05..08) — this is a direct SQL
+-- INSERT, not a booking-flow call, but the conflict-lock RPCs those other
+-- tests exercise still check against ANY existing row for the same staff,
+-- so a colliding time/staff pair (even converted through S59's now-correct
+-- Europe/Tallinn UTC offset) would spuriously block a real test elsewhere.
 INSERT INTO appointments
   (id, business_id, client_id, staff_profile_id, service_id, status,
    starts_at, ends_at, duration_minutes, price, deposit_amount,
@@ -416,8 +424,8 @@ VALUES (
   'd0000000-0000-4000-8000-000000000001',
   'c0000000-0000-4000-8000-000000000001',
   'confirmed',
-  '2026-10-05T10:00:00Z',
-  '2026-10-05T13:00:00Z',
+  '2026-11-02T10:00:00Z',
+  '2026-11-02T13:00:00Z',
   180, 120.00, 30.00,
   'online', 'KZB-TESTGB1'
 ) ON CONFLICT DO NOTHING;

@@ -18,6 +18,10 @@ import {
   sendEmail,
 } from "../_shared/resend.ts";
 import { generateIcs, icsToBase64, googleCalendarUrl } from "../_shared/ics.ts";
+import { localWallClockToUtcIso, utcIsoToLocalParts } from "../_shared/timezone.ts";
+
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const TIME_RE = /^\d{2}:\d{2}$/;
 
 const APPT_SELECT = `
   *,
@@ -404,23 +408,41 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
       if (refErr) return serverError(refErr.message);
       const bookingReference = refData as string;
 
-      const startsAt = body.starts_at as string;
+      // date+time are the business's local wall-clock (matching create-booking's
+      // contract — S59) rather than a pre-combined starts_at string, which had
+      // no way to express "this is local, convert me" and only worked because
+      // Deno/Postgres default to UTC.
+      const dateStr = body.date as string | undefined;
+      const timeStr = body.time as string | undefined;
+      if (!dateStr || !DATE_RE.test(dateStr)) return badRequest("date is required (YYYY-MM-DD)");
+      if (!timeStr || !TIME_RE.test(timeStr)) return badRequest("time is required (HH:MM)");
       const durationMinutes = body.duration_minutes as number;
-      const endsAt = new Date(
-        new Date(startsAt).getTime() + durationMinutes * 60_000,
-      ).toISOString();
 
       // Buffer minutes for the target service — needed by
       // check_and_reserve_slot (called inside create_manual_appointment_atomic)
       // to compute the same overlap window create-booking's online path uses.
-      const { data: svcForBuffer, error: svcBufferErr } = await supabaseAdmin
-        .from("services")
-        .select("buffer_minutes")
-        .eq("id", body.service_id as string)
-        .eq("business_id", ctx.businessId)
-        .maybeSingle();
-      if (svcBufferErr) return serverError(svcBufferErr.message);
-      if (!svcForBuffer) return badRequest("service_id does not belong to this business");
+      const [svcBufferResult, bizTzResult] = await Promise.all([
+        supabaseAdmin
+          .from("services")
+          .select("buffer_minutes")
+          .eq("id", body.service_id as string)
+          .eq("business_id", ctx.businessId)
+          .maybeSingle(),
+        supabaseAdmin
+          .from("businesses")
+          .select("timezone")
+          .eq("id", ctx.businessId)
+          .maybeSingle(),
+      ]);
+      if (svcBufferResult.error) return serverError(svcBufferResult.error.message);
+      if (!svcBufferResult.data) return badRequest("service_id does not belong to this business");
+      if (bizTzResult.error) return serverError(bizTzResult.error.message);
+      const svcForBuffer = svcBufferResult.data;
+
+      const startsAt = localWallClockToUtcIso(dateStr, timeStr, bizTzResult.data?.timezone ?? "UTC");
+      const endsAt = new Date(
+        new Date(startsAt).getTime() + durationMinutes * 60_000,
+      ).toISOString();
 
       // Atomic: advisory-lock + buffer-aware conflict check + insert, all in
       // one transaction (S58) — a raw .insert() here would let the owner
@@ -490,16 +512,17 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
       {
         const [notifSettingsRes, notifBizRes] = await Promise.all([
           supabaseAdmin.from("business_settings").select("booking_notification_email").eq("business_id", ctx.businessId).maybeSingle(),
-          supabaseAdmin.from("businesses").select("name, logo_url, currency_code").eq("id", ctx.businessId).single(),
+          supabaseAdmin.from("businesses").select("name, logo_url, currency_code, timezone").eq("id", ctx.businessId).single(),
         ]);
         const biz = notifBizRes.data;
         const appt = appointment as Record<string, unknown>;
         const clientRow = appt.client as Record<string, unknown>;
         const serviceRow = appt.service as Record<string, unknown>;
         const staffRow = appt.staff as Record<string, unknown> | null;
-        const d = new Date(startsAt.slice(0, 10) + "T00:00:00Z");
+        const localParts = utcIsoToLocalParts(startsAt, biz?.timezone ?? "UTC");
+        const d = new Date(localParts.date + "T00:00:00Z");
         const formattedDate = d.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric", timeZone: "UTC" });
-        const formattedTime = startsAt.slice(11, 16);
+        const formattedTime = localParts.time;
         const currencyCode = biz?.currency_code ?? "EUR";
         const priceDisplay = `${currencyCode === "EUR" ? "€" : currencyCode} ${(body.price as number).toFixed(2)}`;
         const appUrl = Deno.env.get("APP_URL") ?? "https://kazionebooking.com";
@@ -659,8 +682,9 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
             const service = apptRow.service as Record<string, string> | null;
             const staffEmail = await fetchStaffEmail(staffProfileId);
             if (!staffEmail) return;
-            const { data: bizRow } = await supabaseAdmin.from("businesses").select("name, logo_url").eq("id", apptRow.business_id as string).single();
+            const { data: bizRow } = await supabaseAdmin.from("businesses").select("name, logo_url, timezone").eq("id", apptRow.business_id as string).single();
             const biz = bizRow as Record<string, unknown> | null;
+            const bizTz = (biz?.timezone as string | null) ?? "UTC";
             const startsAtDate = new Date(apptRow.starts_at as string);
             const { subject, html } = staffAppointmentOfferEmail({
               staffName: (apptRow.staff as Record<string, string> | null)?.display_name ?? "Team member",
@@ -668,8 +692,8 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
               salonLogoUrl: biz?.logo_url as string | null ?? null,
               clientName: client ? `${client.first_name} ${client.last_name}` : "Client",
               serviceName: service?.name ?? "Service",
-              date: startsAtDate.toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long", year: "numeric", timeZone: "UTC" }),
-              time: startsAtDate.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: "UTC" }),
+              date: startsAtDate.toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long", year: "numeric", timeZone: bizTz }),
+              time: startsAtDate.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: bizTz }),
               reference: apptRow.booking_reference as string,
               dashboardUrl: `${Deno.env.get("APP_URL") ?? "https://kazionebooking.com"}/staff`,
             });
@@ -850,8 +874,9 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
           const apptRow = updated as Record<string, unknown>;
           const ownerEmail = await fetchOwnerEmail(ex.business_id);
           if (!ownerEmail) return;
-          const { data: bizRow } = await supabaseAdmin.from("businesses").select("name, logo_url").eq("id", ex.business_id).single();
+          const { data: bizRow } = await supabaseAdmin.from("businesses").select("name, logo_url, timezone").eq("id", ex.business_id).single();
           const biz = bizRow as Record<string, unknown> | null;
+          const bizTz = (biz?.timezone as string | null) ?? "UTC";
           const client = apptRow.client as Record<string, string> | null;
           const service = apptRow.service as Record<string, string> | null;
           const staffDisplayName = (apptRow.staff as Record<string, string> | null)?.display_name ?? "Staff";
@@ -869,8 +894,8 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
               salonLogoUrl: biz?.logo_url as string | null ?? null,
               serviceName: service?.name ?? "Service",
               staffName: `${staffDisplayName} (${verb})`,
-              date: startsAtDate.toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long", year: "numeric", timeZone: "UTC" }),
-              time: startsAtDate.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: "UTC" }),
+              date: startsAtDate.toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long", year: "numeric", timeZone: bizTz }),
+              time: startsAtDate.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: bizTz }),
               reference: apptRow.booking_reference as string,
               price: `€${Number(apptRow.price ?? 0).toFixed(2)}`,
               manageUrl: `${appUrl}/owner/appointments`,
@@ -886,8 +911,12 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
     if (method === "PATCH" && action === "reschedule") {
       if (!id) return badRequest("id is required");
       const body = await req.json() as Record<string, unknown>;
-      const newStartsAt = body.starts_at as string | undefined;
-      if (!newStartsAt) return badRequest("starts_at is required");
+      // date+time are the business's local wall-clock (matching create-booking's
+      // contract — S59), not a pre-combined starts_at string.
+      const dateStr = body.date as string | undefined;
+      const timeStr = body.time as string | undefined;
+      if (!dateStr || !DATE_RE.test(dateStr)) return badRequest("date is required (YYYY-MM-DD)");
+      if (!timeStr || !TIME_RE.test(timeStr)) return badRequest("time is required (HH:MM)");
 
       // Fetch existing appointment — simple select, no embedded joins
       const { data: existing, error: fetchErr } = await supabaseAdmin
@@ -901,10 +930,17 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
       const ctx = await requireOwnerOrManagerCtx(req, (existing as Record<string, unknown>).business_id as string);
       if (ctx instanceof Response) return ctx;
 
+      const { data: bizRow, error: bizErr } = await supabaseAdmin
+        .from("businesses")
+        .select("timezone")
+        .eq("id", ctx.businessId)
+        .maybeSingle();
+      if (bizErr) return serverError(bizErr.message);
+
       const ex = existing as Record<string, unknown>;
       const durationMs = (ex.duration_minutes as number) * 60_000;
+      const newStartsAt = localWallClockToUtcIso(dateStr, timeStr, bizRow?.timezone ?? "UTC");
       const startsAt = new Date(newStartsAt);
-      if (isNaN(startsAt.getTime())) return badRequest("starts_at is not a valid ISO date");
       const endsAt = new Date(startsAt.getTime() + durationMs);
 
       const { error: updateErr } = await supabaseAdmin
@@ -935,7 +971,7 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
       try {
         const { data: bizRow } = await supabaseAdmin
           .from("businesses")
-          .select("name, logo_url")
+          .select("name, logo_url, timezone")
           .eq("id", ex.business_id as string)
           .single();
 
@@ -945,6 +981,7 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
         ]);
 
         const biz = bizRow as Record<string, unknown> | null;
+        const bizTz = (biz?.timezone as string | null) ?? "UTC";
         const updatedRecord = updated as Record<string, unknown>;
         const client = updatedRecord.client as Record<string, string>;
         const service = updatedRecord.service as Record<string, string>;
@@ -953,8 +990,8 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
         const salonName = (biz?.name as string) ?? "KaziOne";
         const clientName = client ? `${client.first_name} ${client.last_name}` : "Client";
         const serviceName = service?.name ?? "Service";
-        const formattedDate = startsAt.toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long", year: "numeric", timeZone: "UTC" });
-        const formattedTime = startsAt.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: "UTC" });
+        const formattedDate = startsAt.toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long", year: "numeric", timeZone: bizTz });
+        const formattedTime = startsAt.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: bizTz });
         const ref = ex.booking_reference as string;
 
         // ICS for reschedule (same UID — calendar clients update existing event)
@@ -1164,7 +1201,7 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
 
             const { data: bizRow } = await supabaseAdmin
               .from("businesses")
-              .select("name, logo_url")
+              .select("name, logo_url, timezone")
               .eq("id", businessId)
               .single();
 
@@ -1174,6 +1211,7 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
             ]);
 
             const biz = bizRow as Record<string, unknown> | null;
+            const bizTz = (biz?.timezone as string | null) ?? "UTC";
             const salonName = (biz?.name as string) ?? "KaziOne";
             const clientName = client ? `${client.first_name} ${client.last_name}` : "Client";
             const clientEmail = client?.email ?? null;
@@ -1181,8 +1219,8 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
             const staffDisplayName = (apptRow.staff as Record<string, string> | null)?.display_name ?? "your stylist";
             const startsAtStr = apptRow.starts_at as string;
             const startsAtDate = new Date(startsAtStr);
-            const formattedDate = startsAtDate.toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long", year: "numeric", timeZone: "UTC" });
-            const formattedTime = startsAtDate.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: "UTC" });
+            const formattedDate = startsAtDate.toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long", year: "numeric", timeZone: bizTz });
+            const formattedTime = startsAtDate.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: bizTz });
             const ref = apptRow.booking_reference as string;
 
             // CANCEL ICS removes the event from calendars that already have it
@@ -1291,8 +1329,9 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
             const apptRow = data as Record<string, unknown>;
             const ownerEmail = await fetchOwnerEmail(businessId);
             if (!ownerEmail) return;
-            const { data: bizRow } = await supabaseAdmin.from("businesses").select("name, logo_url").eq("id", businessId).single();
+            const { data: bizRow } = await supabaseAdmin.from("businesses").select("name, logo_url, timezone").eq("id", businessId).single();
             const biz = bizRow as Record<string, unknown> | null;
+            const bizTz = (biz?.timezone as string | null) ?? "UTC";
             const client = apptRow.client as Record<string, string> | null;
             const service = apptRow.service as Record<string, string> | null;
             const staffDisplayName = (apptRow.staff as Record<string, string> | null)?.display_name ?? "Staff";
@@ -1304,8 +1343,8 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
               staffName: staffDisplayName,
               clientName: client ? `${client.first_name} ${client.last_name}` : "Client",
               serviceName: service?.name ?? "Service",
-              date: startsAtDate.toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long", year: "numeric", timeZone: "UTC" }),
-              time: startsAtDate.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: "UTC" }),
+              date: startsAtDate.toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long", year: "numeric", timeZone: bizTz }),
+              time: startsAtDate.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: bizTz }),
               reference: apptRow.booking_reference as string,
               paymentMethod: submittedMethod,
               dashboardUrl: `${appUrl}/owner/appointments`,
@@ -1393,8 +1432,9 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
               const staffEmail = await fetchStaffEmail(staffProfileIdForComplete);
               if (!staffEmail) return;
               const apptRow = data as Record<string, unknown>;
-              const { data: bizRow } = await supabaseAdmin.from("businesses").select("name, logo_url").eq("id", existingRow.business_id).single();
+              const { data: bizRow } = await supabaseAdmin.from("businesses").select("name, logo_url, timezone").eq("id", existingRow.business_id).single();
               const biz = bizRow as Record<string, unknown> | null;
+              const bizTz = (biz?.timezone as string | null) ?? "UTC";
               const client = apptRow.client as Record<string, string> | null;
               const service = apptRow.service as Record<string, string> | null;
               const staffDisplayName = (apptRow.staff as Record<string, string> | null)?.display_name ?? "Team member";
@@ -1405,7 +1445,7 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
                 salonLogoUrl: biz?.logo_url as string | null ?? null,
                 clientName: client ? `${client.first_name} ${client.last_name}` : "Client",
                 serviceName: service?.name ?? "Service",
-                date: startsAtDate.toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long", year: "numeric", timeZone: "UTC" }),
+                date: startsAtDate.toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long", year: "numeric", timeZone: bizTz }),
                 reference: apptRow.booking_reference as string,
               });
               await sendEmail(staffEmail, subject, html).catch((e) => console.warn("completion confirmed staff email failed:", e));

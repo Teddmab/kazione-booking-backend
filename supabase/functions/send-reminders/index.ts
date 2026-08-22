@@ -86,7 +86,7 @@ async function sendReminders(
       client:clients!inner(email, phone, first_name, last_name, preferred_locale),
       service:services!inner(name),
       staff:staff_profiles(display_name, invited_email, business_member_id),
-      business:businesses!inner(name, storefronts(address, city))
+      business:businesses!inner(name, timezone, storefronts(address, city))
     `)
     .eq("status", "confirmed");
 
@@ -198,8 +198,10 @@ async function sendReminders(
       } | null;
       const business = appt.business as unknown as {
         name: string;
+        timezone: string | null;
         storefronts: { address: string | null; city: string | null }[] | null;
       };
+      const businessTimezone = business.timezone ?? "UTC";
 
       const startsAt = new Date(appt.starts_at);
       const dateStr = startsAt.toLocaleDateString("en-GB", {
@@ -207,10 +209,12 @@ async function sendReminders(
         year: "numeric",
         month: "long",
         day: "numeric",
+        timeZone: businessTimezone,
       });
       const timeStr = startsAt.toLocaleTimeString("en-GB", {
         hour: "2-digit",
         minute: "2-digit",
+        timeZone: businessTimezone,
       });
 
       const storefront = business.storefronts?.[0];
@@ -390,6 +394,14 @@ async function createPendingStatusTasks(
     (ownerMembers ?? []).map((m) => [m.business_id as string, m.user_id as string]),
   );
 
+  const { data: bizRows } = await supabaseAdmin
+    .from("businesses")
+    .select("id, timezone")
+    .in("id", businessIds);
+  const bizTimezoneMap = new Map<string, string>(
+    (bizRows ?? []).map((b) => [b.id as string, (b.timezone as string | null) ?? "UTC"]),
+  );
+
   // Batch-fetch staff user_ids via staff_profiles → business_members
   const allStaffIds = [
     ...new Set([
@@ -434,11 +446,12 @@ async function createPendingStatusTasks(
       const clientName = client ? `${client.first_name} ${client.last_name}`.trim() : "the client";
       const serviceName = service?.name ?? "the appointment";
       const startsAt = new Date(appt.starts_at as string);
+      const bizTz = bizTimezoneMap.get(appt.business_id as string) ?? "UTC";
       const dateStr = startsAt.toLocaleDateString("en-GB", {
-        weekday: "short", day: "numeric", month: "short", timeZone: "UTC",
+        weekday: "short", day: "numeric", month: "short", timeZone: bizTz,
       });
       const timeStr = startsAt.toLocaleTimeString("en-GB", {
-        hour: "2-digit", minute: "2-digit", timeZone: "UTC",
+        hour: "2-digit", minute: "2-digit", timeZone: bizTz,
       });
 
       const notifTitle = "Action required: appointment outcome";

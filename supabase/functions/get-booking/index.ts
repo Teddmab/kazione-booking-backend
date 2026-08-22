@@ -115,7 +115,7 @@ Deno.serve(withLogging("get-booking", async (req: Request) => {
         client:clients(first_name, last_name, email, phone),
         service:services(name),
         staff:staff_profiles(display_name, avatar_url),
-        business:businesses(name, country)
+        business:businesses(name, country, timezone)
       `)
       .eq("id", core.id)
       .single();

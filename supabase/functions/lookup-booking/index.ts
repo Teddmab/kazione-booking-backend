@@ -160,7 +160,7 @@ Deno.serve(withLogging("lookup-booking", async (req: Request) => {
 
         supabaseAdmin
           .from("businesses")
-          .select("name, slug, currency_code")
+          .select("name, slug, currency_code, timezone")
           .eq("id", appointment.business_id)
           .single(),
 

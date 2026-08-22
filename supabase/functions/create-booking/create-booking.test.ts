@@ -8,6 +8,18 @@ const BUSINESS_ID = "b0000000-0000-4000-8000-000000000001"; // from seed
 const SERVICE_ID = "c0000000-0000-4000-8000-000000000001"; // Knotless Braids from seed
 const STAFF_ID = "d0000000-0000-4000-8000-000000000001"; // Fatima K. from seed
 
+// S59: Africa/Kampala fixture (UTC+3, no DST) — proves date+time are
+// interpreted as the business's local wall-clock, not UTC.
+const SUPABASE_URL = "http://127.0.0.1:54321";
+const SERVICE_KEY =
+  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU";
+const KAMPALA_BUSINESS_ID = "b0000000-0000-4000-8000-000000000003";
+const KAMPALA_SERVICE_ID = "c0000000-0000-4000-8000-000000000006";
+// A different Monday than get-availability.test.ts's KAMPALA_MONDAY
+// (2026-10-05), so booking here can never collide with that file's
+// slots[0]==="09:00" assertion when tests run in the same CI pass.
+const KAMPALA_BOOKING_DATE = "2026-10-12";
+
 function callFn(body: unknown) {
   return fetch(`${BASE}/create-booking`, {
     method: "POST",
@@ -273,4 +285,36 @@ Deno.test("create-booking: starts_at in the past", async () => {
     throw new Error(`Expected 400 or 409 for past date, got ${res.status}`);
   }
   await res.body?.cancel();
+});
+
+Deno.test("create-booking: Africa/Kampala 09:00 local books as 06:00 UTC (S59)", async () => {
+  const res = await callFn({
+    business_id: KAMPALA_BUSINESS_ID,
+    service_id: KAMPALA_SERVICE_ID,
+    date: KAMPALA_BOOKING_DATE,
+    time: "09:00",
+    client: {
+      name: "Kampala Test Guest",
+      email: `kampala_test_${Date.now()}@example.com`,
+      phone: "555-0001",
+    },
+    payment_method: "later",
+  });
+  assertEquals(res.status, 201);
+  const body = await res.json();
+  if (!body.appointment_id) throw new Error("Expected appointment_id in response");
+
+  const dbRes = await fetch(
+    `${SUPABASE_URL}/rest/v1/appointments?id=eq.${body.appointment_id}&select=starts_at`,
+    { headers: { apikey: SERVICE_KEY, Authorization: `Bearer ${SERVICE_KEY}` } },
+  );
+  const rows = await dbRes.json();
+  if (!Array.isArray(rows) || rows.length !== 1) {
+    throw new Error(`Expected exactly one appointment row, got: ${JSON.stringify(rows)}`);
+  }
+  // 09:00 Africa/Kampala local (UTC+3, no DST) = 06:00 UTC — the concrete
+  // proof that date+time were converted through the business's IANA
+  // timezone before storage, not stored as if they were literal UTC digits.
+  const storedStartsAt = new Date(rows[0].starts_at).toISOString();
+  assertEquals(storedStartsAt, `${KAMPALA_BOOKING_DATE}T06:00:00.000Z`);
 });

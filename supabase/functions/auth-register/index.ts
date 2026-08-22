@@ -3,6 +3,7 @@ import { corsHeadersFor, handleCors } from "../_shared/cors.ts";
 import { badRequest, conflict, serverError } from "../_shared/errors.ts";
 import { withLogging } from "../_shared/logger.ts";
 import { checkRateLimit } from "../_shared/rateLimit.ts";
+import { isValidIanaTimeZone } from "../_shared/timezone.ts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -16,6 +17,7 @@ interface RegisterBody {
   businessName?: string;
   businessType?: string;
   country?: string;
+  timezone?: string;
   role: "business" | "customer";
 }
 
@@ -80,6 +82,9 @@ Deno.serve(withLogging("auth-register", async (req: Request) => {
     if (body.role === "business" && !body.businessName?.trim()) {
       return badRequest("businessName is required for business accounts");
     }
+    if (body.timezone && !isValidIanaTimeZone(body.timezone)) {
+      return badRequest("timezone must be a valid IANA timezone identifier");
+    }
 
     const email = body.email.toLowerCase().trim();
     const nameParts = body.ownerName.trim().split(" ");
@@ -123,6 +128,7 @@ Deno.serve(withLogging("auth-register", async (req: Request) => {
         p_business_slug: slug,
         p_country: body.country ?? "EE",
         p_business_type: body.businessType ?? null,
+        ...(body.timezone ? { p_timezone: body.timezone } : {}),
       });
 
       if (setupError) {

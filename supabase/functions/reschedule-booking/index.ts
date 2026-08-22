@@ -19,6 +19,7 @@ import { issueCancelToken } from "../_shared/bookingCancelToken.ts";
 import { sendSms } from "../_shared/messagebird.ts";
 import { sendWhatsApp } from "../_shared/meta-whatsapp.ts";
 import { isSlotTakenError } from "../_shared/slotConflict.ts";
+import { localWallClockToUtcIso, utcIsoToLocalParts } from "../_shared/timezone.ts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -149,11 +150,20 @@ Deno.serve(withLogging("reschedule-booking", async (req: Request) => {
     }
 
     // ── Check reschedule policy ───────────────────────────────────────────
-    const { data: settings } = await supabaseAdmin
-      .from("business_settings")
-      .select("reschedule_hours")
-      .eq("business_id", appointment.business_id)
-      .maybeSingle();
+    const [settingsResult, bizResult] = await Promise.all([
+      supabaseAdmin
+        .from("business_settings")
+        .select("reschedule_hours")
+        .eq("business_id", appointment.business_id)
+        .maybeSingle(),
+      supabaseAdmin
+        .from("businesses")
+        .select("timezone")
+        .eq("id", appointment.business_id)
+        .maybeSingle(),
+    ]);
+    const settings = settingsResult.data;
+    const businessTimezone = bizResult.data?.timezone ?? "UTC";
 
     const rescheduleHours = settings?.reschedule_hours ?? 24;
     const startsAt = new Date(appointment.starts_at);
@@ -220,7 +230,9 @@ Deno.serve(withLogging("reschedule-booking", async (req: Request) => {
     const resolvedStaffId = selectedSlot.staff_profile_id;
 
     // ── Calculate new timestamps ──────────────────────────────────────────
-    const newStartsAt = `${body.new_date}T${body.new_time}:00`;
+    // new_date/new_time are the business's local wall-clock — convert
+    // through the business's IANA timezone to get the true UTC instant.
+    const newStartsAt = localWallClockToUtcIso(body.new_date, body.new_time, businessTimezone);
     const newStartsDate = new Date(newStartsAt);
     const newEndsDate = new Date(
       newStartsDate.getTime() + appointment.duration_minutes * 60_000,
@@ -269,7 +281,7 @@ Deno.serve(withLogging("reschedule-booking", async (req: Request) => {
       old_status: oldStatus,
       new_status: "confirmed",
       changed_by: userId,
-      reason: `Rescheduled from ${startsAt.toISOString().slice(0, 16)} to ${body.new_date} ${body.new_time}`,
+      reason: `Rescheduled from ${utcIsoToLocalParts(startsAt.toISOString(), businessTimezone).date} ${utcIsoToLocalParts(startsAt.toISOString(), businessTimezone).time} to ${body.new_date} ${body.new_time}`,
     });
 
     // ── Send reschedule email ─────────────────────────────────────────────

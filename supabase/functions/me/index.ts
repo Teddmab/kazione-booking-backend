@@ -86,7 +86,7 @@ Deno.serve(withLogging("me", async (req: Request) => {
         .maybeSingle(),
       supabaseAdmin
         .from("business_members")
-        .select("id, business_id, role, businesses(name, slug, business_type, logo_url, country)")
+        .select("id, business_id, role, businesses(name, slug, business_type, logo_url, country, timezone)")
         .eq("user_id", user.id)
         .eq("is_active", true)
         .order("created_at", { ascending: true }),
@@ -97,7 +97,7 @@ Deno.serve(withLogging("me", async (req: Request) => {
       id: string;
       business_id: string;
       role: string;
-      businesses: { name: string; slug: string; business_type: string | null; logo_url: string | null; country: string | null } | null;
+      businesses: { name: string; slug: string; business_type: string | null; logo_url: string | null; country: string | null; timezone: string | null } | null;
     }>;
 
     // Fetch linked staff profiles so we can surface position + staffProfileId
@@ -131,6 +131,7 @@ Deno.serve(withLogging("me", async (req: Request) => {
         businessType: m.businesses?.business_type ?? null,
         logoUrl: m.businesses?.logo_url ?? null,
         country: m.businesses?.country ?? null,
+        timezone: m.businesses?.timezone ?? "UTC",
         role: m.role,
         staffProfileId: sp?.id ?? null,
         position: sp?.position ?? null,

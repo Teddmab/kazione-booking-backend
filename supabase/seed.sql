@@ -333,6 +333,57 @@ WHERE id = 'd0000000-0000-4000-8000-000000000001'
   AND business_member_id IS NULL
   AND invited_email IS NULL;
 
+-- ── Africa/Kampala test business (S59) ─────────────────────────────────────
+-- A second real, working business — not just a business+client stub like the
+-- Foreign Test Salon above — deliberately at Africa/Kampala (UTC+3, no DST)
+-- so a residual false-UTC bug shows as a clean 3-hour shift with no DST
+-- noise to obscure it. One active service, one active staff profile,
+-- working hours Monday 09:00-17:00 local. 2026-10-05 is a Monday (day_of_week
+-- = 1), chosen to sit outside every other test file's date range
+-- (create-booking: 2026-06-08, reschedule-booking: 2026-09, appointments:
+-- 2026-10-05 onward — shares appointments.test.ts's range deliberately,
+-- since both exercise the same booking-creation paths and won't collide on
+-- business/staff/service ids).
+DO $$
+DECLARE
+  v_kampala_biz_id  uuid := 'b0000000-0000-4000-8000-000000000003';
+  v_kampala_svc_id  uuid := 'c0000000-0000-4000-8000-000000000006';
+  v_kampala_staff_id uuid := 'd0000000-0000-4000-8000-000000000003';
+BEGIN
+  IF EXISTS (SELECT 1 FROM businesses WHERE id = v_kampala_biz_id) THEN
+    RAISE NOTICE 'Kampala test business already exists — skipping.';
+    RETURN;
+  END IF;
+
+  INSERT INTO businesses (id, name, slug, industry, timezone, locale, currency_code)
+  VALUES (v_kampala_biz_id, 'Kampala Test Salon', 'kampala-test-salon', 'afro_salon',
+          'Africa/Kampala', 'en', 'UGX')
+  ON CONFLICT DO NOTHING;
+
+  INSERT INTO business_settings (business_id, slot_duration_minutes, booking_lead_time_hours, booking_future_days)
+  VALUES (v_kampala_biz_id, 30, 2, 365)
+  ON CONFLICT DO NOTHING;
+
+  INSERT INTO services (id, business_id, name, duration_minutes, price, currency_code, is_active, is_public)
+  VALUES (v_kampala_svc_id, v_kampala_biz_id, 'Kampala Test Service', 60, 20000.00, 'UGX', true, true)
+  ON CONFLICT DO NOTHING;
+
+  INSERT INTO staff_profiles (id, business_id, display_name, is_active)
+  VALUES (v_kampala_staff_id, v_kampala_biz_id, 'Kampala Test Staff', true)
+  ON CONFLICT DO NOTHING;
+
+  INSERT INTO staff_services (staff_profile_id, service_id)
+  VALUES (v_kampala_staff_id, v_kampala_svc_id)
+  ON CONFLICT DO NOTHING;
+
+  -- Monday (day_of_week = 1), 09:00-17:00 local (Africa/Kampala).
+  INSERT INTO staff_working_hours (staff_profile_id, business_id, day_of_week, start_time, end_time, is_working)
+  VALUES (v_kampala_staff_id, v_kampala_biz_id, 1, '09:00', '17:00', true)
+  ON CONFLICT DO NOTHING;
+
+  RAISE NOTICE 'Kampala test business + service + staff + working hours seeded (S59 timezone fixtures).';
+END $$;
+
 -- ── Dual-staff test service (S58) ──────────────────────────────────────────
 -- A minimal, otherwise-unused service with requires_two_staff = true so
 -- appointments.test.ts can exercise assign-staff-2's conflict-check path.

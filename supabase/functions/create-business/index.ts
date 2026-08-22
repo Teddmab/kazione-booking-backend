@@ -3,6 +3,7 @@ import { corsHeadersFor, handleCors } from "../_shared/cors.ts";
 import { badRequest, conflict, serverError } from "../_shared/errors.ts";
 import { verifyAuth } from "../_shared/auth.ts";
 import { withLogging } from "../_shared/logger.ts";
+import { isValidIanaTimeZone } from "../_shared/timezone.ts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -10,6 +11,7 @@ import { withLogging } from "../_shared/logger.ts";
 
 interface CreateBusinessBody {
   business_name: string;
+  timezone?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -81,6 +83,10 @@ Deno.serve(withLogging("create-business", async (req: Request) => {
     if (businessName.length > 100) {
       return badRequest("business_name must be 100 characters or fewer");
     }
+    const timezone = body.timezone?.trim();
+    if (timezone && !isValidIanaTimeZone(timezone)) {
+      return badRequest("timezone must be a valid IANA timezone identifier");
+    }
 
     // ── Fetch caller's profile (need email for setup_new_business) ───────────
     const { data: userRow, error: userErr } = await supabaseAdmin
@@ -120,6 +126,7 @@ Deno.serve(withLogging("create-business", async (req: Request) => {
         p_phone: userRow.phone ?? null,
         p_business_name: businessName,
         p_business_slug: slug,
+        ...(timezone ? { p_timezone: timezone } : {}),
       },
     );
 

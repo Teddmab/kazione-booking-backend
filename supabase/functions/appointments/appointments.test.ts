@@ -25,17 +25,20 @@ function callFn(method: string, token?: string, body?: unknown, params?: Record<
 }
 
 // Manual bookings (appointments POST) are owner-authoritative — they don't
-// go through get-availability, so any future timestamp is usable directly.
-// S58's own fixed range (2026-10-05 onward), distinct from create-booking's
-// (2026-06 to 2026-08) and reschedule-booking's (2026-09) test dates, so
-// concurrent CI runs across files never collide on the same slot.
+// go through get-availability, so any future date/time is usable directly.
+// date+time are the business's local wall-clock (S59) — Afrotouch (seed
+// business) is Europe/Tallinn. S58's own fixed range (2026-10-05 onward),
+// distinct from create-booking's (2026-06 to 2026-08) and reschedule-
+// booking's (2026-09) test dates, so concurrent CI runs across files never
+// collide on the same slot.
 function manualBookingBody(overrides: Record<string, unknown> = {}) {
   return {
     business_id: BUSINESS_ID,
     client_id: CLIENT_ID,
     service_id: SERVICE_ID,
     staff_profile_id: STAFF_ID,
-    starts_at: "2026-10-05T10:00:00.000Z",
+    date: "2026-10-05",
+    time: "10:00",
     duration_minutes: 60,
     price: 50,
     payment_method: "later",
@@ -67,7 +70,8 @@ Deno.test("appointments: POST without auth", async () => {
 Deno.test("appointments: POST valid manual booking → 201", async () => {
   if (!OWNER_TOKEN) return
   const res = await callFn("POST", OWNER_TOKEN, manualBookingBody({
-    starts_at: "2026-10-05T09:00:00.000Z",
+    date: "2026-10-05",
+    time: "09:00",
     client_id: CLIENT_ID_2,
   }))
   assertEquals(res.status, 201)
@@ -77,7 +81,7 @@ Deno.test("appointments: POST valid manual booking → 201", async () => {
 
 Deno.test("appointments: POST manual booking — same staff/slot conflict → 409", async () => {
   if (!OWNER_TOKEN) return
-  const slot = manualBookingBody({ starts_at: "2026-10-05T10:00:00.000Z" })
+  const slot = manualBookingBody({ date: "2026-10-05", time: "10:00" })
 
   const res1 = await callFn("POST", OWNER_TOKEN, slot)
   assertEquals(res1.status, 201)
@@ -91,7 +95,7 @@ Deno.test("appointments: POST manual booking — same staff/slot conflict → 40
 
 Deno.test("appointments: POST manual booking — concurrent same slot → exactly one 201, one 409", async () => {
   if (!OWNER_TOKEN) return
-  const slot = manualBookingBody({ starts_at: "2026-10-05T14:00:00.000Z" })
+  const slot = manualBookingBody({ date: "2026-10-05", time: "14:00" })
 
   const [res1, res2] = await Promise.all([
     callFn("POST", OWNER_TOKEN, slot),
@@ -111,7 +115,8 @@ Deno.test("appointments: PATCH assign-staff — target staff has a conflict → 
 
   // Regina already booked at this time (staff_profile_id = STAFF_ID_2).
   const blockerRes = await callFn("POST", OWNER_TOKEN, manualBookingBody({
-    starts_at: "2026-10-06T10:00:00.000Z",
+    date: "2026-10-06",
+    time: "10:00",
     staff_profile_id: STAFF_ID_2,
   }))
   assertEquals(blockerRes.status, 201)
@@ -120,7 +125,8 @@ Deno.test("appointments: PATCH assign-staff — target staff has a conflict → 
   // A second, unrelated appointment at the SAME time, currently assigned to
   // Fatima — reassigning it to Regina should conflict with the blocker.
   const targetRes = await callFn("POST", OWNER_TOKEN, manualBookingBody({
-    starts_at: "2026-10-06T10:00:00.000Z",
+    date: "2026-10-06",
+    time: "10:00",
     staff_profile_id: STAFF_ID,
     client_id: CLIENT_ID_2,
   }))
@@ -143,7 +149,8 @@ Deno.test("appointments: PATCH assign-staff-2 — target staff has a conflict �
 
   // Regina already booked at this time.
   const blockerRes = await callFn("POST", OWNER_TOKEN, manualBookingBody({
-    starts_at: "2026-10-07T10:00:00.000Z",
+    date: "2026-10-07",
+    time: "10:00",
     staff_profile_id: STAFF_ID_2,
   }))
   assertEquals(blockerRes.status, 201)
@@ -152,7 +159,8 @@ Deno.test("appointments: PATCH assign-staff-2 — target staff has a conflict �
   // A dual-staff-service appointment at the same time, primary = Fatima —
   // assigning Regina as the secondary should conflict with the blocker.
   const targetRes = await callFn("POST", OWNER_TOKEN, manualBookingBody({
-    starts_at: "2026-10-07T10:00:00.000Z",
+    date: "2026-10-07",
+    time: "10:00",
     staff_profile_id: STAFF_ID,
     service_id: DUAL_STAFF_SERVICE_ID,
     client_id: CLIENT_ID_2,
@@ -173,7 +181,8 @@ Deno.test("appointments: PATCH assign-staff-2 — clearing the assignment never 
   if (!OWNER_TOKEN) return
 
   const targetRes = await callFn("POST", OWNER_TOKEN, manualBookingBody({
-    starts_at: "2026-10-08T10:00:00.000Z",
+    date: "2026-10-08",
+    time: "10:00",
     staff_profile_id: STAFF_ID,
     service_id: DUAL_STAFF_SERVICE_ID,
   }))

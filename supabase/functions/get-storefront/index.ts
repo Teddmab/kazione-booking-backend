@@ -312,7 +312,7 @@ Deno.serve(withLogging("get-storefront", async (req: Request) => {
       // Business
       supabaseAdmin
         .from("businesses")
-        .select("name, currency_code, business_type, country")
+        .select("name, currency_code, business_type, country, timezone")
         .eq("id", businessId)
         .single(),
 

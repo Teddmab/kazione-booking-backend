@@ -14,6 +14,7 @@ import {
 import { issueCancelToken } from "../_shared/bookingCancelToken.ts";
 import { sendSms } from "../_shared/messagebird.ts";
 import { sendWhatsApp } from "../_shared/meta-whatsapp.ts";
+import { localWallClockToUtcIso, utcIsoToLocalParts } from "../_shared/timezone.ts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -285,7 +286,7 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
         .maybeSingle(),
       supabaseAdmin
         .from("businesses")
-        .select("name, currency_code, logo_url")
+        .select("name, currency_code, logo_url, timezone")
         .eq("id", business_id)
         .single(),
     ]);
@@ -314,8 +315,10 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
     // ── STEP 4: Calculate pricing ─────────────────────────────────────────
     const basePrice = +(selectedSlot.custom_price ?? service.price);
 
-    // Check active promotions
-    const today = new Date().toISOString().slice(0, 10);
+    // Check active promotions — "today" in the business's local timezone,
+    // so a promo's valid_until doesn't expire a few hours early/late around
+    // UTC midnight for a non-UTC business.
+    const today = utcIsoToLocalParts(new Date().toISOString(), business.timezone ?? "UTC").date;
     const { data: promos, error: promoErr } = await supabaseAdmin
       .from("promotions")
       .select("discount_type, discount_value, applies_to")
@@ -566,12 +569,10 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
     const bookingReference = refData as string;
 
     // Build timestamps.
-    // Append "Z" so the literal is parsed as UTC everywhere — slot times from
-    // get_available_slots are already in UTC (the edge-runtime is UTC-only) and
-    // the frontend sends the date in local components to avoid the toISOString()
-    // UTC-shift bug. Storing as explicit UTC prevents any ambiguity in
-    // new Date() across runtimes.
-    const startsAt = `${date}T${time}:00Z`;
+    // date+time are the business's local wall-clock (get_available_slots'
+    // slot_time labels are local, not UTC — see S59) — convert through the
+    // business's IANA timezone to get the true UTC instant to store.
+    const startsAt = localWallClockToUtcIso(date, time, business.timezone ?? "UTC");
     const durationMinutes = service.duration_minutes;
     const startsDate = new Date(startsAt);
     const endsDate = new Date(startsDate.getTime() + durationMinutes * 60_000);

@@ -81,7 +81,7 @@ Deno.serve(async (req: Request) => {
     // Fetch owner email + business details
     const { data: bizData } = await supabaseAdmin
       .from("businesses")
-      .select("name, logo_url")
+      .select("name, logo_url, timezone")
       .eq("id", businessId)
       .single();
 
@@ -97,6 +97,7 @@ Deno.serve(async (req: Request) => {
     if (!ownerEmail) { skipped++; continue; }
 
     const biz = bizData as Record<string, unknown> | null;
+    const bizTz = (biz?.timezone as string | null) ?? "UTC";
     const client = row.client as Record<string, string> | null;
     const service = row.service as Record<string, string> | null;
     const staff = row.staff as Record<string, string> | null;
@@ -108,8 +109,8 @@ Deno.serve(async (req: Request) => {
       clientName: client ? `${client.first_name} ${client.last_name}` : "Client",
       serviceName: service?.name ?? "Service",
       staffName: staff?.display_name ?? null,
-      date: endsAt.toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long", year: "numeric", timeZone: "UTC" }),
-      time: endsAt.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: "UTC" }),
+      date: endsAt.toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long", year: "numeric", timeZone: bizTz }),
+      time: endsAt.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: bizTz }),
       reference: row.booking_reference as string,
       reminderNumber: reminderCount,
       dashboardUrl: `${APP_URL}/owner/appointments`,

@@ -2,6 +2,7 @@ import { supabaseAdmin } from "../_shared/supabaseAdmin.ts";
 import { corsHeadersFor, handleCors } from "../_shared/cors.ts";
 import { badRequest, serverError } from "../_shared/errors.ts";
 import { withLogging } from "../_shared/logger.ts";
+import { localDateRangeToUtcIso, localWallClockToUtcIso, utcIsoToLocalParts } from "../_shared/timezone.ts";
 
 // ---------------------------------------------------------------------------
 // Response types
@@ -125,10 +126,31 @@ Deno.serve(withLogging("get-availability", async (req: Request) => {
       return badRequest("Invalid date value.");
     }
 
-    // 2. Validate date range — must be today or future
-    const today = new Date();
-    today.setUTCHours(0, 0, 0, 0);
-    if (requestedDate < today) {
+    // Check booking_future_days + privacy flags from business_settings, and
+    // the business's IANA timezone — every date-boundary check below is
+    // relative to the business's local "today", not UTC "today" (S59).
+    const [settingsResult, businessResult] = await Promise.all([
+      supabaseAdmin
+        .from("business_settings")
+        .select("booking_future_days, hide_staff_names")
+        .eq("business_id", businessId!)
+        .maybeSingle(),
+      supabaseAdmin
+        .from("businesses")
+        .select("timezone")
+        .eq("id", businessId!)
+        .maybeSingle(),
+    ]);
+    if (settingsResult.error) throw settingsResult.error;
+    if (businessResult.error) throw businessResult.error;
+    const settings = settingsResult.data;
+    const businessTimezone = businessResult.data?.timezone ?? "UTC";
+
+    // 2. Validate date range — must be today or future, in the business's
+    // local calendar. YYYY-MM-DD strings compare correctly lexicographically,
+    // sidestepping Date-object timezone ambiguity entirely.
+    const todayLocal = utcIsoToLocalParts(new Date().toISOString(), businessTimezone).date;
+    if (dateStr! < todayLocal) {
       return jsonOk(req, {
         date: dateStr!,
         dayName: DAY_NAMES[requestedDate.getUTCDay()],
@@ -140,19 +162,12 @@ Deno.serve(withLogging("get-availability", async (req: Request) => {
       });
     }
 
-    // Check booking_future_days + privacy flags from business_settings
-    const { data: settings, error: settingsErr } = await supabaseAdmin
-      .from("business_settings")
-      .select("booking_future_days, hide_staff_names")
-      .eq("business_id", businessId!)
-      .maybeSingle();
-    if (settingsErr) throw settingsErr;
-
     const futureDays = settings?.booking_future_days ?? 60;
-    const maxDate = new Date(today);
-    maxDate.setUTCDate(maxDate.getUTCDate() + futureDays);
+    const maxDateLocal = new Date(todayLocal + "T00:00:00Z");
+    maxDateLocal.setUTCDate(maxDateLocal.getUTCDate() + futureDays);
+    const maxDateLocalStr = maxDateLocal.toISOString().slice(0, 10);
 
-    if (requestedDate > maxDate) {
+    if (dateStr! > maxDateLocalStr) {
       return jsonOk(req, {
         date: dateStr!,
         dayName: DAY_NAMES[requestedDate.getUTCDay()],
@@ -285,10 +300,8 @@ Deno.serve(withLogging("get-availability", async (req: Request) => {
         .eq("is_working", true);
       if (workingHoursErr) throw workingHoursErr;
 
-      const dayStart = `${dateStr!}T00:00:00`;
-      const nextDay = new Date(`${dateStr!}T00:00:00Z`);
-      nextDay.setUTCDate(nextDay.getUTCDate() + 1);
-      const nextDayString = nextDay.toISOString().slice(0, 19).replace("T", " ");
+      const { startUtcIso: dayStart, endUtcIsoExclusive: nextDayString } =
+        localDateRangeToUtcIso(dateStr!, businessTimezone);
       const { data: appointments, error: appointmentsErr } = await supabaseAdmin
         .from("appointments")
         .select("staff_profile_id, starts_at, ends_at, status")
@@ -306,6 +319,7 @@ Deno.serve(withLogging("get-availability", async (req: Request) => {
       slots = buildFallbackAvailability({
         dateStr: dateStr!,
         requestedDate,
+        businessTimezone,
         durationMinutes: service.duration_minutes,
         slotIntervalMinutes: 30,
         leadHours: 2,
@@ -325,8 +339,8 @@ Deno.serve(withLogging("get-availability", async (req: Request) => {
     }
 
     // Highlight reserved starts for the date so UI can show occupied times.
-    const dayStart = `${dateStr!}T00:00:00`;
-    const dayEnd = `${dateStr!}T23:59:59.999`;
+    const { startUtcIso: reservedDayStart, endUtcIsoExclusive: reservedDayEnd } =
+      localDateRangeToUtcIso(dateStr!, businessTimezone);
     let reservedSlots: string[] = [];
 
     try {
@@ -334,8 +348,8 @@ Deno.serve(withLogging("get-availability", async (req: Request) => {
         .from("appointments")
         .select("id, starts_at, status")
         .eq("business_id", businessId!)
-        .gte("starts_at", dayStart)
-        .lte("starts_at", dayEnd)
+        .gte("starts_at", reservedDayStart)
+        .lt("starts_at", reservedDayEnd)
         .not("status", "in", "(cancelled,no_show)");
 
       if (appointmentsErr) throw appointmentsErr;
@@ -377,7 +391,8 @@ Deno.serve(withLogging("get-availability", async (req: Request) => {
             payStatus === "pending"
           );
         })
-        .map((row: { starts_at: string }) => row.starts_at.slice(11, 16)))].sort((a, b) => a.localeCompare(b));
+        .map((row: { starts_at: string }) => utcIsoToLocalParts(row.starts_at, businessTimezone).time))]
+        .sort((a, b) => a.localeCompare(b));
     } catch (reservedErr) {
       console.error("reserved slots query failed:", reservedErr);
     }
@@ -426,6 +441,7 @@ Deno.serve(withLogging("get-availability", async (req: Request) => {
 export function buildFallbackAvailability(input: {
   dateStr: string;
   requestedDate: Date;
+  businessTimezone: string;
   durationMinutes: number;
   slotIntervalMinutes: number;
   leadHours: number;
@@ -437,7 +453,7 @@ export function buildFallbackAvailability(input: {
   hideStaffNames: boolean;
   requestedStaffId: string | null;
 }): AvailabilityResponse {
-  const { dateStr, serviceInfo, staffRows, workingHoursRows, appointmentRows, timeOffRows, hideStaffNames, requestedStaffId } = input;
+  const { dateStr, businessTimezone, serviceInfo, staffRows, workingHoursRows, appointmentRows, timeOffRows, hideStaffNames, requestedStaffId } = input;
   const slotMap = new Map<string, SlotStaff[]>();
   const eligibleStaff = (staffRows ?? []).filter((staff) => {
     if (requestedStaffId && staff.id !== requestedStaffId) return false;
@@ -446,8 +462,9 @@ export function buildFallbackAvailability(input: {
 
   const slotIntervalMinutes = input.slotIntervalMinutes ?? 30;
   const durationMinutes = input.durationMinutes ?? serviceInfo.durationMinutes;
-  const startOfDay = new Date(`${dateStr}T00:00:00Z`);
-  const endOfDay = new Date(`${dateStr}T23:59:59Z`);
+  const { startUtcIso, endUtcIsoExclusive } = localDateRangeToUtcIso(dateStr, businessTimezone);
+  const startOfDay = new Date(startUtcIso);
+  const endOfDay = new Date(endUtcIsoExclusive);
 
   for (const staff of eligibleStaff) {
     const hours = (workingHoursRows ?? []).find(
@@ -461,7 +478,7 @@ export function buildFallbackAvailability(input: {
 
     for (let slotStart = startMinutes; slotStart + durationMinutes <= endMinutes; slotStart += slotIntervalMinutes) {
       const slotTime = formatHHMM(slotStart);
-      const slotStartTime = new Date(`${dateStr}T${slotTime}:00Z`);
+      const slotStartTime = new Date(localWallClockToUtcIso(dateStr, slotTime, businessTimezone));
       const slotEndTime = new Date(slotStartTime.getTime() + durationMinutes * 60_000);
 
       const overlapsAppointment = (appointmentRows ?? []).some((row) => {
@@ -484,7 +501,7 @@ export function buildFallbackAvailability(input: {
       const now = new Date();
       if (slotStartTime < now) continue;
       if (slotStartTime < new Date(now.getTime() + input.leadHours * 60 * 60 * 1000)) continue;
-      if (slotStartTime < startOfDay || slotStartTime > endOfDay) continue;
+      if (slotStartTime < startOfDay || slotStartTime >= endOfDay) continue;
 
       const existing = slotMap.get(slotTime) ?? [];
       existing.push({

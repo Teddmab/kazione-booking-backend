@@ -91,6 +91,19 @@ jobs:
             --reporter=pretty \
             --ignore=supabase/functions/_shared/adminAuth.test.ts,supabase/functions/_shared/adminAudit.test.ts,supabase/functions/get-availability/get-availability.fallback.test.ts
 
+      # TEMPORARY (S59 debugging) — dump the edge-runtime container's own
+      # stdout/stderr on failure, since Deno's console.error() inside an
+      # edge function isn't piped into this GH Actions log by default.
+      # Remove once the create-booking 500 root cause is found.
+      - name: Dump edge-runtime logs (debug)
+        if: failure()
+        run: |
+          docker ps -a
+          for c in $(docker ps -a --format '{{.Names}}' | grep -i edge); do
+            echo "===== logs: $c ====="
+            docker logs "$c" 2>&1 | tail -300
+          done
+
       - name: Run admin shared unit tests
         run: |
           cd supabase/functions

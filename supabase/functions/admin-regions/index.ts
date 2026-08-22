@@ -1,6 +1,5 @@
 import { supabaseAdmin } from "../_shared/supabaseAdmin.ts";
-import { handleAdminCors, adminJson } from "../_shared/adminCors.ts";
-import { badRequest, serverError } from "../_shared/errors.ts";
+import { handleAdminCors, adminJson, adminErrors } from "../_shared/adminCors.ts";
 import { requirePlatformAdmin } from "../_shared/adminAuth.ts";
 import { logAdminAction } from "../_shared/adminAudit.ts";
 import { getCallerIp } from "../_shared/adminAuth.ts";
@@ -19,11 +18,11 @@ Deno.serve(withLogging("admin-regions", async (req: Request) => {
     try {
       body = await req.json();
     } catch {
-      return badRequest("Invalid JSON body");
+      return adminErrors.badRequest("Invalid JSON body");
     }
 
     if (!body.country_code || typeof body.is_enabled !== "boolean") {
-      return badRequest("country_code and is_enabled (boolean) are required");
+      return adminErrors.badRequest("country_code and is_enabled (boolean) are required");
     }
 
     const now = new Date().toISOString();
@@ -43,9 +42,9 @@ Deno.serve(withLogging("admin-regions", async (req: Request) => {
 
     if (error) {
       console.error("[admin-regions] patch error:", error.message);
-      return serverError();
+      return adminErrors.serverError(error.message);
     }
-    if (!data) return badRequest(`Country '${body.country_code}' not found in platform_regions`);
+    if (!data) return adminErrors.badRequest(`Country '${body.country_code}' not found in platform_regions`);
 
     logAdminAction({
       adminId: ctx.adminId,
@@ -73,8 +72,9 @@ Deno.serve(withLogging("admin-regions", async (req: Request) => {
       ]);
 
     if (regError || bizError) {
-      console.error("[admin-regions] fetch error:", regError?.message ?? bizError?.message);
-      return serverError();
+      const msg = regError?.message ?? bizError?.message ?? "Unknown error";
+      console.error("[admin-regions] fetch error:", msg);
+      return adminErrors.serverError(msg);
     }
 
     // Count businesses per country
@@ -100,6 +100,6 @@ Deno.serve(withLogging("admin-regions", async (req: Request) => {
     return adminJson({ regions: result });
   } catch (err) {
     console.error("[admin-regions]", err);
-    return serverError();
+    return adminErrors.serverError(err instanceof Error ? err.message : "Internal error");
   }
 }));

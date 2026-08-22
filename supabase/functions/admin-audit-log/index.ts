@@ -1,6 +1,5 @@
 import { supabaseAdmin } from "../_shared/supabaseAdmin.ts";
-import { handleAdminCors, adminJson } from "../_shared/adminCors.ts";
-import { serverError } from "../_shared/errors.ts";
+import { handleAdminCors, adminJson, adminErrors } from "../_shared/adminCors.ts";
 import { requirePlatformAdmin } from "../_shared/adminAuth.ts";
 import { logAdminAction } from "../_shared/adminAudit.ts";
 import { getCallerIp } from "../_shared/adminAuth.ts";
@@ -15,7 +14,7 @@ Deno.serve(withLogging("admin-audit-log", async (req: Request) => {
 
   const url = new URL(req.url);
   const page = Math.max(1, parseInt(url.searchParams.get("page") ?? "1", 10));
-  const limit = Math.min(100, Math.max(1, parseInt(url.searchParams.get("limit") ?? "25", 10)));
+  const limit = Math.min(1000, Math.max(1, parseInt(url.searchParams.get("limit") ?? "25", 10)));
   const offset = (page - 1) * limit;
   const action = url.searchParams.get("action");
 
@@ -39,7 +38,7 @@ Deno.serve(withLogging("admin-audit-log", async (req: Request) => {
       // gated behind requirePlatformAdmin, so only trusted platform admins
       // ever see this response, and it's what platform-alert-digest reads
       // to show real detail instead of a generic "Internal server error".
-      return serverError(error.message);
+      return adminErrors.serverError(error.message);
     }
 
     logAdminAction({
@@ -56,6 +55,6 @@ Deno.serve(withLogging("admin-audit-log", async (req: Request) => {
     });
   } catch (err) {
     console.error("[admin-audit-log]", err);
-    return serverError(err instanceof Error ? err.message : "Internal error");
+    return adminErrors.serverError(err instanceof Error ? err.message : "Internal error");
   }
 }));

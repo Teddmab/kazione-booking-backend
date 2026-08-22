@@ -1,6 +1,5 @@
 import { supabaseAdmin } from "../_shared/supabaseAdmin.ts";
-import { handleAdminCors, adminJson } from "../_shared/adminCors.ts";
-import { badRequest, serverError } from "../_shared/errors.ts";
+import { handleAdminCors, adminJson, adminErrors } from "../_shared/adminCors.ts";
 import { requirePlatformAdmin, getCallerIp } from "../_shared/adminAuth.ts";
 import { logAdminAction } from "../_shared/adminAudit.ts";
 import { withLogging } from "../_shared/logger.ts";
@@ -23,17 +22,17 @@ Deno.serve(withLogging("admin-reviews", async (req: Request) => {
   // ── PATCH: hide/unhide any review ─────────────────────────────────────────
   if (req.method === "PATCH") {
     const id = url.searchParams.get("id");
-    if (!id) return badRequest("id is required");
+    if (!id) return adminErrors.badRequest("id is required");
 
     let body: { is_public?: boolean; reason?: string };
     try {
       body = await req.json();
     } catch {
-      return badRequest("Invalid JSON body");
+      return adminErrors.badRequest("Invalid JSON body");
     }
 
-    if (typeof body.is_public !== "boolean") return badRequest("is_public (boolean) is required");
-    if (!body.reason || !body.reason.trim()) return badRequest("reason is required");
+    if (typeof body.is_public !== "boolean") return adminErrors.badRequest("is_public (boolean) is required");
+    if (!body.reason || !body.reason.trim()) return adminErrors.badRequest("reason is required");
 
     const { data, error } = await supabaseAdmin
       .from("reviews")
@@ -49,7 +48,7 @@ Deno.serve(withLogging("admin-reviews", async (req: Request) => {
 
     if (error) {
       console.error("[admin-reviews] update error:", error.message);
-      return serverError();
+      return adminErrors.serverError(error.message);
     }
 
     logAdminAction({
@@ -93,7 +92,7 @@ Deno.serve(withLogging("admin-reviews", async (req: Request) => {
     const { data, count, error } = await query;
     if (error) {
       console.error("[admin-reviews] list error:", error.message);
-      return serverError();
+      return adminErrors.serverError(error.message);
     }
 
     logAdminAction({
@@ -110,6 +109,6 @@ Deno.serve(withLogging("admin-reviews", async (req: Request) => {
     });
   } catch (err) {
     console.error("[admin-reviews]", err);
-    return serverError();
+    return adminErrors.serverError(err instanceof Error ? err.message : "Internal error");
   }
 }));

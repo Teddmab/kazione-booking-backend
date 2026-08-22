@@ -212,7 +212,7 @@ Deno.serve(withLogging("platform-alert-digest", async (req: Request) => {
       .select("id, function_name, method, status_code, message, created_at")
       .is("notified_at", null)
       .order("created_at", { ascending: true })
-      .limit(200),
+      .limit(2000),
     supabaseAdmin.from("platform_alert_settings").select("alert_email").eq("id", 1).maybeSingle(),
     checkHealth(),
   ]);

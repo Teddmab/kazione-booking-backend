@@ -1,6 +1,5 @@
 import { supabaseAdmin } from "../_shared/supabaseAdmin.ts";
-import { handleAdminCors, adminJson } from "../_shared/adminCors.ts";
-import { badRequest, serverError } from "../_shared/errors.ts";
+import { handleAdminCors, adminJson, adminErrors } from "../_shared/adminCors.ts";
 import { requirePlatformAdmin, getCallerIp } from "../_shared/adminAuth.ts";
 import { logAdminAction } from "../_shared/adminAudit.ts";
 import { withLogging } from "../_shared/logger.ts";
@@ -26,16 +25,16 @@ Deno.serve(withLogging("admin-alert-settings", async (req: Request) => {
     try {
       body = await req.json();
     } catch {
-      return badRequest("Invalid JSON body");
+      return adminErrors.badRequest("Invalid JSON body");
     }
 
     if (typeof body.alert_email !== "string") {
-      return badRequest("alert_email (string) is required — pass an empty string to clear it");
+      return adminErrors.badRequest("alert_email (string) is required — pass an empty string to clear it");
     }
 
     const trimmed = body.alert_email.trim();
     if (trimmed && !EMAIL_RE.test(trimmed)) {
-      return badRequest("alert_email is not a valid email address");
+      return adminErrors.badRequest("alert_email is not a valid email address");
     }
 
     const { data, error } = await supabaseAdmin
@@ -51,7 +50,7 @@ Deno.serve(withLogging("admin-alert-settings", async (req: Request) => {
 
     if (error) {
       console.error("[admin-alert-settings] update error:", error.message);
-      return serverError();
+      return adminErrors.serverError(error.message);
     }
 
     logAdminAction({
@@ -73,7 +72,7 @@ Deno.serve(withLogging("admin-alert-settings", async (req: Request) => {
 
   if (error) {
     console.error("[admin-alert-settings] fetch error:", error.message);
-    return serverError();
+    return adminErrors.serverError(error.message);
   }
 
   return adminJson(data ?? { alert_email: null, updated_at: null });

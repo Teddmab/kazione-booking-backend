@@ -1,6 +1,5 @@
 import { supabaseAdmin } from "../_shared/supabaseAdmin.ts";
 import { handleAdminCors, adminJson, adminErrors } from "../_shared/adminCors.ts";
-import { serverError } from "../_shared/errors.ts";
 import { requirePlatformAdmin } from "../_shared/adminAuth.ts";
 import { logAdminAction } from "../_shared/adminAudit.ts";
 import { getCallerIp } from "../_shared/adminAuth.ts";
@@ -34,9 +33,9 @@ Deno.serve(withLogging("admin-appointments", async (req: Request) => {
 
       if (error) {
         console.error("[admin-appointments] detail error:", error.message);
-        return serverError();
+        return adminErrors.serverError(error.message);
       }
-      if (!data) return adminErrors.unauthorized("Appointment not found");
+      if (!data) return adminErrors.notFound("Appointment not found");
 
       logAdminAction({
         adminId: ctx.adminId,
@@ -49,7 +48,7 @@ Deno.serve(withLogging("admin-appointments", async (req: Request) => {
       return adminJson(data);
     } catch (err) {
       console.error("[admin-appointments] detail", err);
-      return serverError();
+      return adminErrors.serverError(err instanceof Error ? err.message : "Internal error");
     }
   }
 
@@ -84,7 +83,7 @@ Deno.serve(withLogging("admin-appointments", async (req: Request) => {
     const { data, count, error } = await query;
     if (error) {
       console.error("[admin-appointments] error:", error.message);
-      return serverError();
+      return adminErrors.serverError(error.message);
     }
 
     logAdminAction({
@@ -96,6 +95,6 @@ Deno.serve(withLogging("admin-appointments", async (req: Request) => {
     return adminJson({ data: data ?? [], total: count ?? 0, page, limit });
   } catch (err) {
     console.error("[admin-appointments]", err);
-    return serverError();
+    return adminErrors.serverError(err instanceof Error ? err.message : "Internal error");
   }
 }));

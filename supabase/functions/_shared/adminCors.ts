@@ -49,7 +49,9 @@ function adminError(status: number, code: string, message: string): Response {
 }
 
 export const adminErrors = {
+  badRequest: (message = "Bad request") => adminError(400, "BAD_REQUEST", message),
   unauthorized: (message = "Unauthorized") => adminError(401, "UNAUTHORIZED", message),
   forbidden: (message = "Forbidden") => adminError(403, "FORBIDDEN", message),
+  notFound: (message = "Not found") => adminError(404, "NOT_FOUND", message),
   serverError: (message = "Internal server error") => adminError(500, "INTERNAL_ERROR", message),
 };

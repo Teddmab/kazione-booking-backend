@@ -794,13 +794,20 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
 
     // ── STEP 9: Handle payment method ─────────────────────────────────────
 
-    // Get staff name for emails/notifications
+    // Get staff name for emails/notifications. Must mirror the same
+    // condition apptExtra uses above: a non-referral booking with no
+    // explicit staff preference has selectedStaffId set only for the
+    // atomic-lock check (see STEP 6) and gets cleared back to null on the
+    // appointment row — the email has to reflect that same final "Any
+    // available" state, not the internal lock-time pick, or it names a
+    // staff member the appointment was never actually assigned to.
+    const finalStaffId = (!referrerStaffId && !staff_profile_id) ? null : selectedStaffId;
     let staffName = "Any available";
-    if (selectedStaffId) {
+    if (finalStaffId) {
       const { data: staffRow } = await supabaseAdmin
         .from("staff_profiles")
         .select("display_name")
-        .eq("id", selectedStaffId)
+        .eq("id", finalStaffId)
         .single();
       if (staffRow) staffName = staffRow.display_name;
     }

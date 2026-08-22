@@ -163,6 +163,76 @@ Deno.test("create-booking: valid guest booking", async () => {
   }
 });
 
+Deno.test("create-booking: explicit staff_profile_id is actually persisted on the appointment", async () => {
+  // Regression test: the marketplace booking form (SalonBooking.tsx) was
+  // built the whole booking payload WITHOUT ever including staff_profile_id
+  // — every booking silently went through the "no preference" path
+  // regardless of what staff the client actually picked in the UI, and the
+  // appointment always came out unassigned. Caught via a real bug report
+  // ("book with a specific staff... booking still not automatically
+  // assigned"), not by this test suite, because no existing test asserted
+  // on the created appointment's staff_profile_id — only on the HTTP status.
+  const slot = await findAvailableSlot();
+  if (!slot) {
+    console.warn("No available slots found — reset DB with: supabase db reset");
+    return;
+  }
+  const res = await callFn({
+    business_id: BUSINESS_ID,
+    service_id: SERVICE_ID,
+    staff_profile_id: slot.staffId,
+    date: slot.date,
+    time: slot.time,
+    client: {
+      name: "Test Guest — explicit staff",
+      email: `guest-explicit-${Date.now()}@example.com`,
+      phone: "555-0001",
+    },
+    payment_method: "later",
+  });
+  assertEquals(res.status, 201);
+  const body = await res.json();
+
+  const row = await fetch(
+    `${SUPABASE_URL}/rest/v1/appointments?id=eq.${body.appointment_id}&select=staff_profile_id`,
+    { headers: { apikey: SERVICE_KEY, Authorization: `Bearer ${SERVICE_KEY}` } },
+  );
+  const rows = await row.json();
+  if (!Array.isArray(rows) || rows.length === 0) throw new Error("Appointment row not found");
+  assertEquals(rows[0].staff_profile_id, slot.staffId);
+});
+
+Deno.test("create-booking: no staff preference → appointment created unassigned (staff_profile_id null)", async () => {
+  const slot = await findAvailableSlot();
+  if (!slot) {
+    console.warn("No available slots found — reset DB with: supabase db reset");
+    return;
+  }
+  const res = await callFn({
+    business_id: BUSINESS_ID,
+    service_id: SERVICE_ID,
+    // No staff_profile_id — client didn't request a specific staff member.
+    date: slot.date,
+    time: slot.time,
+    client: {
+      name: "Test Guest — no preference",
+      email: `guest-nopref-${Date.now()}@example.com`,
+      phone: "555-0002",
+    },
+    payment_method: "later",
+  });
+  assertEquals(res.status, 201);
+  const body = await res.json();
+
+  const row = await fetch(
+    `${SUPABASE_URL}/rest/v1/appointments?id=eq.${body.appointment_id}&select=staff_profile_id`,
+    { headers: { apikey: SERVICE_KEY, Authorization: `Bearer ${SERVICE_KEY}` } },
+  );
+  const rows = await row.json();
+  if (!Array.isArray(rows) || rows.length === 0) throw new Error("Appointment row not found");
+  assertEquals(rows[0].staff_profile_id, null);
+});
+
 Deno.test("create-booking: double booking same slot (sequential)", async () => {
   const slotData = await findAvailableSlot();
   if (!slotData) {

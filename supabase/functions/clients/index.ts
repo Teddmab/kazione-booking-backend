@@ -50,7 +50,7 @@ Deno.serve(withLogging("clients", async (req: Request) => {
           .from("appointments")
           .select(`id, starts_at, ends_at, status, booking_reference, price,
             service:services!inner(id, name, duration_minutes, price),
-            staff:staff_profiles(id, display_name, avatar_url),
+            staff:staff_profiles!staff_profile_id(id, display_name, avatar_url),
             payment:payments(status, amount, method, paid_at)`)
           .eq("client_id", id)
           .order("starts_at", { ascending: false })

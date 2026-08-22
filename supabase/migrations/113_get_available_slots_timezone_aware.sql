@@ -85,8 +85,10 @@ BEGIN
   END IF;
 
   v_earliest_time := now() + (v_lead_hours || ' hours')::interval;
-  v_day_start_utc := ((p_date::text || ' 00:00:00')::timestamp AT TIME ZONE v_business_tz);
-  v_day_end_utc   := (((p_date + 1)::text || ' 00:00:00')::timestamp AT TIME ZONE v_business_tz);
+  -- date::timestamp is midnight of that date — avoids string concat/parse
+  -- entirely (which is sensitive to the session's DateStyle setting).
+  v_day_start_utc := (p_date::timestamp AT TIME ZONE v_business_tz);
+  v_day_end_utc   := ((p_date + 1)::timestamp AT TIME ZONE v_business_tz);
 
   RETURN QUERY
   WITH eligible_staff AS (
@@ -119,9 +121,11 @@ BEGIN
            sh.eff_price,
            gs AS s_instant
       FROM staff_hours sh,
+           -- date + time = timestamp (a standard, unambiguous Postgres
+           -- operator) — avoids the string concat/cast fragility above.
            generate_series(
-             ((p_date::text || ' ' || sh.wh_start::text)::timestamp AT TIME ZONE v_business_tz),
-             ((p_date::text || ' ' || sh.wh_end::text)::timestamp AT TIME ZONE v_business_tz)
+             ((p_date + sh.wh_start) AT TIME ZONE v_business_tz),
+             ((p_date + sh.wh_end) AT TIME ZONE v_business_tz)
                - (v_duration || ' minutes')::interval,
              (v_slot_interval || ' minutes')::interval
            ) gs

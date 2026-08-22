@@ -180,6 +180,11 @@ BEGIN
     FROM free_slots fs
     JOIN slot_counts sc ON sc.s_instant = fs.s_instant
    WHERE sc.free_count >= p_min_staff
-   ORDER BY fs.s_instant, fs.sp_id;
+   -- ORDER BY must use the SELECT list's own expressions for SELECT DISTINCT
+   -- (Postgres 42P10) — slot_time is a transformed expression (AT TIME ZONE
+   -- + ::time cast), not the raw fs.s_instant/fs.sp_id columns, so order by
+   -- the output aliases instead. Safe: within one calendar day, local
+   -- time-of-day ordering is monotonic with the underlying instant ordering.
+   ORDER BY slot_time, staff_profile_id;
 END;
 $$;

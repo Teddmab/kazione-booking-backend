@@ -40,6 +40,36 @@ function normalizePayment(row: Record<string, unknown>) {
   return { ...row, payment: payment?.[0] ?? null };
 }
 
+/**
+ * The single formula for "what commission does this staff member earn on
+ * this appointment" — the service's own commission config takes priority
+ * over the staff profile's personal commission_rate, scaled by `fraction`
+ * (a staff's share of commission_split_pct when two staff are on the
+ * appointment). Used for the staff-visible commission_earned figure, the
+ * auto-pay-on-complete amount, and the commission_payment task created on
+ * manual completion — those three call sites must never compute this
+ * differently, or the amount a staff member sees quoted can silently
+ * diverge from what actually gets paid/logged.
+ */
+function calcCommissionAmount(
+  commType: string | null | undefined,
+  commValue: number,
+  rate: number,
+  price: number,
+  fraction: number,
+): number {
+  if (commType === "percentage" && commValue > 0) {
+    return Math.round(price * commValue / 100 * fraction * 100) / 100;
+  }
+  if (commType === "fixed" && commValue > 0) {
+    return Math.round(commValue * fraction * 100) / 100;
+  }
+  if (rate > 0) {
+    return Math.round(price * rate / 100 * fraction * 100) / 100;
+  }
+  return 0;
+}
+
 async function fetchStaffEmail(staffProfileId: string): Promise<string | null> {
   const { data: sp } = await supabaseAdmin
     .from("staff_profiles")
@@ -384,14 +414,13 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
         // Fraction of total commission this caller earns
         const myFraction = isPrimary ? splitPct / 100 : (100 - splitPct) / 100;
 
-        let commissionEarned: number | null = null;
-        if (commType === "percentage" && commValue > 0) {
-          commissionEarned = Math.round(price * commValue / 100 * myFraction * 100) / 100;
-        } else if (commType === "fixed" && commValue > 0) {
-          commissionEarned = Math.round(commValue * myFraction * 100) / 100;
-        } else if (myRate > 0) {
-          commissionEarned = Math.round(price * myRate / 100 * myFraction * 100) / 100;
-        }
+        const commissionApplies =
+          (commType === "percentage" && commValue > 0) ||
+          (commType === "fixed" && commValue > 0) ||
+          myRate > 0;
+        const commissionEarned = commissionApplies
+          ? calcCommissionAmount(commType, commValue, myRate, price, myFraction)
+          : null;
 
         return { ...normalized, commission_earned: commissionEarned };
       });
@@ -1092,7 +1121,7 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
       // Fetch appointment to get business_id for auth (+ service_id for stock-out + price for payment settlement)
       const { data: existing, error: fetchErr } = await supabaseAdmin
         .from("appointments")
-        .select("status, business_id, service_id, staff_profile_id, staff_profile_id_2, price")
+        .select("status, business_id, service_id, staff_profile_id, staff_profile_id_2, price, commission_split_pct")
         .eq("id", id)
         .single();
 
@@ -1105,6 +1134,7 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
         staff_profile_id: string | null;
         staff_profile_id_2: string | null;
         price: number;
+        commission_split_pct: number | null;
       };
 
       // Owner/manager OR assigned staff may update status (staff portal MS1)
@@ -1407,14 +1437,7 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
             const commType = svc?.staff_commission_type ?? "none";
             const commValue = Number(svc?.staff_commission_value ?? 0);
             const staffRate = Number(sp?.commission_rate ?? 0);
-            let commissionAmount = 0;
-            if (commType === "percentage" && commValue > 0) {
-              commissionAmount = Math.round(price * commValue / 100 * 100) / 100;
-            } else if (commType === "fixed" && commValue > 0) {
-              commissionAmount = commValue;
-            } else if (staffRate > 0) {
-              commissionAmount = Math.round(price * staffRate / 100 * 100) / 100;
-            }
+            const commissionAmount = calcCommissionAmount(commType, commValue, staffRate, price, 1);
             if (commissionAmount > 0) {
               await supabaseAdmin.from("appointments").update({
                 commission_paid_at: new Date().toISOString(),
@@ -1591,6 +1614,20 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
             existingRow.staff_profile_id_2,
           ].filter(Boolean) as string[];
 
+          // Fetch the service's own commission config once — same formula
+          // used for commission_earned and the auto-pay path, so an amount
+          // configured on the service (not just a staff's personal rate)
+          // is actually honored here too.
+          const { data: svcCommRow } = existingRow.service_id
+            ? await supabaseAdmin
+                .from("services")
+                .select("staff_commission_type, staff_commission_value")
+                .eq("id", existingRow.service_id)
+                .maybeSingle()
+            : { data: null };
+          const svcComm = svcCommRow as { staff_commission_type: string | null; staff_commission_value: number | null } | null;
+          const splitPct = Number(existingRow.commission_split_pct ?? 100);
+
           for (const staffId of staffIds) {
             const override = commissionOverrides?.find((o) => o.staff_profile_id === staffId);
             let commissionAmount: number;
@@ -1612,9 +1649,17 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
                 .eq("id", staffId)
                 .single();
               const spRow = sp as { display_name: string; commission_rate: number | null } | null;
-              if (!spRow || !spRow.commission_rate) continue;
+              if (!spRow) continue;
               displayName = spRow.display_name;
-              commissionAmount = Number(existingRow.price ?? 0) * (spRow.commission_rate / 100);
+              const isPrimary = staffId === existingRow.staff_profile_id;
+              const fraction = isPrimary ? splitPct / 100 : (100 - splitPct) / 100;
+              commissionAmount = calcCommissionAmount(
+                svcComm?.staff_commission_type,
+                Number(svcComm?.staff_commission_value ?? 0),
+                Number(spRow.commission_rate ?? 0),
+                Number(existingRow.price ?? 0),
+                fraction,
+              );
             }
 
             if (commissionAmount <= 0) continue;

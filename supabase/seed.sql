@@ -537,3 +537,35 @@ VALUES (
   'f0000000-0000-4000-8000-000000000097',
   5, 'Foreign business test review.', 'Foreign Reviewer', true
 ) ON CONFLICT DO NOTHING;
+
+-- ── Service with its own commission config + a confirmed appointment ───────
+-- Fatima K. (d0000000-...001) has a personal commission_rate of 15% (see
+-- migration 014_seed_data.sql), but this service defines its OWN 25%
+-- commission — proving completion uses the service's config, not just the
+-- staff's personal rate (the bug fixed alongside the commission-amount
+-- prefill in the owner completion dialog).
+INSERT INTO services (id, business_id, name, duration_minutes, price, currency_code,
+                      is_active, is_public, staff_commission_type, staff_commission_value)
+VALUES (
+  'c0000000-0000-4000-8000-000000000006',
+  'b0000000-0000-4000-8000-000000000001',
+  'Commission Test Service', 60, 100.00, 'EUR', true, false,
+  'percentage', 25.00
+) ON CONFLICT DO NOTHING;
+
+INSERT INTO appointments
+  (id, business_id, client_id, staff_profile_id, service_id, status,
+   starts_at, ends_at, duration_minutes, price, deposit_amount,
+   booking_source, booking_reference)
+VALUES (
+  'f0000000-0000-4000-8000-000000000095',
+  'b0000000-0000-4000-8000-000000000001',
+  'c1000000-0000-4000-8000-000000000001',
+  'd0000000-0000-4000-8000-000000000001',
+  'c0000000-0000-4000-8000-000000000006',
+  'confirmed',
+  '2026-12-01T10:00:00Z',
+  '2026-12-01T11:00:00Z',
+  60, 100.00, 0.00,
+  'online', 'KZB-COMMTEST1'
+) ON CONFLICT DO NOTHING;

@@ -6,6 +6,10 @@ const ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZ
 const BUSINESS_ID = "b0000000-0000-4000-8000-000000000001" // from seed
 const SERVICE_ID = "c0000000-0000-4000-8000-000000000001" // Knotless Braids from seed
 const DUAL_STAFF_SERVICE_ID = "c0000000-0000-4000-8000-000000000005" // S58 seed fixture
+// confirmed, staff=Fatima (15% personal commission_rate), service defines its
+// own 25% commission — seed fixture (see seed.sql "Service with its own
+// commission config").
+const COMM_TEST_APPT_ID = "f0000000-0000-4000-8000-000000000095"
 const STAFF_ID = "d0000000-0000-4000-8000-000000000001" // Fatima K. from seed
 const STAFF_ID_2 = "d0000000-0000-4000-8000-000000000002" // Regina M. from seed
 const CLIENT_ID = "c1000000-0000-4000-8000-000000000001" // Amara Diallo from seed
@@ -194,6 +198,34 @@ Deno.test("appointments: PATCH assign-staff-2 — clearing the assignment never 
     id: target.id,
   })
   assertEquals(clearRes.status, 200)
+})
+
+Deno.test("appointments: complete — commission task uses the service's own commission config, not just the staff's personal rate", async () => {
+  if (!OWNER_TOKEN) return
+
+  const res = await callFn("PATCH", OWNER_TOKEN, { status: "completed", payment_method: "cash" }, { id: COMM_TEST_APPT_ID })
+  if (res.status !== 200) {
+    const body = await res.json().catch(() => null)
+    throw new Error(`Expected 200, got ${res.status}: ${JSON.stringify(body)}`)
+  }
+  await res.json()
+
+  // No dedicated read endpoint for owner_tasks — same PostgREST-direct
+  // pattern used elsewhere (e.g. staff_action_log in staff.test.ts).
+  const restBase = BASE.replace("/functions/v1", "/rest/v1")
+  const taskRes = await fetch(
+    `${restBase}/owner_tasks?ref_id=eq.${COMM_TEST_APPT_ID}&type=eq.commission_payment&order=created_at.desc&limit=1`,
+    { headers: { apikey: ANON_KEY, Authorization: `Bearer ${OWNER_TOKEN}` } },
+  )
+  assertEquals(taskRes.status, 200)
+  const rows = await taskRes.json()
+  if (!Array.isArray(rows) || rows.length === 0) {
+    throw new Error("Expected a commission_payment owner_task for this appointment")
+  }
+  // Service defines 25% commission on a price-100 appointment → 25.00.
+  // Fatima's own commission_rate is 15% — if this asserted 15, the fix
+  // that makes the service's commission config take priority regressed.
+  assertEquals(rows[0].body.commission_amount, 25)
 })
 
 // The following require more setup for date filter

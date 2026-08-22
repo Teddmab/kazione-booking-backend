@@ -65,7 +65,7 @@ async function checkHealth(): Promise<{ name: string; status: number | "unreacha
   const base = Deno.env.get("SUPABASE_URL");
   if (!base) return [];
 
-  const results = await Promise.all(
+  return await Promise.all(
     CRITICAL_ENDPOINTS.map(async (name) => {
       try {
         const res = await fetch(`${base}/functions/v1/${name}`, {
@@ -79,8 +79,22 @@ async function checkHealth(): Promise<{ name: string; status: number | "unreacha
       }
     }),
   );
+}
 
-  return results.filter((r) => r.status === "unreachable" || r.status < 200 || r.status >= 300);
+/**
+ * Persists every health-check result (not just failures) so the admin
+ * Monitoring page can render an uptime status board, not just receive
+ * alert emails when something's already broken.
+ */
+async function recordHealthResults(results: { name: string; status: number | "unreachable" }[]): Promise<void> {
+  if (results.length === 0) return;
+  const rows = results.map((r) => ({
+    endpoint_name: r.name,
+    status: r.status === "unreachable" || r.status < 200 || r.status >= 300 ? "down" : "up",
+    http_status: r.status === "unreachable" ? null : r.status,
+  }));
+  const { error } = await supabaseAdmin.from("platform_endpoint_health").insert(rows);
+  if (error) console.error("[platform-alert-digest] Failed to record health results:", error.message);
 }
 
 // ---------------------------------------------------------------------------
@@ -99,7 +113,7 @@ Deno.serve(withLogging("platform-alert-digest", async (req: Request) => {
     return jsonCors(req, { error: { code: "FORBIDDEN", message: "Invalid cron secret" } }, 403);
   }
 
-  const [{ data: unnotified }, { data: settingsRow }, unhealthy] = await Promise.all([
+  const [{ data: unnotified }, { data: settingsRow }, healthResults] = await Promise.all([
     supabaseAdmin
       .from("platform_error_log")
       .select("id, function_name, method, status_code, message, created_at")
@@ -109,6 +123,13 @@ Deno.serve(withLogging("platform-alert-digest", async (req: Request) => {
     supabaseAdmin.from("platform_alert_settings").select("alert_email").eq("id", 1).maybeSingle(),
     checkHealth(),
   ]);
+
+  // Record every check (not just failures) for the Monitoring page's uptime
+  // status board — fire-and-forget-ish, but we do wait for it here since
+  // this cron run has no response deadline pressure like a user request.
+  await recordHealthResults(healthResults);
+
+  const unhealthy = healthResults.filter((r) => r.status === "unreachable" || r.status < 200 || r.status >= 300);
 
   const errorRows = (unnotified ?? []) as {
     id: string; function_name: string; method: string; status_code: number; message: string | null; created_at: string;

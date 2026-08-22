@@ -13,6 +13,13 @@ export interface EmailAttachment {
 
 /**
  * Send a transactional email via Resend.
+ *
+ * Resolves to the Resend-assigned message id (or null if the API key isn't
+ * configured — the send is skipped, not attempted) on success. Throws on a
+ * real Resend API error, unchanged from before — callers that only cared
+ * about "did this throw" keep working exactly as they did; callers that
+ * need the outcome (e.g. for notification_delivery_log) can now read it
+ * off the resolved value instead of treating every resolution as failure.
  */
 export async function sendEmail(
   to: string,
@@ -20,12 +27,12 @@ export async function sendEmail(
   html: string,
   from?: string,
   attachments?: EmailAttachment[],
-) {
+): Promise<{ id: string | null }> {
   if (!resend) {
     console.warn(
       "RESEND_API_KEY is not configured; skipping transactional email send",
     );
-    return;
+    return { id: null };
   }
 
   const payload = {
@@ -38,11 +45,13 @@ export async function sendEmail(
       : {}),
   };
 
-  const { error } = await resend.emails.send(payload as Parameters<typeof resend.emails.send>[0]);
+  const { data, error } = await resend.emails.send(payload as Parameters<typeof resend.emails.send>[0]);
 
   if (error) {
     throw new Error(`Resend error: ${JSON.stringify(error)}`);
   }
+
+  return { id: data?.id ?? null };
 }
 
 // ---------------------------------------------------------------------------

@@ -6,6 +6,7 @@ import { withLogging } from "../_shared/logger.ts";
 import { issueCancelToken } from "../_shared/bookingCancelToken.ts";
 import { sendSms } from "../_shared/messagebird.ts";
 import { sendClientWaReminder, sendStaffWaReminder } from "../_shared/bird-whatsapp.ts";
+import { logNotificationDelivery } from "../_shared/notificationLog.ts";
 
 // ---------------------------------------------------------------------------
 // Auth — CRON_SECRET header check
@@ -39,26 +40,44 @@ function verifyCronAuth(req: Request): boolean {
 const FUNCTIONS_URL = Deno.env.get("SUPABASE_URL") + "/functions/v1";
 const INTERNAL_KEY = Deno.env.get("INTERNAL_FUNCTION_KEY") ?? "";
 
+interface SendEmailInternalResult {
+  ok: boolean;
+  messageId?: string | null;
+  error?: string;
+}
+
 async function sendEmailInternal(
   to: string,
   template: string,
   data: Record<string, string>,
-): Promise<boolean> {
-  const res = await fetch(`${FUNCTIONS_URL}/send-email`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-internal-key": INTERNAL_KEY,
-    },
-    body: JSON.stringify({ to, template, data }),
-  });
+): Promise<SendEmailInternalResult> {
+  try {
+    const res = await fetch(`${FUNCTIONS_URL}/send-email`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-internal-key": INTERNAL_KEY,
+      },
+      body: JSON.stringify({ to, template, data }),
+    });
 
-  if (!res.ok) {
-    const body = await res.text();
-    console.error(`send-email failed for ${to}: ${res.status} ${body}`);
-    return false;
+    const text = await res.text();
+    if (!res.ok) {
+      console.error(`send-email failed for ${to}: ${res.status} ${text}`);
+      return { ok: false, error: `send-email ${res.status}: ${text}` };
+    }
+
+    let messageId: string | null = null;
+    try {
+      messageId = (JSON.parse(text) as { message_id?: string })?.message_id ?? null;
+    } catch {
+      // Non-JSON success body — unexpected but not fatal, just no id to report.
+    }
+    return { ok: true, messageId };
+  } catch (err) {
+    console.error(`send-email request failed for ${to}:`, err);
+    return { ok: false, error: err instanceof Error ? err.message : "send-email request failed" };
   }
-  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -226,24 +245,33 @@ async function sendReminders(
       const cancelToken = await issueCancelToken(appt.id, appt.booking_reference);
       const manageUrl = `${siteUrl}/booking/${appt.booking_reference}?token=${encodeURIComponent(cancelToken)}`;
 
-      const emailDelivered = client.email
-        ? await sendEmailInternal(client.email, "booking_reminder", {
-            clientName: `${client.first_name} ${client.last_name}`,
-            salonName: business.name,
-            serviceName: service.name,
-            staffName: staff?.display_name ?? "Any available",
-            date: dateStr,
-            time: timeStr,
-            reference: appt.booking_reference,
-            price: `€${Number(appt.price).toFixed(2)}`,
-            manageUrl,
-            salonAddress,
-          })
-        : true; // no email address — not a failure
-
-      if (!emailDelivered) {
-        errors++;
-        continue;
+      if (client.email) {
+        const emailResult = await sendEmailInternal(client.email, "booking_reminder", {
+          clientName: `${client.first_name} ${client.last_name}`,
+          salonName: business.name,
+          serviceName: service.name,
+          staffName: staff?.display_name ?? "Any available",
+          date: dateStr,
+          time: timeStr,
+          reference: appt.booking_reference,
+          price: `€${Number(appt.price).toFixed(2)}`,
+          manageUrl,
+          salonAddress,
+        });
+        logNotificationDelivery({
+          businessId: appt.business_id as string,
+          appointmentId: appt.id,
+          channel: "email",
+          recipientType: "client",
+          purpose: "booking_reminder",
+          status: emailResult.ok ? "sent" : "failed",
+          providerMessageId: emailResult.ok ? emailResult.messageId : null,
+          errorMessage: emailResult.ok ? null : emailResult.error,
+        });
+        if (!emailResult.ok) {
+          errors++;
+          continue;
+        }
       }
 
       // Staff email reminder — prefer the user's registered email over the invite address
@@ -251,7 +279,7 @@ async function sendReminders(
         ? staffEmailMap.get(staff.business_member_id) ?? staff.invited_email
         : staff?.invited_email) ?? null;
       if (staff && staffEmail) {
-        await sendEmailInternal(staffEmail, "staff_appointment_reminder", {
+        const staffEmailResult = await sendEmailInternal(staffEmail, "staff_appointment_reminder", {
           staffName: staff.display_name,
           salonName: business.name,
           clientName: `${client.first_name} ${client.last_name}`,
@@ -259,15 +287,26 @@ async function sendReminders(
           date: dateStr,
           time: timeStr,
           reference: appt.booking_reference,
-        }).catch((err) =>
-          console.error(`Staff reminder email failed for appointment ${appt.id}:`, err),
-        );
+        });
+        if (!staffEmailResult.ok) {
+          console.error(`Staff reminder email failed for appointment ${appt.id}:`, staffEmailResult.error);
+        }
+        logNotificationDelivery({
+          businessId: appt.business_id as string,
+          appointmentId: appt.id,
+          channel: "email",
+          recipientType: "staff",
+          purpose: "staff_appointment_reminder",
+          status: staffEmailResult.ok ? "sent" : "failed",
+          providerMessageId: staffEmailResult.ok ? staffEmailResult.messageId : null,
+          errorMessage: staffEmailResult.ok ? null : staffEmailResult.error,
+        });
       }
 
       // Owner email reminder
       const ownerEmail = settingsMap.get(appt.business_id as string)?.ownerEmail;
       if (ownerEmail) {
-        await sendEmailInternal(ownerEmail, "owner_appointment_reminder", {
+        const ownerEmailResult = await sendEmailInternal(ownerEmail, "owner_appointment_reminder", {
           salonName: business.name,
           clientName: `${client.first_name} ${client.last_name}`,
           clientEmail: client.email ?? "",
@@ -278,9 +317,20 @@ async function sendReminders(
           time: timeStr,
           reference: appt.booking_reference,
           manageUrl: `${siteUrl}/owner/appointments`,
-        }).catch((err) =>
-          console.error(`Owner reminder email failed for appointment ${appt.id}:`, err),
-        );
+        });
+        if (!ownerEmailResult.ok) {
+          console.error(`Owner reminder email failed for appointment ${appt.id}:`, ownerEmailResult.error);
+        }
+        logNotificationDelivery({
+          businessId: appt.business_id as string,
+          appointmentId: appt.id,
+          channel: "email",
+          recipientType: "owner",
+          purpose: "owner_appointment_reminder",
+          status: ownerEmailResult.ok ? "sent" : "failed",
+          providerMessageId: ownerEmailResult.ok ? ownerEmailResult.messageId : null,
+          errorMessage: ownerEmailResult.ok ? null : ownerEmailResult.error,
+        });
       }
 
       const now = new Date().toISOString();
@@ -293,22 +343,44 @@ async function sendReminders(
           `Ref: ${appt.booking_reference}. Manage: ${manageUrl}`;
         const smsAlreadySent = !!(appt as unknown as { reminder_sms_sent_at: string | null }).reminder_sms_sent_at;
         if (!smsAlreadySent) {
-          await sendSms(client.phone, smsText).catch((err) =>
-            console.error(`Reminder SMS failed for appointment ${appt.id}:`, err),
-          );
+          const smsResult = await sendSms(client.phone, smsText);
+          if (!smsResult.ok) {
+            console.error(`Reminder SMS failed for appointment ${appt.id}:`, smsResult.error);
+          }
+          logNotificationDelivery({
+            businessId: appt.business_id as string,
+            appointmentId: appt.id,
+            channel: "sms",
+            recipientType: "client",
+            purpose: "booking_reminder",
+            status: smsResult.ok ? "sent" : "failed",
+            providerMessageId: smsResult.ok ? smsResult.messageId : null,
+            errorMessage: smsResult.ok ? null : smsResult.error,
+          });
           updateFields.reminder_sms_sent_at = now;
         }
         const waAlreadySent = !!(appt as unknown as { reminder_whatsapp_sent_at: string | null }).reminder_whatsapp_sent_at;
         if (!waAlreadySent) {
-          await sendClientWaReminder(client.phone, {
+          const waResult = await sendClientWaReminder(client.phone, {
             clientName: `${client.first_name} ${client.last_name}`,
             serviceName: service.name,
             salonName: business.name,
             date: dateStr,
             time: timeStr,
-          }).catch((err) =>
-            console.error(`Reminder WhatsApp failed for appointment ${appt.id}:`, err),
-          );
+          });
+          if (!waResult.ok) {
+            console.error(`Reminder WhatsApp failed for appointment ${appt.id}:`, waResult.error);
+          }
+          logNotificationDelivery({
+            businessId: appt.business_id as string,
+            appointmentId: appt.id,
+            channel: "whatsapp",
+            recipientType: "client",
+            purpose: "booking_reminder",
+            status: waResult.ok ? "sent" : "failed",
+            providerMessageId: waResult.ok ? waResult.messageId : null,
+            errorMessage: waResult.ok ? null : waResult.error,
+          });
           updateFields.reminder_whatsapp_sent_at = now;
         }
       }
@@ -321,18 +393,41 @@ async function sendReminders(
         const staffSmsText =
           `${business.name}: reminder — ${client.first_name} ${client.last_name} ` +
           `for ${service.name} on ${dateStr} at ${timeStr}. Ref: ${appt.booking_reference}`;
-        await sendSms(staffPhone, staffSmsText).catch((err) =>
-          console.error(`Staff SMS reminder failed for appointment ${appt.id}:`, err),
-        );
-        await sendStaffWaReminder(staffPhone, {
+        const staffSmsResult = await sendSms(staffPhone, staffSmsText);
+        if (!staffSmsResult.ok) {
+          console.error(`Staff SMS reminder failed for appointment ${appt.id}:`, staffSmsResult.error);
+        }
+        logNotificationDelivery({
+          businessId: appt.business_id as string,
+          appointmentId: appt.id,
+          channel: "sms",
+          recipientType: "staff",
+          purpose: "booking_reminder",
+          status: staffSmsResult.ok ? "sent" : "failed",
+          providerMessageId: staffSmsResult.ok ? staffSmsResult.messageId : null,
+          errorMessage: staffSmsResult.ok ? null : staffSmsResult.error,
+        });
+
+        const staffWaResult = await sendStaffWaReminder(staffPhone, {
           staffName: staff?.display_name ?? "Staff",
           clientName: `${client.first_name} ${client.last_name}`,
           serviceName: service.name,
           date: dateStr,
           time: timeStr,
-        }).catch((err) =>
-          console.error(`Staff WhatsApp reminder failed for appointment ${appt.id}:`, err),
-        );
+        });
+        if (!staffWaResult.ok) {
+          console.error(`Staff WhatsApp reminder failed for appointment ${appt.id}:`, staffWaResult.error);
+        }
+        logNotificationDelivery({
+          businessId: appt.business_id as string,
+          appointmentId: appt.id,
+          channel: "whatsapp",
+          recipientType: "staff",
+          purpose: "booking_reminder",
+          status: staffWaResult.ok ? "sent" : "failed",
+          providerMessageId: staffWaResult.ok ? staffWaResult.messageId : null,
+          errorMessage: staffWaResult.ok ? null : staffWaResult.error,
+        });
       }
 
       await supabaseAdmin

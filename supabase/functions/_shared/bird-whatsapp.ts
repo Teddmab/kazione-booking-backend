@@ -36,25 +36,33 @@ function normalizePhone(raw: string): string | null {
   return `+${digits}`;
 }
 
+export interface WhatsAppSendResult {
+  ok: boolean;
+  /** Bird's own message id, when the SDK response includes one. */
+  messageId?: string | null;
+  /** Set when ok is false — config/validation issue or an SDK-thrown error. */
+  error?: string;
+}
+
 async function sendTemplate(
   to: string,
   templateName: string,
   bodyParams: string[],
-): Promise<void> {
+): Promise<WhatsAppSendResult> {
   const client = getClient();
   if (!client) {
     console.warn("[bird-wa] BIRD_API_KEY not set — WhatsApp skipped");
-    return;
+    return { ok: false, error: "BIRD_API_KEY not configured" };
   }
 
   const phone = normalizePhone(to);
   if (!phone) {
     console.warn("[bird-wa] unparseable phone number — WhatsApp skipped:", to);
-    return;
+    return { ok: false, error: "Unparseable phone number" };
   }
 
   try {
-    await client.whatsapp.send({
+    const result = await client.whatsapp.send({
       to: phone,
       template: {
         name: templateName,
@@ -66,8 +74,10 @@ async function sendTemplate(
         ],
       },
     });
+    return { ok: true, messageId: result?.id ?? null };
   } catch (err) {
     console.error(`[bird-wa] template "${templateName}" to ${phone} failed:`, err);
+    return { ok: false, error: err instanceof Error ? err.message : "Bird WhatsApp send failed" };
   }
 }
 
@@ -85,9 +95,9 @@ export async function sendClientWaReminder(
     date: string;
     time: string;
   },
-): Promise<void> {
+): Promise<WhatsAppSendResult> {
   const template = Deno.env.get("BIRD_WA_REMINDER_TEMPLATE") ?? "kazione_appointment_reminder";
-  await sendTemplate(to, template, [
+  return await sendTemplate(to, template, [
     params.clientName,
     params.serviceName,
     params.salonName,
@@ -110,9 +120,9 @@ export async function sendStaffWaReminder(
     date: string;
     time: string;
   },
-): Promise<void> {
+): Promise<WhatsAppSendResult> {
   const template = Deno.env.get("BIRD_WA_STAFF_REMINDER_TEMPLATE") ?? "kazione_staff_reminder";
-  await sendTemplate(to, template, [
+  return await sendTemplate(to, template, [
     params.staffName,
     params.clientName,
     params.serviceName,

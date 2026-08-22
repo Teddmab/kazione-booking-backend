@@ -1,8 +1,9 @@
 import { supabaseAdmin } from "../_shared/supabaseAdmin.ts";
 import { corsHeadersFor, handleCors, jsonCors } from "../_shared/cors.ts";
-import { badRequest, forbidden, notFound, serverError } from "../_shared/errors.ts";
+import { badRequest, conflict, forbidden, notFound, serverError } from "../_shared/errors.ts";
 import { withLogging } from "../_shared/logger.ts";
 import { requireOwnerOrManagerCtx, verifyAuth, verifyBusinessMember } from "../_shared/auth.ts";
+import { isSlotTakenError } from "../_shared/slotConflict.ts";
 import {
   bookingCancellationEmail,
   bookingReceivedOwnerEmail,
@@ -409,26 +410,57 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
         new Date(startsAt).getTime() + durationMinutes * 60_000,
       ).toISOString();
 
+      // Buffer minutes for the target service — needed by
+      // check_and_reserve_slot (called inside create_manual_appointment_atomic)
+      // to compute the same overlap window create-booking's online path uses.
+      const { data: svcForBuffer, error: svcBufferErr } = await supabaseAdmin
+        .from("services")
+        .select("buffer_minutes")
+        .eq("id", body.service_id as string)
+        .eq("business_id", ctx.businessId)
+        .maybeSingle();
+      if (svcBufferErr) return serverError(svcBufferErr.message);
+      if (!svcForBuffer) return badRequest("service_id does not belong to this business");
+
+      // Atomic: advisory-lock + buffer-aware conflict check + insert, all in
+      // one transaction (S58) — a raw .insert() here would let the owner
+      // dashboard silently double-book a staff member under concurrent
+      // requests, the same race the online booking flow already guards
+      // against via create_booking_atomic.
+      const { data: newApptId, error: atomicErr } = await supabaseAdmin.rpc(
+        "create_manual_appointment_atomic",
+        {
+          p_business_id: ctx.businessId,
+          p_client_id: body.client_id,
+          p_service_id: body.service_id,
+          p_staff_id: body.staff_profile_id ?? null,
+          p_starts_at: startsAt,
+          p_ends_at: endsAt,
+          p_duration_minutes: durationMinutes,
+          p_buffer_minutes: (svcForBuffer as { buffer_minutes: number | null }).buffer_minutes ?? 0,
+          p_price: body.price,
+          p_deposit_amount: body.deposit_amount ?? 0,
+          p_booking_source: body.booking_source ?? "staff",
+          p_booking_reference: bookingReference,
+          p_is_walk_in: body.is_walk_in ?? false,
+          p_notes: body.notes ?? null,
+          p_internal_notes: body.internal_notes ?? null,
+          p_status: body.staff_profile_id ? "confirmed" : "pending",
+        },
+      );
+
+      if (atomicErr) {
+        if (isSlotTakenError(atomicErr)) {
+          return conflict("SLOT_TAKEN", "This staff member already has a conflicting appointment at that time");
+        }
+        console.error("create_manual_appointment_atomic error:", JSON.stringify(atomicErr));
+        return serverError(atomicErr.message);
+      }
+
       const { data: appointment, error } = await supabaseAdmin
         .from("appointments")
-        .insert({
-          business_id: ctx.businessId,
-          client_id: body.client_id,
-          service_id: body.service_id,
-          staff_profile_id: body.staff_profile_id ?? null,
-          starts_at: startsAt,
-          ends_at: endsAt,
-          duration_minutes: durationMinutes,
-          price: body.price,
-          deposit_amount: body.deposit_amount ?? 0,
-          booking_source: body.booking_source ?? "staff",
-          booking_reference: bookingReference,
-          is_walk_in: body.is_walk_in ?? false,
-          notes: body.notes ?? null,
-          internal_notes: body.internal_notes ?? null,
-          status: body.staff_profile_id ? "confirmed" : "pending",
-        })
         .select(`*, client:clients!inner(id, first_name, last_name, email, phone, avatar_url), service:services!inner(id, name, duration_minutes, price, staff_commission_type, staff_commission_value, service_product_usage(quantity_per_service, product:product_catalog(unit_cost))), staff:staff_profiles!staff_profile_id(id, display_name, avatar_url)`)
+        .eq("id", newApptId as string)
         .single();
 
       if (error) return serverError(error.message);
@@ -583,11 +615,28 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
       // Completed appointments keep their status; others move to "offered" awaiting staff confirmation
       const newStatus = oldStatus === "completed" ? "completed" : "offered";
 
+      // Atomic: locks the appointment row, re-checks the target staff
+      // member's schedule (excluding this appointment's own current slot),
+      // then writes — closes the double-booking gap a plain .update() left
+      // open (S58).
+      const { error: assignErr } = await supabaseAdmin.rpc("assign_staff_atomic", {
+        p_appointment_id: id,
+        p_staff_id: staffProfileId,
+        p_new_status: newStatus,
+      });
+
+      if (assignErr) {
+        if (isSlotTakenError(assignErr)) {
+          return conflict("SLOT_TAKEN", "This staff member already has a conflicting appointment at that time");
+        }
+        console.error("assign_staff_atomic error:", JSON.stringify(assignErr));
+        return serverError(assignErr.message);
+      }
+
       const { data: updated, error: updateErr } = await supabaseAdmin
         .from("appointments")
-        .update({ staff_profile_id: staffProfileId, status: newStatus })
-        .eq("id", id)
         .select(APPT_SELECT)
+        .eq("id", id)
         .single();
 
       if (updateErr) return serverError(updateErr.message);
@@ -663,23 +712,32 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
         return badRequest("Service does not support dual staff assignment");
       }
 
-      const updateFields: Record<string, unknown> = {
-        staff_profile_id_2: staffProfileId2,
-      };
       // Keep commission_split_pct in sync with the service snapshot
-      if (staffProfileId2) {
-        updateFields.commission_split_pct = Number(
-          (svcRow as Record<string, unknown>).commission_split_pct ?? 50,
-        );
-      } else {
-        updateFields.commission_split_pct = null;
+      const splitPct2 = staffProfileId2
+        ? Number((svcRow as Record<string, unknown>).commission_split_pct ?? 50)
+        : null;
+
+      // Atomic: same pattern as assign-staff — locks the row, re-checks the
+      // secondary staff member's schedule (skipped entirely when clearing
+      // the assignment), then writes (S58).
+      const { error: assign2Err } = await supabaseAdmin.rpc("assign_staff_2_atomic", {
+        p_appointment_id: id,
+        p_staff_id_2: staffProfileId2,
+        p_commission_split_pct: splitPct2,
+      });
+
+      if (assign2Err) {
+        if (isSlotTakenError(assign2Err)) {
+          return conflict("SLOT_TAKEN", "This staff member already has a conflicting appointment at that time");
+        }
+        console.error("assign_staff_2_atomic error:", JSON.stringify(assign2Err));
+        return serverError(assign2Err.message);
       }
 
       const { data: updated2, error: updateErr2 } = await supabaseAdmin
         .from("appointments")
-        .update(updateFields)
-        .eq("id", id)
         .select(APPT_SELECT)
+        .eq("id", id)
         .single();
 
       if (updateErr2) return serverError(updateErr2.message);

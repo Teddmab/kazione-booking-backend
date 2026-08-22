@@ -113,6 +113,81 @@ Deno.test("reschedule-booking: new slot not available → 409", async () => {
   await res.body?.cancel()
 })
 
+// Finds one more available slot for staffId beyond the dates already used,
+// so the concurrent-reschedule test below has a genuinely free, unoccupied
+// third slot to race into (reusing a source booking's own slot as the
+// target would mean one side is already "there" rather than racing for it).
+async function findAnotherSlotForStaff(
+  staffId: string,
+  excludeDates: string[],
+): Promise<{ date: string; time: string } | null> {
+  const dates = ["2026-09-14", "2026-09-15", "2026-09-16", "2026-09-17", "2026-09-18"]
+  for (const date of dates) {
+    if (excludeDates.includes(date)) continue
+    const r = await fetch(
+      `${BASE}/get-availability?business_id=${BUSINESS_ID}&service_id=${SERVICE_ID}&date=${date}&staff_id=${staffId}`,
+      { headers: { apikey: ANON_KEY } }
+    )
+    const body = await r.json()
+    if (Array.isArray(body.slots) && body.slots.length > 0) {
+      return { date, time: body.slots[0].time }
+    }
+  }
+  return null
+}
+
+// S58: the "new slot not available" test above only proves the pre-check
+// (get_available_slots) catches an ALREADY-taken slot — it doesn't exercise
+// the TOCTOU gap between that check and the final write, since the target
+// slot is occupied before either request starts. This test proves the gap
+// itself is closed: two DIFFERENT, independently-booked appointments race to
+// reschedule into the SAME currently-free target slot at the same time.
+// Before S58 (reschedule_appointment_atomic, migration 112) this could
+// double-book, since the final .update() had no lock; now exactly one must
+// succeed.
+Deno.test("reschedule-booking: concurrent reschedule into the same free slot → exactly one 200, one 409", async () => {
+  const slots = await findAvailableSlots()
+  if (slots.length < 2) {
+    console.warn("Not enough slots for concurrent reschedule test — skipping")
+    return
+  }
+  // Two independent source bookings, each on its own naturally-available slot.
+  const bookingA = await createGuestBooking(slots[0].date, slots[0].time, slots[0].staffId)
+  const bookingB = await createGuestBooking(slots[1].date, slots[1].time, slots[1].staffId)
+
+  // A fresh, currently-free target slot neither booking already occupies —
+  // pinned to a specific staff member so both requests race for the exact
+  // same (staff, time) key the advisory lock guards.
+  const target = await findAnotherSlotForStaff(slots[0].staffId, [slots[0].date, slots[1].date])
+  if (!target) {
+    console.warn("No free target slot found for concurrent reschedule test — skipping")
+    return
+  }
+
+  const [resA, resB] = await Promise.all([
+    callFn({
+      booking_reference: bookingA.bookingReference,
+      email: bookingA.email,
+      new_date: target.date,
+      new_time: target.time,
+      staff_profile_id: slots[0].staffId,
+    }),
+    callFn({
+      booking_reference: bookingB.bookingReference,
+      email: bookingB.email,
+      new_date: target.date,
+      new_time: target.time,
+      staff_profile_id: slots[0].staffId,
+    }),
+  ])
+
+  const statuses = [resA.status, resB.status].sort()
+  assertEquals(statuses[0], 200, `Expected one 200, got statuses ${JSON.stringify(statuses)}`)
+  assertEquals(statuses[1], 409, `Expected one 409, got statuses ${JSON.stringify(statuses)}`)
+  await resA.body?.cancel().catch(() => {})
+  await resB.body?.cancel().catch(() => {})
+})
+
 Deno.test("reschedule-booking: valid reschedule → 200, starts_at updated, status_log entry", async () => {
   const slots = await findAvailableSlots()
   if (slots.length < 2) {

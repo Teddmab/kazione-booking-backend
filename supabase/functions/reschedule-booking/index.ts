@@ -18,6 +18,7 @@ import {
 import { issueCancelToken } from "../_shared/bookingCancelToken.ts";
 import { sendSms } from "../_shared/messagebird.ts";
 import { sendWhatsApp } from "../_shared/meta-whatsapp.ts";
+import { isSlotTakenError } from "../_shared/slotConflict.ts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -227,18 +228,27 @@ Deno.serve(withLogging("reschedule-booking", async (req: Request) => {
     const newEndsAt = newEndsDate.toISOString();
 
     // ── Update appointment ────────────────────────────────────────────────
+    // Atomic (S58): the get_available_slots check above and this write are
+    // two separate requests, so a plain .update() here would leave a TOCTOU
+    // race window — another booking could land on the same slot in between.
+    // reschedule_appointment_atomic re-locks and re-checks the target slot
+    // (excluding this appointment's own row) immediately before writing, in
+    // the same transaction.
     const oldStatus = appointment.status;
-    const { error: updateErr } = await supabaseAdmin
-      .from("appointments")
-      .update({
-        starts_at: newStartsAt,
-        ends_at: newEndsAt,
-        staff_profile_id: resolvedStaffId,
-        status: "confirmed",
-      })
-      .eq("id", appointment.id);
+    const { error: updateErr } = await supabaseAdmin.rpc("reschedule_appointment_atomic", {
+      p_appointment_id: appointment.id,
+      p_new_starts_at: newStartsAt,
+      p_new_ends_at: newEndsAt,
+      p_new_staff_id: resolvedStaffId,
+    });
 
-    if (updateErr) throw updateErr;
+    if (updateErr) {
+      if (isSlotTakenError(updateErr)) {
+        return conflict("SLOT_TAKEN", "The requested slot was just booked by someone else");
+      }
+      console.error("reschedule_appointment_atomic error:", JSON.stringify(updateErr));
+      throw updateErr;
+    }
 
     // Update appointment_services timestamps too (fire-and-forget — non-fatal)
     const { error: svcUpdateErr } = await supabaseAdmin

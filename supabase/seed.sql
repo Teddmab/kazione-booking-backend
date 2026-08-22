@@ -332,3 +332,14 @@ SET invited_email = 'fatima.k@test.kazione.local'
 WHERE id = 'd0000000-0000-4000-8000-000000000001'
   AND business_member_id IS NULL
   AND invited_email IS NULL;
+
+-- ── Dual-staff test service (S58) ──────────────────────────────────────────
+-- A minimal, otherwise-unused service with requires_two_staff = true so
+-- appointments.test.ts can exercise assign-staff-2's conflict-check path.
+-- Deliberately separate from svc1-svc4 (which many other tests depend on
+-- behaving exactly as before) rather than flipping an existing service's
+-- flag.
+INSERT INTO services (id, business_id, name, duration_minutes, price, currency_code, is_active, is_public, requires_two_staff)
+VALUES ('c0000000-0000-4000-8000-000000000005', 'b0000000-0000-4000-8000-000000000001',
+        'S58 Test — Dual Staff Service', 60, 50.00, 'EUR', true, false, true)
+ON CONFLICT DO NOTHING;

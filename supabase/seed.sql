@@ -429,3 +429,111 @@ VALUES (
   180, 120.00, 30.00,
   'online', 'KZB-TESTGB1'
 ) ON CONFLICT DO NOTHING;
+
+-- ── Test platform admin account (S61) ───────────────────────────────────────
+-- Email:    admin@kazione.internal
+-- Password: Test1234!
+-- Role:     is_platform_admin=true, no business_members row — CI's "Get test
+-- admin token" step (ci.yml) authenticates as this user so admin-* edge
+-- functions (requirePlatformAdmin) can be exercised by a real, hardcoded
+-- fixture instead of an env-gated skip, per CLAUDE.md Rule 7.
+
+DO $$
+DECLARE
+  v_user_id uuid := 'f0000000-0000-4000-8000-000000000003';
+BEGIN
+  IF EXISTS (SELECT 1 FROM auth.users WHERE id = v_user_id) THEN
+    RAISE NOTICE 'Seed platform admin already exists — skipping.';
+    RETURN;
+  END IF;
+
+  INSERT INTO auth.users (
+    instance_id, id, aud, role,
+    email, encrypted_password,
+    email_confirmed_at,
+    confirmation_token, recovery_token,
+    email_change, email_change_token_new, email_change_token_current,
+    phone, phone_change, reauthentication_token,
+    created_at, updated_at,
+    raw_app_meta_data, raw_user_meta_data,
+    is_sso_user, is_super_admin
+  ) VALUES (
+    '00000000-0000-0000-0000-000000000000',
+    v_user_id,
+    'authenticated', 'authenticated',
+    'admin@kazione.internal',
+    crypt('Test1234!', gen_salt('bf')),
+    now(),
+    '', '',
+    '', '', '',
+    NULL, '', '',
+    now(), now(),
+    '{"provider":"email","providers":["email"]}',
+    '{"first_name":"Platform","last_name":"Admin"}',
+    false, false
+  );
+
+  INSERT INTO public.users (id, email, first_name, last_name, is_platform_admin)
+  VALUES (v_user_id, 'admin@kazione.internal', 'Platform', 'Admin', true)
+  ON CONFLICT (id) DO UPDATE SET is_platform_admin = true;
+
+  RAISE NOTICE 'Seed platform admin account created: admin@kazione.internal / Test1234!';
+END $$;
+
+-- ── Test reviews (S61) ────────────────────────────────────────────────────────
+-- Fixed-id completed appointments + reviews, one on the owner's own business
+-- (b...001) and one on the foreign business (b...002, see "Foreign test
+-- business" above), so review-moderation tests (owner-hide-own,
+-- owner-hide-foreign→403, admin-hide-any, public-listing-excludes-hidden)
+-- run against real hardcoded fixtures instead of skipping, per CLAUDE.md
+-- Rule 7.
+
+INSERT INTO appointments
+  (id, business_id, client_id, staff_profile_id, service_id, status,
+   starts_at, ends_at, duration_minutes, price, deposit_amount,
+   booking_source, booking_reference)
+VALUES (
+  'f0000000-0000-4000-8000-000000000098',
+  'b0000000-0000-4000-8000-000000000001',
+  'c1000000-0000-4000-8000-000000000001',
+  'd0000000-0000-4000-8000-000000000001',
+  'c0000000-0000-4000-8000-000000000001',
+  'completed',
+  '2026-07-01T10:00:00Z',
+  '2026-07-01T13:00:00Z',
+  180, 120.00, 30.00,
+  'online', 'KZB-REVIEWSEED1'
+) ON CONFLICT DO NOTHING;
+
+INSERT INTO reviews (id, business_id, client_id, appointment_id, rating, comment, reviewer_name, is_public)
+VALUES (
+  'e0000000-0000-4000-8000-000000000001',
+  'b0000000-0000-4000-8000-000000000001',
+  'c1000000-0000-4000-8000-000000000001',
+  'f0000000-0000-4000-8000-000000000098',
+  4, 'Great service, will come back.', 'Test Reviewer', true
+) ON CONFLICT DO NOTHING;
+
+INSERT INTO appointments
+  (id, business_id, client_id, status,
+   starts_at, ends_at, duration_minutes, price, deposit_amount,
+   booking_source, booking_reference)
+VALUES (
+  'f0000000-0000-4000-8000-000000000097',
+  'b0000000-0000-4000-8000-000000000002',
+  'c2000000-0000-4000-8000-000000000001',
+  'completed',
+  '2026-07-01T10:00:00Z',
+  '2026-07-01T11:00:00Z',
+  60, 50.00, 0.00,
+  'online', 'KZB-REVIEWSEED2'
+) ON CONFLICT DO NOTHING;
+
+INSERT INTO reviews (id, business_id, client_id, appointment_id, rating, comment, reviewer_name, is_public)
+VALUES (
+  'e0000000-0000-4000-8000-000000000002',
+  'b0000000-0000-4000-8000-000000000002',
+  'c2000000-0000-4000-8000-000000000001',
+  'f0000000-0000-4000-8000-000000000097',
+  5, 'Foreign business test review.', 'Foreign Reviewer', true
+) ON CONFLICT DO NOTHING;

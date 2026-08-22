@@ -3,6 +3,8 @@ import { handleCors, jsonCors } from "../_shared/cors.ts";
 import { badRequest, conflict, forbidden, notFound, serverError } from "../_shared/errors.ts";
 import { withLogging } from "../_shared/logger.ts";
 import { requireOwnerOrManagerCtx, verifyAuth } from "../_shared/auth.ts";
+import { getCallerIp } from "../_shared/adminAuth.ts";
+import { logReviewModeration } from "../_shared/reviewAudit.ts";
 
 const REVIEW_SELECT = `*, client:clients(first_name, last_name, avatar_url)`;
 
@@ -14,6 +16,7 @@ const REVIEW_SELECT = `*, client:clients(first_name, last_name, avatar_url)`;
  * POST body={token, rating, comment?, reviewer_name?}  → public token-based submit
  * POST body={appointmentId, rating, comment}           → authenticated customer submit
  * PATCH ?id=  body={reply}            → owner reply (owner/manager)
+ * PATCH ?id=&action=moderate  body={is_public, reason}  → hide/unhide (owner/manager)
  */
 Deno.serve(withLogging("reviews", async (req: Request) => {
   const corsResp = handleCors(req);
@@ -217,8 +220,7 @@ Deno.serve(withLogging("reviews", async (req: Request) => {
     if (method === "PATCH") {
       if (!id) return badRequest("id is required");
       const body = await req.json() as Record<string, unknown>;
-      const reply = body.reply as string;
-      if (!reply) return badRequest("reply is required");
+      const action = url.searchParams.get("action");
 
       const { data: existing } = await supabaseAdmin
         .from("reviews")
@@ -228,8 +230,46 @@ Deno.serve(withLogging("reviews", async (req: Request) => {
 
       if (!existing) return notFound("Review not found");
 
-      const ctx = await requireOwnerOrManagerCtx(req, (existing as Record<string, unknown>).business_id as string);
+      const businessId = (existing as Record<string, unknown>).business_id as string;
+      const ctx = await requireOwnerOrManagerCtx(req, businessId);
       if (ctx instanceof Response) return ctx;
+
+      // ── Moderate: hide/unhide (owner/manager) ────────────────────────────
+      if (action === "moderate") {
+        const isPublic = body.is_public;
+        const reason = body.reason as string | undefined;
+        if (typeof isPublic !== "boolean") return badRequest("is_public (boolean) is required");
+        if (!reason || !reason.trim()) return badRequest("reason is required");
+
+        const { data, error } = await supabaseAdmin
+          .from("reviews")
+          .update({
+            is_public: isPublic,
+            moderated_by: ctx.userId,
+            moderated_at: new Date().toISOString(),
+            moderation_reason: reason,
+          })
+          .eq("id", id)
+          .select(REVIEW_SELECT)
+          .single();
+
+        if (error) return serverError(error.message);
+
+        logReviewModeration({
+          businessId,
+          reviewId: id,
+          actorUserId: ctx.userId,
+          action: isPublic ? "UNHIDDEN" : "HIDDEN",
+          reason,
+          ipAddress: getCallerIp(req),
+        });
+
+        return jsonCors(req, data);
+      }
+
+      // ── Reply (owner/manager) ─────────────────────────────────────────────
+      const reply = body.reply as string;
+      if (!reply) return badRequest("reply is required");
 
       const { data, error } = await supabaseAdmin
         .from("reviews")

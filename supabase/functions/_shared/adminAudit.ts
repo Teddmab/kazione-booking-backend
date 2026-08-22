@@ -17,12 +17,15 @@ export type AdminAction =
   | "PAYMENTS_LISTED"
   | "AUDIT_LOG_VIEWED"
   | "REGION_ENABLED"
-  | "REGION_DISABLED";
+  | "REGION_DISABLED"
+  | "REVIEWS_LISTED"
+  | "REVIEW_HIDDEN"
+  | "REVIEW_UNHIDDEN";
 
 export interface AuditEntry {
   adminId: string;
   action: AdminAction;
-  targetType?: "business" | "user" | "appointment" | "payment";
+  targetType?: "business" | "user" | "appointment" | "payment" | "review";
   targetId?: string;
   targetMeta?: Record<string, unknown>;
   ipAddress?: string;

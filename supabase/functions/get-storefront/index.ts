@@ -169,6 +169,7 @@ interface StorefrontData {
   currencyCode: string;
   storefrontLocale: string;
   countryCode: string | null;
+  timezone: string;
 
   // Marketplace
   headline: string | null;
@@ -577,6 +578,7 @@ Deno.serve(withLogging("get-storefront", async (req: Request) => {
       currencyCode: business.currency_code ?? "EUR",
       storefrontLocale: locale,
       countryCode: storefront.country_code ?? (business as Record<string, unknown>).country as string ?? null,
+      timezone: (business as Record<string, unknown>).timezone as string | null ?? "UTC",
 
       // Marketplace
       headline: storefront.marketplace_headline ?? null,

@@ -85,8 +85,8 @@ BEGIN
   END IF;
 
   v_earliest_time := now() + (v_lead_hours || ' hours')::interval;
-  v_day_start_utc := (p_date::text || ' 00:00:00')::timestamp AT TIME ZONE v_business_tz;
-  v_day_end_utc   := ((p_date + 1)::text || ' 00:00:00')::timestamp AT TIME ZONE v_business_tz;
+  v_day_start_utc := ((p_date::text || ' 00:00:00')::timestamp AT TIME ZONE v_business_tz);
+  v_day_end_utc   := (((p_date + 1)::text || ' 00:00:00')::timestamp AT TIME ZONE v_business_tz);
 
   RETURN QUERY
   WITH eligible_staff AS (
@@ -120,8 +120,8 @@ BEGIN
            gs AS s_instant
       FROM staff_hours sh,
            generate_series(
-             (p_date::text || ' ' || sh.wh_start::text)::timestamp AT TIME ZONE v_business_tz,
-             (p_date::text || ' ' || sh.wh_end::text)::timestamp AT TIME ZONE v_business_tz
+             ((p_date::text || ' ' || sh.wh_start::text)::timestamp AT TIME ZONE v_business_tz),
+             ((p_date::text || ' ' || sh.wh_end::text)::timestamp AT TIME ZONE v_business_tz)
                - (v_duration || ' minutes')::interval,
              (v_slot_interval || ' minutes')::interval
            ) gs

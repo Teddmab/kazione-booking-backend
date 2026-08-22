@@ -83,6 +83,17 @@ jobs:
           echo "TEST_OWNER_TOKEN=$TOKEN" >> "$GITHUB_ENV"
           if [ -n "$TOKEN" ]; then echo "Owner token obtained."; else echo "Owner token not available — authenticated tests will be skipped."; fi
 
+      - name: Get test admin token (seed platform admin)
+        run: |
+          ANON_KEY=$(supabase status | grep "anon key" | awk '{print $NF}')
+          RESPONSE=$(curl -s -X POST "http://127.0.0.1:54321/auth/v1/token?grant_type=password" \
+            -H "apikey: $ANON_KEY" \
+            -H "Content-Type: application/json" \
+            -d '{"email":"admin@kazione.internal","password":"Test1234!"}')
+          TOKEN=$(echo "$RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('access_token',''))" 2>/dev/null || echo "")
+          echo "TEST_ADMIN_TOKEN=$TOKEN" >> "$GITHUB_ENV"
+          if [ -n "$TOKEN" ]; then echo "Admin token obtained."; else echo "Admin token not available — authenticated admin tests will be skipped."; fi
+
       - name: Run integration tests
         run: |
           deno test supabase/functions/ \

@@ -49,31 +49,38 @@ Deno.serve(withLogging("admin-monitoring", async (req: Request) => {
   }
 
   const since = new Date(Date.now() - RANGE_HOURS[rangeParam] * 60 * 60 * 1000).toISOString();
+  const errorSampleSince = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
 
   try {
-    const [metricsRes, healthLatestRes, healthHistoryRes] = await Promise.all([
+    const [metricsRes, healthHistoryRes, errorSamplesRes] = await Promise.all([
       supabaseAdmin
         .from("platform_metrics_hourly")
         .select("function_name, hour_bucket, request_count, error_count, total_duration_ms")
         .gte("hour_bucket", since)
         .order("hour_bucket", { ascending: true })
         .limit(20000),
+      // Last 2000 health-check rows across every endpoint (checks run every
+      // 15 min for ~6 endpoints, so this comfortably covers several days) —
+      // used both for the latest-status board and each endpoint's history.
       supabaseAdmin
         .from("platform_endpoint_health")
         .select("endpoint_name, checked_at, status, http_status")
         .order("checked_at", { ascending: false })
-        .limit(500),
+        .limit(2000),
+      // Recent actual error messages (not just counts) so a click on a
+      // top-erroring function shows what's actually breaking.
       supabaseAdmin
-        .from("platform_endpoint_health")
-        .select("endpoint_name, status")
-        .gte("checked_at", new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString())
-        .limit(5000),
+        .from("platform_error_log")
+        .select("function_name, status_code, message, created_at")
+        .gte("created_at", errorSampleSince)
+        .order("created_at", { ascending: false })
+        .limit(500),
     ]);
 
-    if (metricsRes.error || healthLatestRes.error || healthHistoryRes.error) {
+    if (metricsRes.error || healthHistoryRes.error || errorSamplesRes.error) {
       console.error(
         "[admin-monitoring] fetch error:",
-        metricsRes.error?.message ?? healthLatestRes.error?.message ?? healthHistoryRes.error?.message,
+        metricsRes.error?.message ?? healthHistoryRes.error?.message ?? errorSamplesRes.error?.message,
       );
       return serverError();
     }
@@ -104,7 +111,9 @@ Deno.serve(withLogging("admin-monitoring", async (req: Request) => {
         avg_duration_ms: agg.request_count > 0 ? Math.round(agg.total_duration_ms / agg.request_count) : 0,
       }));
 
-    // Top erroring functions in the period.
+    // Top erroring functions in the period, each with a few of its most
+    // recent real error messages — this is what a click on the row expands
+    // to show, so an admin can see what's actually breaking, not just a count.
     const byFunction = new Map<string, { request_count: number; error_count: number }>();
     for (const row of rows) {
       const agg = byFunction.get(row.function_name) ?? { request_count: 0, error_count: 0 };
@@ -112,33 +121,49 @@ Deno.serve(withLogging("admin-monitoring", async (req: Request) => {
       agg.error_count += row.error_count;
       byFunction.set(row.function_name, agg);
     }
+
+    const errorSamples = (errorSamplesRes.data ?? []) as {
+      function_name: string; status_code: number; message: string | null; created_at: string;
+    }[];
+    const samplesByFunction = new Map<string, { status_code: number; message: string | null; created_at: string }[]>();
+    for (const row of errorSamples) {
+      const list = samplesByFunction.get(row.function_name) ?? [];
+      if (list.length < 5) list.push({ status_code: row.status_code, message: row.message, created_at: row.created_at });
+      samplesByFunction.set(row.function_name, list);
+    }
+
     const topErrors = Array.from(byFunction.entries())
-      .map(([function_name, agg]) => ({ function_name, ...agg }))
+      .map(([function_name, agg]) => ({
+        function_name,
+        ...agg,
+        recent_errors: samplesByFunction.get(function_name) ?? [],
+      }))
       .filter((f) => f.error_count > 0)
       .sort((a, b) => b.error_count - a.error_count)
       .slice(0, 10);
 
-    // Latest status per endpoint, plus a simple check-count uptime % over 24h.
-    const latestByEndpoint = new Map<string, { endpoint_name: string; checked_at: string; status: string; http_status: number | null }>();
-    for (const row of (healthLatestRes.data ?? []) as { endpoint_name: string; checked_at: string; status: string; http_status: number | null }[]) {
-      if (!latestByEndpoint.has(row.endpoint_name)) latestByEndpoint.set(row.endpoint_name, row);
-    }
-    const upCounts = new Map<string, { up: number; total: number }>();
-    for (const row of (healthHistoryRes.data ?? []) as { endpoint_name: string; status: string }[]) {
-      const agg = upCounts.get(row.endpoint_name) ?? { up: 0, total: 0 };
-      agg.total += 1;
-      if (row.status === "up") agg.up += 1;
-      upCounts.set(row.endpoint_name, agg);
+    // Per-endpoint history (most recent first) — the latest entry is the
+    // current status; the full list is what a click on a status card
+    // expands to show.
+    const historyByEndpoint = new Map<string, { checked_at: string; status: string; http_status: number | null }[]>();
+    for (const row of (healthHistoryRes.data ?? []) as { endpoint_name: string; checked_at: string; status: string; http_status: number | null }[]) {
+      const list = historyByEndpoint.get(row.endpoint_name) ?? [];
+      list.push({ checked_at: row.checked_at, status: row.status, http_status: row.http_status });
+      historyByEndpoint.set(row.endpoint_name, list);
     }
 
-    const health = Array.from(latestByEndpoint.values()).map((e) => {
-      const counts = upCounts.get(e.endpoint_name) ?? { up: 0, total: 0 };
+    const dayAgo = errorSampleSince;
+    const health = Array.from(historyByEndpoint.entries()).map(([endpoint_name, history]) => {
+      const last24h = history.filter((h) => h.checked_at >= dayAgo);
+      const upCount = last24h.filter((h) => h.status === "up").length;
+      const latest = history[0];
       return {
-        endpoint_name: e.endpoint_name,
-        status: e.status,
-        http_status: e.http_status,
-        checked_at: e.checked_at,
-        uptime_pct_24h: counts.total > 0 ? Math.round((counts.up / counts.total) * 1000) / 10 : null,
+        endpoint_name,
+        status: latest.status,
+        http_status: latest.http_status,
+        checked_at: latest.checked_at,
+        uptime_pct_24h: last24h.length > 0 ? Math.round((upCount / last24h.length) * 1000) / 10 : null,
+        history: history.slice(0, 20),
       };
     }).sort((a, b) => a.endpoint_name.localeCompare(b.endpoint_name));
 

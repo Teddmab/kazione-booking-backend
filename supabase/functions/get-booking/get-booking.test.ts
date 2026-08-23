@@ -18,6 +18,44 @@ const ANON_KEY =
 // !staff_profile_id hint) shipped without CI ever catching it.
 const TEST_APPT_ID = "f0000000-0000-4000-8000-000000000099";
 
+// Owned exclusively by this file's real-cancel-token test below — distinct
+// from every other test file's date range so a parallel `deno test` run
+// can never collide on the same slot.
+const BUSINESS_ID = "b0000000-0000-4000-8000-000000000001";
+const SERVICE_ID = "c0000000-0000-4000-8000-000000000001";
+const STAFF_ID = "d0000000-0000-4000-8000-000000000001";
+const CANDIDATE_DATES = ["2027-01-04", "2027-01-11"];
+
+async function createGuestBooking(): Promise<{ appointmentId: string; cancelToken: string } | null> {
+  for (const date of CANDIDATE_DATES) {
+    const availRes = await fetch(
+      `${BASE}/get-availability?business_id=${BUSINESS_ID}&service_id=${SERVICE_ID}&date=${date}`,
+      { headers: { apikey: ANON_KEY } },
+    );
+    const availBody = await availRes.json();
+    const slots = Array.isArray(availBody.slots) ? availBody.slots : [];
+    if (slots.length === 0) continue;
+
+    const res = await fetch(`${BASE}/create-booking`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", apikey: ANON_KEY },
+      body: JSON.stringify({
+        business_id: BUSINESS_ID,
+        service_id: SERVICE_ID,
+        staff_profile_id: STAFF_ID,
+        date,
+        time: slots[0].time,
+        client: { name: "Get-Booking Test", email: `get_booking_test_${Date.now()}@example.com`, phone: "555-7777" },
+        payment_method: "later",
+      }),
+    });
+    if (res.status !== 201) continue;
+    const body = await res.json();
+    return { appointmentId: body.appointment_id, cancelToken: body.cancel_token };
+  }
+  return null;
+}
+
 function call(params: Record<string, string>, token?: string) {
   const url = new URL(`${BASE}/get-booking`);
   Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v));
@@ -53,18 +91,20 @@ Deno.test("get-booking: real booking + wrong/garbage cancel_token → 404, not 2
 });
 
 Deno.test("get-booking: real booking + its own valid cancel_token → 200 with client details", async () => {
-  // Generating a real signed cancel token requires BOOKING_CANCEL_TOKEN_SECRET,
-  // which ci.yml writes into the edge-runtime's own .env, not this outer
-  // `deno test` process's env — so this one stays env-gated (TEST_APPT_CANCEL_TOKEN)
-  // rather than hardcoded. The authorized-fetch path itself (Step 2's embedded
-  // relations, including the staff_profiles ambiguity fix) is still covered
-  // for real by the owner-token test below, which always runs.
-  const cancelToken = Deno.env.get("TEST_APPT_CANCEL_TOKEN") || "";
-  if (!cancelToken) return;
-  const res = await call({ id: TEST_APPT_ID, cancel_token: cancelToken });
+  // Generating a signed cancel token synchronously would need
+  // BOOKING_CANCEL_TOKEN_SECRET, which ci.yml only writes into the
+  // edge-runtime's own .env, not this outer `deno test` process's env —
+  // but create-booking hands back a real, server-issued one in its own
+  // response, so no env var (and no permanent skip) is actually needed.
+  const booking = await createGuestBooking();
+  if (!booking) {
+    console.warn("No available slots for get-booking cancel-token test — reset DB with: supabase db reset");
+    return;
+  }
+  const res = await call({ id: booking.appointmentId, cancel_token: booking.cancelToken });
   assertEquals(res.status, 200);
   const body = await res.json();
-  assertEquals(body.booking.id, TEST_APPT_ID);
+  assertEquals(body.booking.id, booking.appointmentId);
 });
 
 Deno.test("get-booking: real booking + authenticated owner token for that business → 200, with staff embedded", async () => {
@@ -81,7 +121,9 @@ Deno.test("get-booking: real booking + authenticated owner token for that busine
 });
 
 Deno.test("get-booking: real booking + authenticated client's own JWT (not owner/token) → 200", async () => {
-  // No seeded client-user login flow wired into CI yet — stays env-gated.
+  // ci.yml now mints a real client JWT (customer@test.com, linked in
+  // seed.sql to TEST_APPT_ID's own client row) the same way it already
+  // does for the owner and platform-admin tokens — this always runs now.
   const clientToken = Deno.env.get("TEST_CLIENT_TOKEN") || "";
   if (!clientToken) return;
   const res = await call({ id: TEST_APPT_ID }, clientToken);

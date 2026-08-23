@@ -291,6 +291,20 @@ BEGIN
   RAISE NOTICE 'Seed appointments + clients inserted for Afrotouch Tallinn.';
 END $$;
 
+-- ── Link the seeded test customer to a real client record ─────────────────────
+-- Amara Diallo's client row (above) previously had no linked user_id, so
+-- get-booking.test.ts's and gdpr.test.ts's "authenticated client's own JWT"
+-- tests were permanently gated behind a TEST_CLIENT_TOKEN env var that
+-- nothing ever set — the client-authenticated view of a booking had zero
+-- live CI coverage. Linking her to the seeded customer@test.com account
+-- (created above) gives those tests a real, hardcoded fixture and lets
+-- ci.yml mint an actual client JWT the same way it already does for the
+-- owner and platform-admin tokens.
+UPDATE clients
+SET user_id = 'f0000000-0000-4000-8000-000000000002'
+WHERE id = 'c1000000-0000-4000-8000-000000000001'
+  AND user_id IS NULL;
+
 -- ── Foreign test business + client (S74) ──────────────────────────────────────
 -- Exists purely so cross-business test cases (clients.test.ts) have a REAL,
 -- distinct business/client pair to assert against, instead of skipping when

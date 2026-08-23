@@ -74,7 +74,6 @@ Deno.test("gdpr: self-delete without confirm → 400", async () => {
   assertEquals(res.status, 400)
   const data = await res.json()
   if (!data.error) throw new Error("Expected error envelope in response")
-  await res.body?.cancel()
 })
 
 Deno.test("gdpr: self-delete with confirm=false → 400", async () => {

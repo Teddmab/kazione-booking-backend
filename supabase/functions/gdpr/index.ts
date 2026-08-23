@@ -63,7 +63,7 @@ Deno.serve(withLogging("gdpr", async (req: Request) => {
             price,
             booking_reference,
             services ( name ),
-            staff_profiles ( display_name )
+            staff_profiles!staff_profile_id ( display_name )
           `)
           .in("client_id", clientIds)
           .order("starts_at", { ascending: false }),

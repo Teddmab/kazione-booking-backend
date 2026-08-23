@@ -2,6 +2,7 @@ import { supabaseAdmin } from "../_shared/supabaseAdmin.ts";
 import { handleAdminCors, adminJson, adminErrors } from "../_shared/adminCors.ts";
 import { requirePlatformAdmin } from "../_shared/adminAuth.ts";
 import { withLogging } from "../_shared/logger.ts";
+import { portalFor } from "../_shared/criticalEndpoints.ts";
 
 type Range = "24h" | "7d" | "30d";
 
@@ -60,14 +61,16 @@ Deno.serve(withLogging("admin-monitoring", async (req: Request) => {
         .gte("hour_bucket", since)
         .order("hour_bucket", { ascending: true })
         .limit(20000),
-      // Last 5000 health-check rows across every endpoint (checks run every
-      // 15 min for ~6 endpoints, so this comfortably covers several weeks) —
-      // used both for the latest-status board and each endpoint's history.
+      // Last 8000 health-check rows across every endpoint (checks run every
+      // 15 min for ~27 endpoints across client/owner/staff — ~2,600 rows/day —
+      // so this covers roughly 3 days, comfortably more than the 24h uptime
+      // calc and 96-sample-per-endpoint history actually need) — used both
+      // for the latest-status board and each endpoint's history.
       supabaseAdmin
         .from("platform_endpoint_health")
         .select("endpoint_name, checked_at, status, http_status")
         .order("checked_at", { ascending: false })
-        .limit(5000),
+        .limit(8000),
       // Actual error messages within the SAME selected range as the rest of
       // the dashboard (not a fixed 24h) — retrieving as much real log detail
       // as the admin asked for via the range picker is the point of this
@@ -160,6 +163,7 @@ Deno.serve(withLogging("admin-monitoring", async (req: Request) => {
       const latest = history[0];
       return {
         endpoint_name,
+        portal: portalFor(endpoint_name),
         status: latest.status,
         http_status: latest.http_status,
         checked_at: latest.checked_at,

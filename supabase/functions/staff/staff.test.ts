@@ -238,12 +238,20 @@ Deno.test("staff: GET magic-link — valid request writes a staff_action_log row
   // Verify the audit trail directly via PostgREST (no dedicated read endpoint
   // exists for staff_action_log yet — RLS lets an owner/manager read their
   // own business's rows). Reuses restBase from the diagnostic check above.
-  const logRes = await fetch(
-    `${restBase}/staff_action_log?staff_profile_id=eq.${TEST_STAFF_ID}&action=eq.STAFF_MAGIC_LINK_ISSUED&order=created_at.desc&limit=1`,
-    { headers: { apikey: ANON_KEY, Authorization: `Bearer ${OWNER_TOKEN}` } },
-  )
-  assertEquals(logRes.status, 200)
-  const rows = await logRes.json()
+  //
+  // logStaffAction is fire-and-forget (never awaited by the handler, by
+  // design), so the row can land a beat after the HTTP response does. Poll
+  // briefly instead of a single immediate query.
+  let rows: unknown[] = []
+  for (let attempt = 0; attempt < 10 && rows.length === 0; attempt++) {
+    if (attempt > 0) await new Promise((r) => setTimeout(r, 200))
+    const logRes = await fetch(
+      `${restBase}/staff_action_log?staff_profile_id=eq.${TEST_STAFF_ID}&action=eq.STAFF_MAGIC_LINK_ISSUED&order=created_at.desc&limit=1`,
+      { headers: { apikey: ANON_KEY, Authorization: `Bearer ${OWNER_TOKEN}` } },
+    )
+    assertEquals(logRes.status, 200)
+    rows = await logRes.json()
+  }
   if (!Array.isArray(rows) || rows.length === 0) {
     throw new Error("Expected a STAFF_MAGIC_LINK_ISSUED row in staff_action_log for this staff_profile_id")
   }

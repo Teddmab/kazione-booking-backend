@@ -2,6 +2,7 @@ import { supabaseAdmin } from "../_shared/supabaseAdmin.ts";
 import { handleCors, jsonCors } from "../_shared/cors.ts";
 import { withLogging } from "../_shared/logger.ts";
 import { sendEmail } from "../_shared/resend.ts";
+import { CRITICAL_ENDPOINT_NAMES } from "../_shared/criticalEndpoints.ts";
 
 /**
  * /platform-alert-digest — cron job (CRON_SECRET-gated, POST only)
@@ -48,25 +49,17 @@ function verifyCronAuth(req: Request): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// Health check — fixed list of endpoints no real booking flow can work
-// without. A plain OPTIONS request, same as a browser's CORS preflight.
+// Health check — every endpoint in _shared/criticalEndpoints.ts (client,
+// owner, and staff portals). A plain OPTIONS request, same as a browser's
+// CORS preflight.
 // ---------------------------------------------------------------------------
-
-const CRITICAL_ENDPOINTS = [
-  "create-booking",
-  "get-storefront",
-  "get-availability",
-  "cancel-booking",
-  "reschedule-booking",
-  "me",
-];
 
 async function checkHealth(): Promise<{ name: string; status: number | "unreachable" }[]> {
   const base = Deno.env.get("SUPABASE_URL");
   if (!base) return [];
 
   return await Promise.all(
-    CRITICAL_ENDPOINTS.map(async (name) => {
+    CRITICAL_ENDPOINT_NAMES.map(async (name) => {
       try {
         const res = await fetch(`${base}/functions/v1/${name}`, {
           method: "OPTIONS",

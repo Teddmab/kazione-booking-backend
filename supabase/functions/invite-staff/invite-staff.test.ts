@@ -54,16 +54,25 @@ Deno.test("invite-staff: successful invite writes a matching notification_delive
   // (avoids duplicating PII beyond what's structurally required) — read
   // back the most recent staff_invite row for this business instead, and
   // confirm its outcome matches the endpoint's own response.
-  const logRes = await fetch(
-    `${SUPABASE_URL}/rest/v1/notification_delivery_log?business_id=eq.${BUSINESS_ID}&purpose=eq.staff_invite&order=created_at.desc&limit=1`,
-    { headers: { apikey: SERVICE_KEY, Authorization: `Bearer ${SERVICE_KEY}` } },
-  )
-  assertEquals(logRes.status, 200)
-  const rows = await logRes.json()
+  //
+  // logNotificationDelivery is fire-and-forget (never awaited by the
+  // handler, by design — a logging failure must never delay or block the
+  // actual invite), so the row can land a beat after the HTTP response
+  // does. Poll briefly instead of a single immediate query.
+  let rows: unknown[] = []
+  for (let attempt = 0; attempt < 10 && rows.length === 0; attempt++) {
+    if (attempt > 0) await new Promise((r) => setTimeout(r, 200))
+    const logRes = await fetch(
+      `${SUPABASE_URL}/rest/v1/notification_delivery_log?business_id=eq.${BUSINESS_ID}&purpose=eq.staff_invite&order=created_at.desc&limit=1`,
+      { headers: { apikey: SERVICE_KEY, Authorization: `Bearer ${SERVICE_KEY}` } },
+    )
+    assertEquals(logRes.status, 200)
+    rows = await logRes.json()
+  }
   if (!Array.isArray(rows) || rows.length === 0) {
     throw new Error("Expected a staff_invite notification_delivery_log row")
   }
-  const row = rows[0]
+  const row = rows[0] as Record<string, unknown>
   assertEquals(row.channel, "email")
   assertEquals(row.recipient_type, "staff")
   assertEquals(row.appointment_id, null)

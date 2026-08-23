@@ -636,6 +636,38 @@ Deno.serve(withLogging("staff", async (req: Request) => {
               dashboardUrl: `${appUrl}/staff/services`,
             });
             await sendEmail(staffEmail, subject, html).catch((e) => console.warn("service offer email failed:", e));
+
+            // In-app notification so the staff bell updates immediately
+            if (memberId) {
+              const { data: memberRow } = await supabaseAdmin
+                .from("business_members")
+                .select("user_id")
+                .eq("id", memberId)
+                .maybeSingle();
+              const staffUserId = (memberRow as Record<string, unknown> | null)
+                ?.user_id as string | null;
+              if (staffUserId) {
+                const names = svcRows.map((s) => s.name as string);
+                const label = names.length === 1
+                  ? names[0]
+                  : `${names.length} services`;
+                await supabaseAdmin.from("notifications").insert({
+                  business_id: ctx.businessId,
+                  user_id: staffUserId,
+                  type: "service_offer",
+                  title: "New service offer",
+                  body: `You've been offered ${label}. Open Services to accept or decline.`,
+                  metadata: {
+                    service_ids: newlyOfferedServiceIds,
+                    service_names: names,
+                  },
+                }).then(({ error: notifErr }) => {
+                  if (notifErr) {
+                    console.warn("service offer notification failed:", notifErr);
+                  }
+                });
+              }
+            }
           } catch (e) { console.warn("service offer email error:", e); }
         })();
       }

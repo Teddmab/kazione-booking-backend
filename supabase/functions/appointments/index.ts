@@ -87,6 +87,22 @@ async function fetchStaffEmail(staffProfileId: string): Promise<string | null> {
   return (u?.email as string | null) ?? null;
 }
 
+async function fetchStaffUserId(staffProfileId: string): Promise<string | null> {
+  const { data: sp } = await supabaseAdmin
+    .from("staff_profiles")
+    .select("business_member_id")
+    .eq("id", staffProfileId)
+    .maybeSingle();
+  const memberId = (sp as Record<string, unknown> | null)?.business_member_id as string | null;
+  if (!memberId) return null;
+  const { data: bm } = await supabaseAdmin
+    .from("business_members")
+    .select("user_id")
+    .eq("id", memberId)
+    .maybeSingle();
+  return ((bm as Record<string, unknown> | null)?.user_id as string | null) ?? null;
+}
+
 async function fetchOwnerEmail(businessId: string): Promise<string | null> {
   const { data: ownerMember } = await supabaseAdmin
     .from("business_members")
@@ -756,6 +772,23 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
               dashboardUrl: `${Deno.env.get("APP_URL") ?? "https://kazionebooking.com"}/staff`,
             });
             await sendEmail(staffEmail, subject, html).catch((e) => console.warn("assign-staff offer email failed:", e));
+
+            const staffUserId = await fetchStaffUserId(staffProfileId);
+            if (staffUserId) {
+              await supabaseAdmin.from("notifications").insert({
+                business_id: apptRow.business_id,
+                user_id: staffUserId,
+                type: "appointment_offer",
+                title: "New appointment offer",
+                body: `${client ? `${client.first_name} ${client.last_name}` : "A client"} — ${service?.name ?? "Service"} on ${startsAtDate.toLocaleDateString("en-GB", { day: "numeric", month: "short", timeZone: bizTz })} at ${startsAtDate.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: bizTz })}`,
+                metadata: {
+                  appointment_id: apptRow.id,
+                  booking_reference: apptRow.booking_reference,
+                },
+              }).then(({ error: notifErr }) => {
+                if (notifErr) console.warn("assign-staff offer notification failed:", notifErr);
+              });
+            }
           } catch (e) { console.warn("assign-staff offer email error:", e); }
         })();
       }

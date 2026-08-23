@@ -91,13 +91,30 @@ Deno.test("admin-monitoring: health includes create-booking (a critical endpoint
   const res = await call("24h", ADMIN_TOKEN)
   assertEquals(res.status, 200)
   const body = await res.json()
-  const health = body.health as { endpoint_name: string; status: string; uptime_pct_24h: number | null; history: unknown[] }[]
+  const health = body.health as { endpoint_name: string; portal: string; status: string; uptime_pct_24h: number | null; history: unknown[] }[]
   if (health.length === 0) return // digest hasn't run yet in this job — nothing to assert
   const createBooking = health.find((h) => h.endpoint_name === "create-booking")
   if (!createBooking) throw new Error("Expected a health row for create-booking once the digest has run")
   if (!Array.isArray(createBooking.history) || createBooking.history.length === 0) {
     throw new Error("Expected create-booking's health row to include a non-empty history array")
   }
+  assertEquals(createBooking.portal, "client")
+})
+
+Deno.test("admin-monitoring: health covers all three portals (client/owner/staff), not just a handful of endpoints", async () => {
+  if (!ADMIN_TOKEN) return
+  const res = await call("24h", ADMIN_TOKEN)
+  assertEquals(res.status, 200)
+  const body = await res.json()
+  const health = body.health as { endpoint_name: string; portal: string }[]
+  if (health.length === 0) return // digest hasn't run yet in this job — nothing to assert
+  const portalsSeen = new Set(health.map((h) => h.portal))
+  for (const portal of ["client", "owner", "staff"]) {
+    if (!portalsSeen.has(portal)) throw new Error(`Expected at least one "${portal}" endpoint in health results, got portals: ${[...portalsSeen]}`)
+  }
+  // S60: this used to be a fixed list of 6 endpoints — now covers every
+  // business-critical endpoint across all three portals.
+  if (health.length < 20) throw new Error(`Expected broad endpoint coverage (20+), got ${health.length}`)
 })
 
 Deno.test("admin-monitoring: top_errors entries include recent_errors samples", async () => {

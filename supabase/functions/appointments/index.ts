@@ -280,8 +280,23 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
       }
 
       if (action === "kpis") {
+        // get_owner_dashboard_kpis defaults p_date to the Postgres session's
+        // CURRENT_DATE (UTC on Supabase) when omitted — wrong "today" for any
+        // business outside UTC, especially near local midnight. Resolve the
+        // business's actual local calendar date here and pass it explicitly.
+        const { data: bizTzRow } = await supabaseAdmin
+          .from("businesses")
+          .select("timezone")
+          .eq("id", businessId)
+          .maybeSingle();
+        const todayLocal = utcIsoToLocalParts(
+          new Date().toISOString(),
+          (bizTzRow as { timezone: string } | null)?.timezone ?? "UTC",
+        ).date;
+
         const { data, error } = await supabaseAdmin.rpc("get_owner_dashboard_kpis", {
           p_business_id: businessId,
+          p_date: todayLocal,
         });
         if (error) return serverError(error.message);
         return jsonCors(req, data);

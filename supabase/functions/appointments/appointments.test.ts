@@ -236,8 +236,43 @@ Deno.test("appointments: complete — commission task uses the service's own com
   assertEquals(rows[0].body.commission_amount, 25)
 })
 
-// The following require more setup for date filter
-// Deno.test("appointments: GET with date filter", async () => { ... })
+// date_from/date_to are business-local calendar dates, compared against
+// starts_at (a true UTC timestamptz). The seed business is Europe/Tallinn
+// (UTC+3 in October, pre-DST-end). 01:15 local on 2026-10-06 is 22:15 UTC
+// on 2026-10-05 — a wall-clock time whose business-local date and UTC date
+// disagree, exactly the boundary a naive `${date}T00:00:00` UTC-string
+// comparison gets wrong (it would file this appointment under the 5th, not
+// the 6th).
+Deno.test("appointments: GET date_from/date_to use the business's local calendar date, not UTC", async () => {
+  if (!OWNER_TOKEN) return
+
+  const bookRes = await callFn("POST", OWNER_TOKEN, manualBookingBody({ date: "2026-10-06", time: "01:15" }))
+  if (bookRes.status !== 201) {
+    const body = await bookRes.json().catch(() => null)
+    throw new Error(`Expected 201, got ${bookRes.status}: ${JSON.stringify(body)}`)
+  }
+  const booked = await bookRes.json()
+
+  const onOct6 = await callFn("GET", OWNER_TOKEN, undefined, {
+    business_id: BUSINESS_ID, date_from: "2026-10-06", date_to: "2026-10-06",
+  })
+  assertEquals(onOct6.status, 200)
+  const oct6Body = await onOct6.json()
+  const oct6Ids = (oct6Body.appointments ?? []).map((a: { id: string }) => a.id)
+  if (!oct6Ids.includes(booked.id)) {
+    throw new Error("Expected the 01:15 Tallinn-local Oct 6 appointment to be included when querying date_from/date_to=2026-10-06")
+  }
+
+  const onOct5 = await callFn("GET", OWNER_TOKEN, undefined, {
+    business_id: BUSINESS_ID, date_from: "2026-10-05", date_to: "2026-10-05",
+  })
+  assertEquals(onOct5.status, 200)
+  const oct5Body = await onOct5.json()
+  const oct5Ids = (oct5Body.appointments ?? []).map((a: { id: string }) => a.id)
+  if (oct5Ids.includes(booked.id)) {
+    throw new Error("The Oct 6 (Tallinn-local) appointment leaked into the Oct 5 query — date filtering regressed to UTC-day semantics")
+  }
+})
 
 // ── S62: notification-log read endpoint ────────────────────────────────
 // "What did we try to send this customer, and did it work" — the concrete

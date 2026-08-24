@@ -18,7 +18,7 @@ import {
   sendEmail,
 } from "../_shared/resend.ts";
 import { generateIcs, icsToBase64, googleCalendarUrl } from "../_shared/ics.ts";
-import { localWallClockToUtcIso, utcIsoToLocalParts } from "../_shared/timezone.ts";
+import { localDateRangeToUtcIso, localWallClockToUtcIso, utcIsoToLocalParts } from "../_shared/timezone.ts";
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const TIME_RE = /^\d{2}:\d{2}$/;
@@ -280,8 +280,23 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
       }
 
       if (action === "kpis") {
+        // get_owner_dashboard_kpis defaults p_date to the Postgres session's
+        // CURRENT_DATE (UTC on Supabase) when omitted — wrong "today" for any
+        // business outside UTC, especially near local midnight. Resolve the
+        // business's actual local calendar date here and pass it explicitly.
+        const { data: bizTzRow } = await supabaseAdmin
+          .from("businesses")
+          .select("timezone")
+          .eq("id", businessId)
+          .maybeSingle();
+        const todayLocal = utcIsoToLocalParts(
+          new Date().toISOString(),
+          (bizTzRow as { timezone: string } | null)?.timezone ?? "UTC",
+        ).date;
+
         const { data, error } = await supabaseAdmin.rpc("get_owner_dashboard_kpis", {
           p_business_id: businessId,
+          p_date: todayLocal,
         });
         if (error) return serverError(error.message);
         return jsonCors(req, data);
@@ -413,8 +428,23 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
         .is("deleted_at", null)
         .order("starts_at", { ascending: false });
 
-      if (dateFrom) query = query.gte("starts_at", `${dateFrom}T00:00:00`);
-      if (dateTo)   query = query.lte("starts_at", `${dateTo}T23:59:59`);
+      // dateFrom/dateTo are business-local calendar dates (e.g. from the
+      // owner dashboard's "today"), not UTC ones — comparing them against
+      // starts_at (a true UTC timestamptz) as bare strings silently applied
+      // UTC-day boundaries instead, mis-scoping "today"/period queries for
+      // any business outside UTC (same bug class as the dashboard KPIs fix
+      // above). Resolve the business's timezone once and convert each
+      // boundary to a true UTC instant before filtering.
+      if (dateFrom || dateTo) {
+        const { data: bizTzForRange } = await supabaseAdmin
+          .from("businesses")
+          .select("timezone")
+          .eq("id", businessId)
+          .maybeSingle();
+        const rangeTz = (bizTzForRange as { timezone: string } | null)?.timezone ?? "UTC";
+        if (dateFrom) query = query.gte("starts_at", localDateRangeToUtcIso(dateFrom, rangeTz).startUtcIso);
+        if (dateTo)   query = query.lt("starts_at", localDateRangeToUtcIso(dateTo, rangeTz).endUtcIsoExclusive);
+      }
       if (statusParams?.length) query = query.in("status", statusParams);
       // Staff callers: restrict to their own appointments (primary or secondary role)
       // Owner/manager: respect optional staffId param

@@ -912,6 +912,48 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
         });
       }
 
+      // In-app notification for the assigned staff member (bell badge on mobile/web)
+      if (finalStaffId) {
+        try {
+          const { data: spRow } = await supabaseAdmin
+            .from("staff_profiles")
+            .select("business_member_id")
+            .eq("id", finalStaffId)
+            .maybeSingle();
+          const memberId = (spRow as Record<string, unknown> | null)
+            ?.business_member_id as string | null;
+          if (memberId) {
+            const { data: bmRow } = await supabaseAdmin
+              .from("business_members")
+              .select("user_id")
+              .eq("id", memberId)
+              .maybeSingle();
+            const staffUserId = (bmRow as Record<string, unknown> | null)
+              ?.user_id as string | null;
+            if (
+              staffUserId &&
+              staffUserId !== (ownerMember?.user_id as string | undefined)
+            ) {
+              await supabaseAdmin.from("notifications").insert({
+                business_id,
+                user_id: staffUserId,
+                type: referrerStaffId ? "appointment_offer" : "new_booking",
+                title: referrerStaffId
+                  ? "New appointment offer"
+                  : "New Booking",
+                body: `${client.name} booked ${service.name} on ${date} at ${time}`,
+                metadata: {
+                  appointment_id: appointmentId,
+                  booking_reference: bookingReference,
+                },
+              });
+            }
+          }
+        } catch (e) {
+          console.warn("staff booking notification failed:", e);
+        }
+      }
+
       return jsonOk(req, {
         booking_reference: bookingReference,
         appointment_id: appointmentId,

@@ -248,8 +248,13 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
 
       // Verify user is at least a business member for reads.
       // If the caller is a staff member, capture their staff_profile_id
-      // so we can filter the appointment list to only their assignments.
+      // so we can filter the appointment list to only their assignments —
+      // unless they're a supervisor, or the business has staff_see_all_appointments
+      // on, in which case the list-scope restriction below is skipped (but
+      // callerStaffProfileId stays set, since it's also used further down to
+      // annotate each row with this caller's own commission_earned).
       let callerStaffProfileId: string | null = null;
+      let staffCanSeeAll = false;
       try {
         const user = await verifyAuth(req);
         const { data: memberRow, error: memberErr } = await supabaseAdmin
@@ -269,11 +274,23 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
         if (callerRole === "staff") {
           const { data: sp } = await supabaseAdmin
             .from("staff_profiles")
-            .select("id")
+            .select("id, is_supervisor")
             .eq("business_member_id", (memberRow as { id: string }).id)
             .eq("business_id", businessId)
             .maybeSingle();
-          callerStaffProfileId = (sp as { id: string } | null)?.id ?? null;
+          const spRow = sp as { id: string; is_supervisor: boolean } | null;
+          callerStaffProfileId = spRow?.id ?? null;
+          if (spRow?.is_supervisor) {
+            staffCanSeeAll = true;
+          } else {
+            const { data: settingsRow } = await supabaseAdmin
+              .from("business_settings")
+              .select("staff_see_all_appointments")
+              .eq("business_id", businessId)
+              .maybeSingle();
+            staffCanSeeAll = (settingsRow as { staff_see_all_appointments: boolean | null } | null)
+              ?.staff_see_all_appointments === true;
+          }
         }
       } catch (e) {
         if (e instanceof Response) return e;
@@ -447,9 +464,11 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
         if (dateTo)   query = query.lt("starts_at", localDateRangeToUtcIso(dateTo, rangeTz).endUtcIsoExclusive);
       }
       if (statusParams?.length) query = query.in("status", statusParams);
-      // Staff callers: restrict to their own appointments (primary or secondary role)
-      // Owner/manager: respect optional staffId param
-      if (callerStaffProfileId) {
+      // Ordinary staff callers: restrict to their own appointments (primary or
+      // secondary role). Owner/manager, and supervisors or staff covered by
+      // staff_see_all_appointments: respect the optional staffId param instead
+      // (typically omitted by those callers, meaning "everyone").
+      if (callerStaffProfileId && !staffCanSeeAll) {
         query = query.or(
           `staff_profile_id.eq.${callerStaffProfileId},staff_profile_id_2.eq.${callerStaffProfileId}`,
         );

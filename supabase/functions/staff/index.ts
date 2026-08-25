@@ -101,6 +101,7 @@ Deno.serve(withLogging("staff", async (req: Request) => {
           avatar_url,
           specialties,
           is_active,
+          is_supervisor,
           commission_rate,
           bank_account_iban,
           bank_account_bank_name,
@@ -161,6 +162,7 @@ Deno.serve(withLogging("staff", async (req: Request) => {
         role: member.role,
         position: (row.position as string | null) ?? null,
         specialties: (row.specialties as string[]) ?? [],
+        is_supervisor: Boolean(row.is_supervisor),
         business_id: businessId,
         commission_rate: (row.commission_rate as number | null) ?? 0,
         bank_account_iban: (row.bank_account_iban as string | null) ?? null,
@@ -183,7 +185,7 @@ Deno.serve(withLogging("staff", async (req: Request) => {
         .from("staff_profiles")
         .select(`
           id, display_name, position, bio, avatar_url, specialties,
-          is_active, commission_rate, calendar_color,
+          is_active, is_supervisor, commission_rate, calendar_color,
           bank_account_iban, bank_account_bank_name,
           bank_account_holder_name, bank_account_is_entrepreneur,
           bank_account_ee_accepted_at,
@@ -226,6 +228,7 @@ Deno.serve(withLogging("staff", async (req: Request) => {
         avatar_url: spRow.avatar_url ?? null,
         specialties: (spRow.specialties as string[]) ?? [],
         is_active: spRow.is_active,
+        is_supervisor: Boolean(spRow.is_supervisor),
         calendar_color: spRow.calendar_color ?? null,
         commission_rate: (spRow.commission_rate as number | null) ?? 0,
         email,

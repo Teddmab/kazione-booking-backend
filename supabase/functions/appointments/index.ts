@@ -2,7 +2,7 @@ import { supabaseAdmin } from "../_shared/supabaseAdmin.ts";
 import { corsHeadersFor, handleCors, jsonCors } from "../_shared/cors.ts";
 import { badRequest, conflict, forbidden, notFound, serverError } from "../_shared/errors.ts";
 import { withLogging } from "../_shared/logger.ts";
-import { requireOwnerOrManagerCtx, verifyAuth, verifyBusinessMember } from "../_shared/auth.ts";
+import { requireOwnerOrManagerCtx, requireOwnerManagerOrSupervisorCtx, verifyAuth, verifyBusinessMember } from "../_shared/auth.ts";
 import { isSlotTakenError } from "../_shared/slotConflict.ts";
 import {
   bookingCancellationEmail,
@@ -19,6 +19,7 @@ import {
 } from "../_shared/resend.ts";
 import { generateIcs, icsToBase64, googleCalendarUrl } from "../_shared/ics.ts";
 import { localDateRangeToUtcIso, localWallClockToUtcIso, utcIsoToLocalParts } from "../_shared/timezone.ts";
+import { getBookingNotificationRecipients } from "../_shared/bookingNotificationRecipients.ts";
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const TIME_RE = /^\d{2}:\d{2}$/;
@@ -614,8 +615,8 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
 
       // Notifications — fire & forget
       {
-        const [notifSettingsRes, notifBizRes] = await Promise.all([
-          supabaseAdmin.from("business_settings").select("booking_notification_email").eq("business_id", ctx.businessId).maybeSingle(),
+        const [recipients, notifBizRes] = await Promise.all([
+          getBookingNotificationRecipients(ctx.businessId),
           supabaseAdmin.from("businesses").select("name, logo_url, currency_code, timezone").eq("id", ctx.businessId).single(),
         ]);
         const biz = notifBizRes.data;
@@ -635,9 +636,8 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
         const serviceName = serviceRow.name as string;
         const staffDisplayName = (staffRow?.display_name as string | null) ?? "TBD";
 
-        // Owner notification
-        const ownerNotifEmail = notifSettingsRes.data?.booking_notification_email as string | null | undefined;
-        if (ownerNotifEmail) {
+        // Booking notification — every supervisor, or the owner if none is set
+        for (const recipient of recipients) {
           const ownerEmailData = bookingReceivedOwnerEmail({
             clientName,
             clientEmail: (clientRow.email as string | null) ?? null,
@@ -652,8 +652,8 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
             price: priceDisplay,
             manageUrl: `${appUrl}/owner`,
           });
-          sendEmail(ownerNotifEmail, ownerEmailData.subject, ownerEmailData.html).catch(
-            (err) => console.error("Owner notification email (manual booking) failed:", err),
+          sendEmail(recipient.email, ownerEmailData.subject, ownerEmailData.html).catch(
+            (err) => console.error("Booking notification email (manual booking) failed:", err),
           );
         }
 
@@ -735,10 +735,16 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
 
       if (fetchErr || !existing) return notFound("Appointment not found");
 
-      const ctx = await requireOwnerOrManagerCtx(req, (existing as Record<string, unknown>).business_id as string);
+      const ctx = await requireOwnerManagerOrSupervisorCtx(req, (existing as Record<string, unknown>).business_id as string);
       if (ctx instanceof Response) return ctx;
 
       const oldStatus = (existing as Record<string, unknown>).status as string;
+      // Owner/manager may reassign a completed appointment (commission
+      // correction) — a supervisor may only reassign appointments that
+      // aren't completed yet.
+      if (ctx.role === "supervisor" && oldStatus === "completed") {
+        return forbidden("Supervisors cannot reassign a completed appointment");
+      }
       // Completed appointments keep their status; others move to "offered" awaiting staff confirmation
       const newStatus = oldStatus === "completed" ? "completed" : "offered";
 
@@ -842,8 +848,11 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
 
       if (fetchErr || !existing) return notFound("Appointment not found");
 
-      const ctx = await requireOwnerOrManagerCtx(req, (existing as Record<string, unknown>).business_id as string);
+      const ctx = await requireOwnerManagerOrSupervisorCtx(req, (existing as Record<string, unknown>).business_id as string);
       if (ctx instanceof Response) return ctx;
+      if (ctx.role === "supervisor" && (existing as Record<string, unknown>).status === "completed") {
+        return forbidden("Supervisors cannot reassign a completed appointment");
+      }
 
       // Verify the service requires two staff
       const serviceId2 = (existing as Record<string, unknown>).service_id as string;
@@ -1228,8 +1237,9 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
         commission_split_pct: number | null;
       };
 
-      // Owner/manager OR assigned staff may update status (staff portal MS1)
-      const ownerResult = await requireOwnerOrManagerCtx(req, existingRow.business_id);
+      // Owner/manager OR a supervisor OR the assigned staff member may update
+      // status (staff portal MS1; supervisors added for cross-staff completion)
+      const ownerResult = await requireOwnerManagerOrSupervisorCtx(req, existingRow.business_id);
       let ctx: { userId: string; businessId: string; role: string };
       if (ownerResult instanceof Response) {
         try {

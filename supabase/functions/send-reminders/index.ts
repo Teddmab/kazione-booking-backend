@@ -7,6 +7,7 @@ import { issueCancelToken } from "../_shared/bookingCancelToken.ts";
 import { sendSms } from "../_shared/messagebird.ts";
 import { sendClientWaReminder, sendStaffWaReminder } from "../_shared/bird-whatsapp.ts";
 import { logNotificationDelivery } from "../_shared/notificationLog.ts";
+import { getBookingNotificationRecipients, type NotificationRecipient } from "../_shared/bookingNotificationRecipients.ts";
 
 // ---------------------------------------------------------------------------
 // Auth — CRON_SECRET header check
@@ -131,17 +132,17 @@ async function sendReminders(
   if (!appointments || appointments.length === 0) return { sent: 0, errors: 0 };
 
   // Fetch settings for all relevant businesses — used for timing window (cron)
-  // and owner notification email (all paths).
+  // and the reminder-hours preference (all paths).
   const needsWindowFilter = !businessId && !appointmentId;
   const allBusinessIds = [...new Set(appointments.map((a: { business_id: unknown }) => a.business_id as string))];
 
-  interface BizSettings { reminderHours: number; ownerEmail: string | null }
+  interface BizSettings { reminderHours: number }
   let settingsMap = new Map<string, BizSettings>();
 
   {
     const { data: settingsRows, error: settingsErr } = await supabaseAdmin
       .from("business_settings")
-      .select("business_id, reminder_hours_before, booking_notification_email")
+      .select("business_id, reminder_hours_before")
       .in("business_id", allBusinessIds);
 
     if (settingsErr) {
@@ -153,16 +154,20 @@ async function sendReminders(
       (settingsRows ?? []).map((s: {
         business_id: unknown;
         reminder_hours_before: unknown;
-        booking_notification_email: unknown;
       }) => [
         s.business_id as string,
-        {
-          reminderHours: (s.reminder_hours_before as number) ?? 24,
-          ownerEmail: (s.booking_notification_email as string | null) ?? null,
-        },
+        { reminderHours: (s.reminder_hours_before as number) ?? 24 },
       ]),
     );
   }
+
+  // Booking notification recipients (supervisors, or the owner if none is
+  // set) — replaces the old fixed business_settings.booking_notification_email.
+  const recipientsMap = new Map<string, NotificationRecipient[]>(
+    await Promise.all(
+      allBusinessIds.map(async (bizId) => [bizId, await getBookingNotificationRecipients(bizId)] as const),
+    ),
+  );
 
   // Apply timing window only for the cron path
   const filteredAppointments = needsWindowFilter
@@ -303,10 +308,11 @@ async function sendReminders(
         });
       }
 
-      // Owner email reminder
-      const ownerEmail = settingsMap.get(appt.business_id as string)?.ownerEmail;
-      if (ownerEmail) {
-        const ownerEmailResult = await sendEmailInternal(ownerEmail, "owner_appointment_reminder", {
+      // Booking-notification-recipient email reminder (every supervisor, or
+      // the owner if none is set)
+      const reminderRecipients = recipientsMap.get(appt.business_id as string) ?? [];
+      for (const recipient of reminderRecipients) {
+        const ownerEmailResult = await sendEmailInternal(recipient.email, "owner_appointment_reminder", {
           salonName: business.name,
           clientName: `${client.first_name} ${client.last_name}`,
           clientEmail: client.email ?? "",

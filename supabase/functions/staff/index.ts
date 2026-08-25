@@ -1836,6 +1836,7 @@ Deno.serve(withLogging("staff", async (req: Request) => {
         .select(`
           id, starts_at, price, status,
           commission_paid_at, commission_pay_method, commission_amount_paid,
+          commission_payment_date, commission_pay_reference, commission_pay_note,
           client:clients(first_name, last_name),
           service:services(name, staff_commission_type, staff_commission_value)
         `)
@@ -1876,6 +1877,9 @@ Deno.serve(withLogging("staff", async (req: Request) => {
           commission_paid_at: (a.commission_paid_at as string | null) ?? null,
           commission_pay_method: (a.commission_pay_method as string | null) ?? null,
           commission_amount_paid: a.commission_amount_paid != null ? Number(a.commission_amount_paid) : null,
+          commission_payment_date: (a.commission_payment_date as string | null) ?? null,
+          commission_pay_reference: (a.commission_pay_reference as string | null) ?? null,
+          commission_pay_note: (a.commission_pay_note as string | null) ?? null,
         };
       }).filter((c) => c.commission_amount > 0 || !!c.commission_paid_at);
 
@@ -1917,6 +1921,7 @@ Deno.serve(withLogging("staff", async (req: Request) => {
         .select(`
           id, starts_at, price, status,
           commission_paid_at, commission_pay_method, commission_amount_paid,
+          commission_payment_date, commission_pay_reference, commission_pay_note,
           client:clients(first_name, last_name),
           service:services(name, staff_commission_type, staff_commission_value)
         `)
@@ -1957,6 +1962,9 @@ Deno.serve(withLogging("staff", async (req: Request) => {
           commission_paid_at: (a.commission_paid_at as string | null) ?? null,
           commission_pay_method: (a.commission_pay_method as string | null) ?? null,
           commission_amount_paid: a.commission_amount_paid != null ? Number(a.commission_amount_paid) : null,
+          commission_payment_date: (a.commission_payment_date as string | null) ?? null,
+          commission_pay_reference: (a.commission_pay_reference as string | null) ?? null,
+          commission_pay_note: (a.commission_pay_note as string | null) ?? null,
         };
       }).filter((c) => c.commission_amount > 0 || !!c.commission_paid_at);
 
@@ -2038,6 +2046,16 @@ Deno.serve(withLogging("staff", async (req: Request) => {
         return badRequest(req, "pay_method must be 'cash', 'bank_transfer', or 'offset'");
       }
 
+      // Optional payout metadata, shared across every item in this batch —
+      // describes how/when the external payment happened, distinct from
+      // commission_paid_at (the system timestamp of this API call).
+      const paymentDate = body.payment_date as string | undefined;
+      if (paymentDate && !/^\d{4}-\d{2}-\d{2}$/.test(paymentDate)) {
+        return badRequest(req, "payment_date must be an ISO date (YYYY-MM-DD)");
+      }
+      const payReference = typeof body.reference === "string" ? body.reference.trim().slice(0, 200) || null : null;
+      const payNote = typeof body.note === "string" ? body.note.trim().slice(0, 1000) || null : null;
+
       // Support new per-amount format: payments: [{appointment_id, amount, assign_staff_id?}]
       // Also support legacy format: appointment_ids: string[]
       type PaymentItem = { appointment_id: string; amount: number; assign_staff_id?: string };
@@ -2071,6 +2089,9 @@ Deno.serve(withLogging("staff", async (req: Request) => {
         };
         if (payment.amount > 0) updatePayload.commission_amount_paid = payment.amount;
         if (payment.assign_staff_id) updatePayload.staff_profile_id = payment.assign_staff_id;
+        if (paymentDate) updatePayload.commission_payment_date = paymentDate;
+        if (payReference) updatePayload.commission_pay_reference = payReference;
+        if (payNote) updatePayload.commission_pay_note = payNote;
 
         const { data: updated, error: updateErr } = await supabaseAdmin
           .from("appointments")

@@ -356,3 +356,57 @@ Deno.test("staff: pay-commissions — records payment_date/reference/note and th
   assertEquals(row.commission_pay_reference, "TX-TEST-001")
   assertEquals(row.commission_pay_note, "Paid via test suite")
 })
+
+// ── time-off (Availability tab — Vacation exception type) ──────────────────────
+
+Deno.test("staff: time-off — create, list within window, then delete round-trips cleanly", async () => {
+  if (!OWNER_TOKEN) return
+
+  const createRes = await call("POST", OWNER_TOKEN, {
+    date_from: "2027-02-10",
+    date_to: "2027-02-12",
+    reason: "Test vacation",
+  }, { action: "time-off", id: TEST_STAFF_ID })
+  if (createRes.status !== 201) {
+    const errBody = await createRes.json().catch(() => null)
+    throw new Error(`Expected 201, got ${createRes.status}: ${JSON.stringify(errBody)}`)
+  }
+  const created = await createRes.json()
+  assertEquals(created.reason, "Test vacation")
+  // starts_at/ends_at are UTC-midnight day boundaries, exclusive on the end —
+  // same convention get_available_slots already enforces against this table.
+  assertEquals(created.starts_at.startsWith("2027-02-10"), true)
+  assertEquals(created.ends_at.startsWith("2027-02-13"), true)
+
+  const listRes = await call("GET", OWNER_TOKEN, undefined, {
+    action: "time-off", id: TEST_STAFF_ID, from: "2027-02-01", to: "2027-02-28",
+  })
+  assertEquals(listRes.status, 200)
+  const list = await listRes.json()
+  if (!Array.isArray(list) || !list.some((r: Record<string, unknown>) => r.id === created.id)) {
+    throw new Error(`Expected the created time-off row ${created.id} to appear in the February listing`)
+  }
+
+  // A window entirely outside the range shouldn't return it.
+  const outsideRes = await call("GET", OWNER_TOKEN, undefined, {
+    action: "time-off", id: TEST_STAFF_ID, from: "2027-03-01", to: "2027-03-31",
+  })
+  assertEquals(outsideRes.status, 200)
+  const outsideList = await outsideRes.json()
+  if (outsideList.some((r: Record<string, unknown>) => r.id === created.id)) {
+    throw new Error("Did not expect the February time-off row to appear in a March window")
+  }
+
+  const deleteRes = await call("DELETE", OWNER_TOKEN, undefined, {
+    action: "time-off", id: TEST_STAFF_ID, off_id: created.id,
+  })
+  assertEquals(deleteRes.status, 200)
+
+  const afterDeleteRes = await call("GET", OWNER_TOKEN, undefined, {
+    action: "time-off", id: TEST_STAFF_ID, from: "2027-02-01", to: "2027-02-28",
+  })
+  const afterDeleteList = await afterDeleteRes.json()
+  if (afterDeleteList.some((r: Record<string, unknown>) => r.id === created.id)) {
+    throw new Error("Expected the time-off row to be gone after delete")
+  }
+})

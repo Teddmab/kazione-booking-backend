@@ -1455,6 +1455,136 @@ Deno.serve(withLogging("staff", async (req: Request) => {
       return jsonCors(req, { success: true });
     }
 
+    // ── GET /staff?action=time-off&id=&from=&to= ─────────────────────────────
+    // Returns multi-day time-off (vacation/leave) periods for a staff member
+    // that overlap the given date window. staff_time_off already exists and
+    // is already enforced by get_available_slots — this just exposes CRUD.
+    if (method === "GET" && action === "time-off") {
+      if (!staffId) return badRequest("id query param is required");
+
+      const { data: existing, error: existingErr } = await supabaseAdmin
+        .from("staff_profiles")
+        .select("id, business_id")
+        .eq("id", staffId)
+        .maybeSingle();
+      if (existingErr) return serverError(existingErr.message);
+      if (!existing) return notFound("Staff member not found");
+
+      const ctx = await requireOwnerOrManagerCtx(
+        req,
+        (existing as Record<string, unknown>).business_id as string,
+      );
+      if (ctx instanceof Response) return ctx;
+
+      const fromDate = url.searchParams.get("from");
+      const toDate = url.searchParams.get("to");
+
+      let query = supabaseAdmin
+        .from("staff_time_off")
+        .select("id, starts_at, ends_at, reason, created_at")
+        .eq("staff_profile_id", staffId)
+        .order("starts_at", { ascending: true });
+
+      // Overlap test: a [starts_at, ends_at) row overlaps the [from, to]
+      // window unless it ends on/before `from` or starts after `to` — same
+      // exclusive-end convention as get_available_slots' own time_off check.
+      if (fromDate) query = query.gt("ends_at", fromDate);
+      if (toDate) {
+        const toExclusive = new Date(`${toDate}T00:00:00Z`);
+        toExclusive.setUTCDate(toExclusive.getUTCDate() + 1);
+        query = query.lt("starts_at", toExclusive.toISOString());
+      }
+
+      const { data: timeOff, error: timeOffErr } = await query;
+      if (timeOffErr) return serverError(timeOffErr.message);
+      return jsonCors(req, timeOff ?? []);
+    }
+
+    // ── POST /staff?action=time-off&id= ───────────────────────────────────────
+    // Creates a multi-day time-off (vacation/leave) period.
+    // Body: { date_from: "YYYY-MM-DD", date_to: "YYYY-MM-DD", reason?: string }
+    if (method === "POST" && action === "time-off") {
+      if (!staffId) return badRequest("id query param is required");
+
+      const { data: existing, error: existingErr } = await supabaseAdmin
+        .from("staff_profiles")
+        .select("id, business_id")
+        .eq("id", staffId)
+        .maybeSingle();
+      if (existingErr) return serverError(existingErr.message);
+      if (!existing) return notFound("Staff member not found");
+
+      const ctx = await requireOwnerOrManagerCtx(
+        req,
+        (existing as Record<string, unknown>).business_id as string,
+      );
+      if (ctx instanceof Response) return ctx;
+
+      const body = await req.json() as Record<string, unknown>;
+      const dateFrom = String(body.date_from ?? "").trim();
+      const dateTo = String(body.date_to ?? "").trim();
+      const reason = body.reason ? String(body.reason).trim() : null;
+
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(dateFrom) || !/^\d{4}-\d{2}-\d{2}$/.test(dateTo)) {
+        return badRequest("date_from and date_to must be YYYY-MM-DD");
+      }
+      if (dateFrom > dateTo) return badRequest("date_from must be on or before date_to");
+
+      // Same UTC-midnight day-boundary convention get_available_slots already
+      // compares staff_time_off against (starts_at < p_date+1, ends_at > p_date),
+      // so a newly created row is enforced exactly the same way.
+      const startsAt = `${dateFrom}T00:00:00Z`;
+      const endDatePlusOne = new Date(`${dateTo}T00:00:00Z`);
+      endDatePlusOne.setUTCDate(endDatePlusOne.getUTCDate() + 1);
+      const endsAt = endDatePlusOne.toISOString();
+
+      const { data: inserted, error: insertErr } = await supabaseAdmin
+        .from("staff_time_off")
+        .insert({
+          staff_profile_id: staffId,
+          business_id: ctx.businessId,
+          starts_at: startsAt,
+          ends_at: endsAt,
+          reason,
+        })
+        .select("id, starts_at, ends_at, reason, created_at")
+        .single();
+
+      if (insertErr) return serverError(insertErr.message);
+      return jsonCors(req, inserted, 201);
+    }
+
+    // ── DELETE /staff?action=time-off&id=&off_id= ─────────────────────────────
+    if (method === "DELETE" && action === "time-off") {
+      if (!staffId) return badRequest("id query param is required");
+      const offId = url.searchParams.get("off_id");
+      if (!offId) return badRequest("off_id query param is required");
+
+      const { data: existing, error: existingErr } = await supabaseAdmin
+        .from("staff_profiles")
+        .select("id, business_id")
+        .eq("id", staffId)
+        .maybeSingle();
+      if (existingErr) return serverError(existingErr.message);
+      if (!existing) return notFound("Staff member not found");
+
+      const ctx = await requireOwnerOrManagerCtx(
+        req,
+        (existing as Record<string, unknown>).business_id as string,
+      );
+      if (ctx instanceof Response) return ctx;
+
+      const { error: delErr } = await supabaseAdmin
+        .from("staff_time_off")
+        .delete()
+        .eq("id", offId)
+        .eq("staff_profile_id", staffId)
+        .eq("business_id", ctx.businessId);
+
+      if (delErr) return serverError(delErr.message);
+      return jsonCors(req, { success: true });
+    }
+
     // ── DELETE /staff?action=cancel-invite&id= ───────────────────────────────
     // Hard-delete a pending (never-accepted) staff invite. Safe to hard-delete
     // because the invite was never activated — no user account is linked yet.

@@ -1967,6 +1967,7 @@ Deno.serve(withLogging("staff", async (req: Request) => {
           id, starts_at, price, status,
           commission_paid_at, commission_pay_method, commission_amount_paid,
           commission_payment_date, commission_pay_reference, commission_pay_note,
+          commission_type_snapshot, commission_value_snapshot, commission_amount_snapshot,
           client:clients(first_name, last_name),
           service:services(name, staff_commission_type, staff_commission_value)
         `)
@@ -1987,13 +1988,25 @@ Deno.serve(withLogging("staff", async (req: Request) => {
       const rows = (appts ?? []) as Record<string, unknown>[];
       const commissions = rows.map((a) => {
         const svc = a.service as Record<string, unknown> | null;
-        const commType = (svc?.staff_commission_type as string) ?? "none";
-        const commValue = Number(svc?.staff_commission_value ?? 0);
         const price = Number(a.price ?? 0);
-        let commAmt = 0;
-        if (commType === "percentage" && commValue > 0) commAmt = price * commValue / 100;
-        else if (commType === "fixed" && commValue > 0) commAmt = commValue;
-        else if (commRate > 0) commAmt = price * commRate / 100;
+        // A completed appointment freezes its commission at the moment it
+        // completes (see 124_commission_completion_snapshot.sql) — once that
+        // snapshot exists, it's authoritative and must never be recomputed
+        // from the service's CURRENT rate, which may have changed since.
+        // Legacy appointments completed before the snapshot existed fall
+        // back to the old live calculation.
+        const hasSnapshot = a.commission_type_snapshot != null;
+        const commType = hasSnapshot ? (a.commission_type_snapshot as string) : (svc?.staff_commission_type as string) ?? "none";
+        const commValue = hasSnapshot ? Number(a.commission_value_snapshot ?? 0) : Number(svc?.staff_commission_value ?? 0);
+        let commAmt: number;
+        if (hasSnapshot) {
+          commAmt = Number(a.commission_amount_snapshot ?? 0);
+        } else {
+          commAmt = 0;
+          if (commType === "percentage" && commValue > 0) commAmt = price * commValue / 100;
+          else if (commType === "fixed" && commValue > 0) commAmt = commValue;
+          else if (commRate > 0) commAmt = price * commRate / 100;
+        }
         const client = a.client as Record<string, unknown> | null;
         return {
           appointment_id: a.id as string,
@@ -2001,8 +2014,8 @@ Deno.serve(withLogging("staff", async (req: Request) => {
           client_name: client ? `${client.first_name ?? ""} ${client.last_name ?? ""}`.trim() : "Client",
           service_name: (svc?.name as string) ?? "Service",
           price,
-          commission_type: commType !== "none" ? commType : commRate > 0 ? "percentage" : "none",
-          commission_value: commType !== "none" ? commValue : commRate,
+          commission_type: hasSnapshot ? commType : (commType !== "none" ? commType : commRate > 0 ? "percentage" : "none"),
+          commission_value: hasSnapshot ? commValue : (commType !== "none" ? commValue : commRate),
           commission_amount: Math.round(commAmt * 100) / 100,
           commission_paid_at: (a.commission_paid_at as string | null) ?? null,
           commission_pay_method: (a.commission_pay_method as string | null) ?? null,
@@ -2052,6 +2065,7 @@ Deno.serve(withLogging("staff", async (req: Request) => {
           id, starts_at, price, status,
           commission_paid_at, commission_pay_method, commission_amount_paid,
           commission_payment_date, commission_pay_reference, commission_pay_note,
+          commission_type_snapshot, commission_value_snapshot, commission_amount_snapshot,
           client:clients(first_name, last_name),
           service:services(name, staff_commission_type, staff_commission_value)
         `)
@@ -2072,13 +2086,22 @@ Deno.serve(withLogging("staff", async (req: Request) => {
       const rows = (appts ?? []) as Record<string, unknown>[];
       const commissions = rows.map((a) => {
         const svc = a.service as Record<string, unknown> | null;
-        const commType = (svc?.staff_commission_type as string) ?? "none";
-        const commValue = Number(svc?.staff_commission_value ?? 0);
         const price = Number(a.price ?? 0);
-        let commAmt = 0;
-        if (commType === "percentage" && commValue > 0) commAmt = price * commValue / 100;
-        else if (commType === "fixed" && commValue > 0) commAmt = commValue;
-        else if (commRate > 0) commAmt = price * commRate / 100;
+        // Same snapshot-first rule as my-commissions above — once an
+        // appointment has completed and frozen its commission, later edits
+        // to the service's rate must never change what's shown for it.
+        const hasSnapshot = a.commission_type_snapshot != null;
+        const commType = hasSnapshot ? (a.commission_type_snapshot as string) : (svc?.staff_commission_type as string) ?? "none";
+        const commValue = hasSnapshot ? Number(a.commission_value_snapshot ?? 0) : Number(svc?.staff_commission_value ?? 0);
+        let commAmt: number;
+        if (hasSnapshot) {
+          commAmt = Number(a.commission_amount_snapshot ?? 0);
+        } else {
+          commAmt = 0;
+          if (commType === "percentage" && commValue > 0) commAmt = price * commValue / 100;
+          else if (commType === "fixed" && commValue > 0) commAmt = commValue;
+          else if (commRate > 0) commAmt = price * commRate / 100;
+        }
         const client = a.client as Record<string, unknown> | null;
         return {
           appointment_id: a.id as string,
@@ -2086,8 +2109,8 @@ Deno.serve(withLogging("staff", async (req: Request) => {
           client_name: client ? `${client.first_name ?? ""} ${client.last_name ?? ""}`.trim() : "Client",
           service_name: (svc?.name as string) ?? "Service",
           price,
-          commission_type: commType !== "none" ? commType : commRate > 0 ? "percentage" : "none",
-          commission_value: commType !== "none" ? commValue : commRate,
+          commission_type: hasSnapshot ? commType : (commType !== "none" ? commType : commRate > 0 ? "percentage" : "none"),
+          commission_value: hasSnapshot ? commValue : (commType !== "none" ? commValue : commRate),
           commission_amount: Math.round(commAmt * 100) / 100,
           commission_paid_at: (a.commission_paid_at as string | null) ?? null,
           commission_pay_method: (a.commission_pay_method as string | null) ?? null,

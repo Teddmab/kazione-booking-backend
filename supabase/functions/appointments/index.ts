@@ -1323,6 +1323,41 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
         updateFields.no_show_marked_at = new Date().toISOString();
       }
 
+      // Freeze the commission rate/amount at the moment an appointment
+      // completes — otherwise every ledger read recomputes it fresh from
+      // the service's CURRENT rate forever, so editing a commission rate
+      // would silently rewrite the computed commission on every historical
+      // completed-but-unpaid appointment for that service. This snapshot is
+      // independent of (and doesn't change) the existing auto-pay /
+      // commission_payment-task computations elsewhere in this handler.
+      if (status === "completed" && existingRow.staff_profile_id) {
+        const [svcRes, sp1Res, sp2Res] = await Promise.all([
+          existingRow.service_id
+            ? supabaseAdmin.from("services").select("staff_commission_type, staff_commission_value").eq("id", existingRow.service_id).maybeSingle()
+            : Promise.resolve({ data: null }),
+          supabaseAdmin.from("staff_profiles").select("commission_rate").eq("id", existingRow.staff_profile_id).maybeSingle(),
+          existingRow.staff_profile_id_2
+            ? supabaseAdmin.from("staff_profiles").select("commission_rate").eq("id", existingRow.staff_profile_id_2).maybeSingle()
+            : Promise.resolve({ data: null }),
+        ]);
+        const svc = svcRes.data as { staff_commission_type: string | null; staff_commission_value: number | null } | null;
+        const sp1 = sp1Res.data as { commission_rate: number | null } | null;
+        const sp2 = sp2Res.data as { commission_rate: number | null } | null;
+        const commType = svc?.staff_commission_type ?? "none";
+        const commValue = Number(svc?.staff_commission_value ?? 0);
+        const splitPct = existingRow.commission_split_pct;
+        const hasSecondStaff = !!existingRow.staff_profile_id_2;
+        const primaryFraction = hasSecondStaff ? (splitPct ?? 50) / 100 : 1;
+
+        updateFields.commission_type_snapshot = commType;
+        updateFields.commission_value_snapshot = commType === "none" ? Number(sp1?.commission_rate ?? 0) : commValue;
+        updateFields.commission_amount_snapshot = calcCommissionAmount(commType, commValue, Number(sp1?.commission_rate ?? 0), existingRow.price, primaryFraction);
+        if (hasSecondStaff) {
+          const secondaryFraction = (100 - (splitPct ?? 50)) / 100;
+          updateFields.commission_amount_snapshot_2 = calcCommissionAmount(commType, commValue, Number(sp2?.commission_rate ?? 0), existingRow.price, secondaryFraction);
+        }
+      }
+
       const { data, error } = await supabaseAdmin
         .from("appointments")
         .update(updateFields)

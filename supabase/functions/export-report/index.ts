@@ -291,12 +291,13 @@ async function generateStaffPayrollReport(
     name: s.display_name ?? "",
     bookings: Number(s.bookings ?? 0),
     revenue: Number(s.revenue ?? 0),
-    commission_rate: Number(s.completion_rate ?? 0),
     commission_amount: Number(s.commission_amount ?? 0),
+    commission_paid: Number(s.paid_commission ?? 0),
+    commission_unpaid: Number(s.unpaid_commission ?? 0),
   }));
 
   return {
-    headers: ["name", "bookings", "revenue", "commission_rate", "commission_amount"],
+    headers: ["name", "bookings", "revenue", "commission_amount", "commission_paid", "commission_unpaid"],
     rows,
   };
 }

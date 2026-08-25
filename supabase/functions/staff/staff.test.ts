@@ -10,11 +10,28 @@ const OWNER_TOKEN = Deno.env.get("TEST_OWNER_TOKEN") || ""
 // skipping behind an unset env var (S74).
 const TEST_STAFF_ID = "d0000000-0000-4000-8000-000000000001"
 const TEST_BUSINESS_ID = "b0000000-0000-4000-8000-000000000001"
+// Same seed constants appointments.test.ts uses for manual bookings.
+const TEST_SERVICE_ID = "c0000000-0000-4000-8000-000000000001" // Knotless Braids
+const TEST_CLIENT_ID = "c1000000-0000-4000-8000-000000000001" // Amara Diallo
 
 function call(method: string, token?: string, body?: unknown, params?: Record<string, string>) {
   const headers: Record<string, string> = { "Content-Type": "application/json", "apikey": ANON_KEY }
   if (token) headers["Authorization"] = `Bearer ${token}`
   let url = `${BASE}/staff`
+  if (params) {
+    const u = new URL(url)
+    Object.entries(params).forEach(([k, v]) => u.searchParams.set(k, v))
+    url = u.toString()
+  }
+  return fetch(url, { method, headers, body: body ? JSON.stringify(body) : undefined })
+}
+
+// Own /appointments calls for the pay-commissions fixture below — staff.test.ts
+// otherwise only ever talks to /staff.
+function callAppointments(method: string, token?: string, body?: unknown, params?: Record<string, string>) {
+  const headers: Record<string, string> = { "Content-Type": "application/json", "apikey": ANON_KEY }
+  if (token) headers["Authorization"] = `Bearer ${token}`
+  let url = `${BASE}/appointments`
   if (params) {
     const u = new URL(url)
     Object.entries(params).forEach(([k, v]) => u.searchParams.set(k, v))
@@ -287,4 +304,55 @@ Deno.test("staff: GET magic-link — valid request writes a staff_action_log row
   if (!Array.isArray(rows) || rows.length === 0) {
     throw new Error("Expected a STAFF_MAGIC_LINK_ISSUED row in staff_action_log for this staff_profile_id")
   }
+})
+
+// ── PATCH ?action=pay-commissions — payment metadata (S — Compensation redesign) ─
+
+Deno.test("staff: pay-commissions — records payment_date/reference/note and they round-trip via the ledger", async () => {
+  if (!OWNER_TOKEN) return
+
+  // Fresh booking each run (own date range, distinct from every other test
+  // file's reserved slots) so this test never collides with — or depends
+  // on the paid/unpaid state left behind by — any other test's fixtures.
+  const bookingRes = await callAppointments("POST", OWNER_TOKEN, {
+    business_id: TEST_BUSINESS_ID,
+    client_id: TEST_CLIENT_ID,
+    service_id: TEST_SERVICE_ID,
+    staff_profile_id: TEST_STAFF_ID,
+    date: "2026-11-05",
+    time: "11:00",
+    duration_minutes: 60,
+    price: 50,
+    payment_method: "later",
+  })
+  assertEquals(bookingRes.status, 201)
+  const booking = await bookingRes.json()
+
+  const completeRes = await callAppointments("PATCH", OWNER_TOKEN, { status: "completed", payment_method: "cash" }, { id: booking.id })
+  assertEquals(completeRes.status, 200)
+
+  const payRes = await call("PATCH", OWNER_TOKEN, {
+    business_id: TEST_BUSINESS_ID,
+    payments: [{ appointment_id: booking.id, amount: 12.5 }],
+    pay_method: "bank_transfer",
+    payment_date: "2026-11-06",
+    reference: "TX-TEST-001",
+    note: "Paid via test suite",
+  }, { action: "pay-commissions" })
+  if (payRes.status !== 200) {
+    const errBody = await payRes.json().catch(() => null)
+    throw new Error(`Expected 200, got ${payRes.status}: ${JSON.stringify(errBody)}`)
+  }
+  const payBody = await payRes.json()
+  assertEquals(payBody.paid_count, 1)
+
+  const ledgerRes = await call("GET", OWNER_TOKEN, undefined, { action: "commissions", staff_id: TEST_STAFF_ID, status: "all" })
+  assertEquals(ledgerRes.status, 200)
+  const ledger = await ledgerRes.json()
+  const row = (ledger.commissions as Array<Record<string, unknown>>).find((c) => c.appointment_id === booking.id)
+  if (!row) throw new Error(`Expected to find appointment ${booking.id} in the commissions ledger`)
+  assertEquals(row.commission_amount_paid, 12.5)
+  assertEquals(row.commission_payment_date, "2026-11-06")
+  assertEquals(row.commission_pay_reference, "TX-TEST-001")
+  assertEquals(row.commission_pay_note, "Paid via test suite")
 })

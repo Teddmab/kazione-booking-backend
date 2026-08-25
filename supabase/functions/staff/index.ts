@@ -1961,34 +1961,45 @@ Deno.serve(withLogging("staff", async (req: Request) => {
       const toDate = url.searchParams.get("to");
       const statusFilter = url.searchParams.get("status") ?? "all";
 
-      let query = supabaseAdmin
-        .from("appointments")
-        .select(`
-          id, starts_at, price, status,
-          commission_paid_at, commission_pay_method, commission_amount_paid,
-          commission_payment_date, commission_pay_reference, commission_pay_note,
-          commission_type_snapshot, commission_value_snapshot, commission_amount_snapshot,
-          client:clients(first_name, last_name),
-          service:services(name, staff_commission_type, staff_commission_value)
-        `)
-        .eq("staff_profile_id", mySpId)
-        .eq("business_id", bizId)
-        .eq("status", "completed")
-        .is("deleted_at", null)
-        .order("starts_at", { ascending: false })
-        .limit(200);
+      const MY_SELECT_COLS = `
+        id, starts_at, price, status, commission_split_pct,
+        commission_paid_at, commission_pay_method, commission_amount_paid,
+        commission_payment_date, commission_pay_reference, commission_pay_note,
+        commission_type_snapshot, commission_value_snapshot, commission_amount_snapshot, commission_amount_snapshot_2,
+        client:clients(first_name, last_name),
+        service:services(name, staff_commission_type, staff_commission_value)
+      `;
 
-      if (fromDate) query = query.gte("starts_at", `${fromDate}T00:00:00`);
-      if (toDate) query = query.lte("starts_at", `${toDate}T23:59:59`);
-      if (statusFilter === "unpaid") query = query.is("commission_paid_at", null);
+      const myBaseQuery = () => {
+        let q = supabaseAdmin
+          .from("appointments")
+          .select(MY_SELECT_COLS)
+          .eq("business_id", bizId)
+          .eq("status", "completed")
+          .is("deleted_at", null)
+          .order("starts_at", { ascending: false })
+          .limit(200);
+        if (fromDate) q = q.gte("starts_at", `${fromDate}T00:00:00`);
+        if (toDate) q = q.lte("starts_at", `${toDate}T23:59:59`);
+        if (statusFilter === "unpaid") q = q.is("commission_paid_at", null);
+        return q;
+      };
 
-      const { data: appts, error: apptErr } = await query;
-      if (apptErr) return serverError(apptErr.message);
+      // Same primary/secondary merge as the owner-facing action=commissions
+      // above — a staff member's own Support-role bookings must appear in
+      // their own commission history too.
+      const [myPrimaryRes, mySecondaryRes] = await Promise.all([
+        myBaseQuery().eq("staff_profile_id", mySpId),
+        myBaseQuery().eq("staff_profile_id_2", mySpId),
+      ]);
+      if (myPrimaryRes.error) return serverError(myPrimaryRes.error.message);
+      if (mySecondaryRes.error) return serverError(mySecondaryRes.error.message);
 
-      const rows = (appts ?? []) as Record<string, unknown>[];
-      const commissions = rows.map((a) => {
+      const mapMyRow = (a: Record<string, unknown>, role: "primary" | "secondary") => {
         const svc = a.service as Record<string, unknown> | null;
         const price = Number(a.price ?? 0);
+        const splitPct = a.commission_split_pct != null ? Number(a.commission_split_pct) : 50;
+        const fraction = role === "primary" ? splitPct / 100 : (100 - splitPct) / 100;
         // A completed appointment freezes its commission at the moment it
         // completes (see 124_commission_completion_snapshot.sql) — once that
         // snapshot exists, it's authoritative and must never be recomputed
@@ -2000,17 +2011,19 @@ Deno.serve(withLogging("staff", async (req: Request) => {
         const commValue = hasSnapshot ? Number(a.commission_value_snapshot ?? 0) : Number(svc?.staff_commission_value ?? 0);
         let commAmt: number;
         if (hasSnapshot) {
-          commAmt = Number(a.commission_amount_snapshot ?? 0);
+          commAmt = Number((role === "primary" ? a.commission_amount_snapshot : a.commission_amount_snapshot_2) ?? 0);
         } else {
           commAmt = 0;
-          if (commType === "percentage" && commValue > 0) commAmt = price * commValue / 100;
-          else if (commType === "fixed" && commValue > 0) commAmt = commValue;
-          else if (commRate > 0) commAmt = price * commRate / 100;
+          if (commType === "percentage" && commValue > 0) commAmt = price * commValue / 100 * fraction;
+          else if (commType === "fixed" && commValue > 0) commAmt = commValue * fraction;
+          else if (commRate > 0) commAmt = price * commRate / 100 * fraction;
         }
         const client = a.client as Record<string, unknown> | null;
         return {
           appointment_id: a.id as string,
           starts_at: a.starts_at as string,
+          role,
+          commission_split_pct: a.commission_split_pct != null ? Number(a.commission_split_pct) : null,
           client_name: client ? `${client.first_name ?? ""} ${client.last_name ?? ""}`.trim() : "Client",
           service_name: (svc?.name as string) ?? "Service",
           price,
@@ -2024,7 +2037,14 @@ Deno.serve(withLogging("staff", async (req: Request) => {
           commission_pay_reference: (a.commission_pay_reference as string | null) ?? null,
           commission_pay_note: (a.commission_pay_note as string | null) ?? null,
         };
-      }).filter((c) => c.commission_amount > 0 || !!c.commission_paid_at);
+      };
+
+      const myPrimaryRows = ((myPrimaryRes.data ?? []) as Record<string, unknown>[]).map((a) => mapMyRow(a, "primary"));
+      const mySecondaryRows = ((mySecondaryRes.data ?? []) as Record<string, unknown>[]).map((a) => mapMyRow(a, "secondary"));
+      const commissions = [...myPrimaryRows, ...mySecondaryRows]
+        .sort((a, b) => b.starts_at.localeCompare(a.starts_at))
+        .slice(0, 200)
+        .filter((c) => c.commission_amount > 0 || !!c.commission_paid_at);
 
       const totalEarned = commissions.reduce((s, c) => s + (c.commission_amount_paid ?? c.commission_amount), 0);
       const totalPaid = commissions.filter((c) => c.commission_paid_at).reduce((s, c) => s + (c.commission_amount_paid ?? c.commission_amount), 0);
@@ -2059,34 +2079,48 @@ Deno.serve(withLogging("staff", async (req: Request) => {
       const toDate = url.searchParams.get("to");
       const statusFilter = url.searchParams.get("status") ?? "all";
 
-      let query = supabaseAdmin
-        .from("appointments")
-        .select(`
-          id, starts_at, price, status,
-          commission_paid_at, commission_pay_method, commission_amount_paid,
-          commission_payment_date, commission_pay_reference, commission_pay_note,
-          commission_type_snapshot, commission_value_snapshot, commission_amount_snapshot,
-          client:clients(first_name, last_name),
-          service:services(name, staff_commission_type, staff_commission_value)
-        `)
-        .eq("staff_profile_id", targetStaffId)
-        .eq("business_id", ctx.businessId)
-        .eq("status", "completed")
-        .is("deleted_at", null)
-        .order("starts_at", { ascending: false })
-        .limit(200);
+      const SELECT_COLS = `
+        id, starts_at, price, status, commission_split_pct,
+        commission_paid_at, commission_pay_method, commission_amount_paid,
+        commission_payment_date, commission_pay_reference, commission_pay_note,
+        commission_type_snapshot, commission_value_snapshot, commission_amount_snapshot, commission_amount_snapshot_2,
+        client:clients(first_name, last_name),
+        service:services(name, staff_commission_type, staff_commission_value)
+      `;
 
-      if (fromDate) query = query.gte("starts_at", `${fromDate}T00:00:00`);
-      if (toDate) query = query.lte("starts_at", `${toDate}T23:59:59`);
-      if (statusFilter === "unpaid") query = query.is("commission_paid_at", null);
+      const businessIdForQuery = ctx.businessId;
+      const baseQuery = () => {
+        let q = supabaseAdmin
+          .from("appointments")
+          .select(SELECT_COLS)
+          .eq("business_id", businessIdForQuery)
+          .eq("status", "completed")
+          .is("deleted_at", null)
+          .order("starts_at", { ascending: false })
+          .limit(200);
+        if (fromDate) q = q.gte("starts_at", `${fromDate}T00:00:00`);
+        if (toDate) q = q.lte("starts_at", `${toDate}T23:59:59`);
+        if (statusFilter === "unpaid") q = q.is("commission_paid_at", null);
+        return q;
+      };
 
-      const { data: appts, error: apptErr } = await query;
-      if (apptErr) return serverError(apptErr.message);
+      // A staff member's ledger must include appointments where they were
+      // either the primary (staff_profile_id) OR the secondary/support
+      // staff (staff_profile_id_2) on a dual-staff service — previously
+      // only the primary role ever appeared here, so a Support-role
+      // booking's commission was invisible to that staff member entirely.
+      const [primaryRes, secondaryRes] = await Promise.all([
+        baseQuery().eq("staff_profile_id", targetStaffId),
+        baseQuery().eq("staff_profile_id_2", targetStaffId),
+      ]);
+      if (primaryRes.error) return serverError(primaryRes.error.message);
+      if (secondaryRes.error) return serverError(secondaryRes.error.message);
 
-      const rows = (appts ?? []) as Record<string, unknown>[];
-      const commissions = rows.map((a) => {
+      const mapRow = (a: Record<string, unknown>, role: "primary" | "secondary") => {
         const svc = a.service as Record<string, unknown> | null;
         const price = Number(a.price ?? 0);
+        const splitPct = a.commission_split_pct != null ? Number(a.commission_split_pct) : 50;
+        const fraction = role === "primary" ? splitPct / 100 : (100 - splitPct) / 100;
         // Same snapshot-first rule as my-commissions above — once an
         // appointment has completed and frozen its commission, later edits
         // to the service's rate must never change what's shown for it.
@@ -2095,17 +2129,19 @@ Deno.serve(withLogging("staff", async (req: Request) => {
         const commValue = hasSnapshot ? Number(a.commission_value_snapshot ?? 0) : Number(svc?.staff_commission_value ?? 0);
         let commAmt: number;
         if (hasSnapshot) {
-          commAmt = Number(a.commission_amount_snapshot ?? 0);
+          commAmt = Number((role === "primary" ? a.commission_amount_snapshot : a.commission_amount_snapshot_2) ?? 0);
         } else {
           commAmt = 0;
-          if (commType === "percentage" && commValue > 0) commAmt = price * commValue / 100;
-          else if (commType === "fixed" && commValue > 0) commAmt = commValue;
-          else if (commRate > 0) commAmt = price * commRate / 100;
+          if (commType === "percentage" && commValue > 0) commAmt = price * commValue / 100 * fraction;
+          else if (commType === "fixed" && commValue > 0) commAmt = commValue * fraction;
+          else if (commRate > 0) commAmt = price * commRate / 100 * fraction;
         }
         const client = a.client as Record<string, unknown> | null;
         return {
           appointment_id: a.id as string,
           starts_at: a.starts_at as string,
+          role,
+          commission_split_pct: a.commission_split_pct != null ? Number(a.commission_split_pct) : null,
           client_name: client ? `${client.first_name ?? ""} ${client.last_name ?? ""}`.trim() : "Client",
           service_name: (svc?.name as string) ?? "Service",
           price,
@@ -2119,7 +2155,14 @@ Deno.serve(withLogging("staff", async (req: Request) => {
           commission_pay_reference: (a.commission_pay_reference as string | null) ?? null,
           commission_pay_note: (a.commission_pay_note as string | null) ?? null,
         };
-      }).filter((c) => c.commission_amount > 0 || !!c.commission_paid_at);
+      };
+
+      const primaryRows = ((primaryRes.data ?? []) as Record<string, unknown>[]).map((a) => mapRow(a, "primary"));
+      const secondaryRows = ((secondaryRes.data ?? []) as Record<string, unknown>[]).map((a) => mapRow(a, "secondary"));
+      const commissions = [...primaryRows, ...secondaryRows]
+        .sort((a, b) => b.starts_at.localeCompare(a.starts_at))
+        .slice(0, 200)
+        .filter((c) => c.commission_amount > 0 || !!c.commission_paid_at);
 
       const totalEarned = commissions.reduce((s, c) => s + (c.commission_amount_paid ?? c.commission_amount), 0);
       const totalPaid = commissions.filter((c) => c.commission_paid_at).reduce((s, c) => s + (c.commission_amount_paid ?? c.commission_amount), 0);

@@ -40,6 +40,19 @@ function callAppointments(method: string, token?: string, body?: unknown, params
   return fetch(url, { method, headers, body: body ? JSON.stringify(body) : undefined })
 }
 
+// Own /services calls for the commission-snapshot regression below.
+function callServices(method: string, token?: string, body?: unknown, params?: Record<string, string>) {
+  const headers: Record<string, string> = { "Content-Type": "application/json", "apikey": ANON_KEY }
+  if (token) headers["Authorization"] = `Bearer ${token}`
+  let url = `${BASE}/services`
+  if (params) {
+    const u = new URL(url)
+    Object.entries(params).forEach(([k, v]) => u.searchParams.set(k, v))
+    url = u.toString()
+  }
+  return fetch(url, { method, headers, body: body ? JSON.stringify(body) : undefined })
+}
+
 // ── GET /staff ────────────────────────────────────────────────────────────────
 
 Deno.test("staff: GET without auth → 401 or 403", async () => {
@@ -408,5 +421,68 @@ Deno.test("staff: time-off — create, list within window, then delete round-tri
   const afterDeleteList = await afterDeleteRes.json()
   if (afterDeleteList.some((r: Record<string, unknown>) => r.id === created.id)) {
     throw new Error("Expected the time-off row to be gone after delete")
+  }
+})
+
+// ── commission completion snapshot (financial-integrity fix) ───────────────────
+
+Deno.test("staff: commissions — a completed appointment's commission is frozen at completion, not recalculated when the service's rate later changes", async () => {
+  if (!OWNER_TOKEN) return
+
+  // Capture the service's current commission config so it can be restored —
+  // this seeded service is shared with other tests/seed data, and this test
+  // must not leave it mutated.
+  const listRes = await callServices("GET", OWNER_TOKEN, undefined, { business_id: TEST_BUSINESS_ID })
+  assertEquals(listRes.status, 200)
+  const services = await listRes.json()
+  const original = (services as Array<Record<string, unknown>>).find((s) => s.id === TEST_SERVICE_ID)
+  if (!original) throw new Error(`Expected to find service ${TEST_SERVICE_ID} in the services list`)
+  const originalType = original.staff_commission_type
+  const originalValue = original.staff_commission_value
+
+  try {
+    // 1. Set a known rate (R1 = 10%) before booking.
+    const setR1Res = await callServices("PATCH", OWNER_TOKEN, { staff_commission_type: "percentage", staff_commission_value: 10 }, { id: TEST_SERVICE_ID })
+    assertEquals(setR1Res.status, 200)
+
+    // 2. Book and complete an appointment under R1 — price 100 * 10% = 10.
+    const bookingRes = await callAppointments("POST", OWNER_TOKEN, {
+      business_id: TEST_BUSINESS_ID,
+      client_id: TEST_CLIENT_ID,
+      service_id: TEST_SERVICE_ID,
+      staff_profile_id: TEST_STAFF_ID,
+      date: "2027-03-15",
+      time: "11:00",
+      duration_minutes: 60,
+      price: 100,
+      payment_method: "later",
+    })
+    assertEquals(bookingRes.status, 201)
+    const booking = await bookingRes.json()
+
+    const completeRes = await callAppointments("PATCH", OWNER_TOKEN, { status: "completed", payment_method: "cash" }, { id: booking.id })
+    assertEquals(completeRes.status, 200)
+
+    const ledgerBefore = await call("GET", OWNER_TOKEN, undefined, { action: "commissions", staff_id: TEST_STAFF_ID, status: "all" })
+    assertEquals(ledgerBefore.status, 200)
+    const rowBefore = ((await ledgerBefore.json()).commissions as Array<Record<string, unknown>>).find((c) => c.appointment_id === booking.id)
+    if (!rowBefore) throw new Error(`Expected to find appointment ${booking.id} in the commissions ledger`)
+    assertEquals(rowBefore.commission_amount, 10)
+
+    // 3. Change the service's rate to R2 (25%) — a real owner edit, same
+    // endpoint the new "Edit commission rule" sheet uses.
+    const setR2Res = await callServices("PATCH", OWNER_TOKEN, { staff_commission_type: "percentage", staff_commission_value: 25 }, { id: TEST_SERVICE_ID })
+    assertEquals(setR2Res.status, 200)
+
+    // 4. Re-fetch the SAME already-completed appointment's ledger row — it
+    // must still show the R1 amount, not silently recalculate to R2.
+    const ledgerAfter = await call("GET", OWNER_TOKEN, undefined, { action: "commissions", staff_id: TEST_STAFF_ID, status: "all" })
+    assertEquals(ledgerAfter.status, 200)
+    const rowAfter = ((await ledgerAfter.json()).commissions as Array<Record<string, unknown>>).find((c) => c.appointment_id === booking.id)
+    if (!rowAfter) throw new Error(`Expected to still find appointment ${booking.id} in the commissions ledger after the rate change`)
+    assertEquals(rowAfter.commission_amount, 10)
+  } finally {
+    // Restore the service's original commission config regardless of outcome.
+    await callServices("PATCH", OWNER_TOKEN, { staff_commission_type: originalType, staff_commission_value: originalValue }, { id: TEST_SERVICE_ID })
   }
 })

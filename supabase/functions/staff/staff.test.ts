@@ -486,3 +486,71 @@ Deno.test("staff: commissions — a completed appointment's commission is frozen
     await callServices("PATCH", OWNER_TOKEN, { staff_commission_type: originalType, staff_commission_value: originalValue }, { id: TEST_SERVICE_ID })
   }
 })
+
+// ── dual-staff secondary-role ledger visibility ─────────────────────────────
+
+Deno.test("staff: commissions — a Support-role (secondary) staff member's split-adjusted commission is visible in their own ledger", async () => {
+  if (!OWNER_TOKEN) return
+
+  // S58 Test — Dual Staff Service (requires_two_staff = true), seeded
+  // specifically for dual-staff scenarios like this one — not otherwise
+  // booked by any other test.
+  const DUAL_SERVICE_ID = "c0000000-0000-4000-8000-000000000005"
+  const SECONDARY_STAFF_ID = "d0000000-0000-4000-8000-000000000002" // Regina M.
+
+  const listRes = await callServices("GET", OWNER_TOKEN, undefined, { business_id: TEST_BUSINESS_ID })
+  const services = await listRes.json()
+  const original = (services as Array<Record<string, unknown>>).find((s) => s.id === DUAL_SERVICE_ID)
+  if (!original) throw new Error(`Expected to find service ${DUAL_SERVICE_ID} in the services list`)
+  const originalType = original.staff_commission_type
+  const originalValue = original.staff_commission_value
+
+  try {
+    // Known rate: 20% — with the service's default 50/50 split, primary and
+    // secondary should each earn 100 * 20% * 50% = 10.
+    const setRateRes = await callServices("PATCH", OWNER_TOKEN, { staff_commission_type: "percentage", staff_commission_value: 20 }, { id: DUAL_SERVICE_ID })
+    assertEquals(setRateRes.status, 200)
+
+    const bookingRes = await callAppointments("POST", OWNER_TOKEN, {
+      business_id: TEST_BUSINESS_ID,
+      client_id: TEST_CLIENT_ID,
+      service_id: DUAL_SERVICE_ID,
+      staff_profile_id: TEST_STAFF_ID,
+      date: "2027-03-20",
+      time: "11:00",
+      duration_minutes: 60,
+      price: 100,
+      payment_method: "later",
+    })
+    assertEquals(bookingRes.status, 201)
+    const booking = await bookingRes.json()
+
+    const assign2Res = await callAppointments("PATCH", OWNER_TOKEN, { staff_profile_id_2: SECONDARY_STAFF_ID }, { action: "assign-staff-2", id: booking.id })
+    if (assign2Res.status !== 200) {
+      const errBody = await assign2Res.json().catch(() => null)
+      throw new Error(`Expected 200 assigning secondary staff, got ${assign2Res.status}: ${JSON.stringify(errBody)}`)
+    }
+
+    const completeRes = await callAppointments("PATCH", OWNER_TOKEN, { status: "completed", payment_method: "cash" }, { id: booking.id })
+    assertEquals(completeRes.status, 200)
+
+    const primaryLedgerRes = await call("GET", OWNER_TOKEN, undefined, { action: "commissions", staff_id: TEST_STAFF_ID, status: "all" })
+    assertEquals(primaryLedgerRes.status, 200)
+    const primaryRow = ((await primaryLedgerRes.json()).commissions as Array<Record<string, unknown>>).find((c) => c.appointment_id === booking.id)
+    if (!primaryRow) throw new Error(`Expected primary staff's ledger to include appointment ${booking.id}`)
+    assertEquals(primaryRow.role, "primary")
+    assertEquals(primaryRow.commission_amount, 10)
+
+    // The bug this fixes: before this change, a secondary/support staff
+    // member's own ledger never included appointments where they were
+    // staff_profile_id_2 — this appointment simply never appeared.
+    const secondaryLedgerRes = await call("GET", OWNER_TOKEN, undefined, { action: "commissions", staff_id: SECONDARY_STAFF_ID, status: "all" })
+    assertEquals(secondaryLedgerRes.status, 200)
+    const secondaryRow = ((await secondaryLedgerRes.json()).commissions as Array<Record<string, unknown>>).find((c) => c.appointment_id === booking.id)
+    if (!secondaryRow) throw new Error(`Expected secondary staff's ledger to include appointment ${booking.id} — this is the gap the fix closes`)
+    assertEquals(secondaryRow.role, "secondary")
+    assertEquals(secondaryRow.commission_amount, 10)
+  } finally {
+    await callServices("PATCH", OWNER_TOKEN, { staff_commission_type: originalType, staff_commission_value: originalValue }, { id: DUAL_SERVICE_ID })
+  }
+})

@@ -1,6 +1,11 @@
 -- Adds review_count alongside the existing avg_rating in get_staff_performance
 -- so the frontend can show "4.8 from 12 reviews" instead of just the average —
 -- same join/WHERE as avg_rating, so the two numbers always stay consistent.
+--
+-- Postgres won't let CREATE OR REPLACE change a function's return columns
+-- (SQLSTATE 42P13) — the old signature has to be dropped first.
+DROP FUNCTION IF EXISTS get_staff_performance(uuid, date, date);
+
 CREATE OR REPLACE FUNCTION get_staff_performance(
   p_business_id  uuid,
   p_start_date   date,

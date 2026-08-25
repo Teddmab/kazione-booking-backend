@@ -123,6 +123,56 @@ export async function requireOwnerOrManagerCtx(
 }
 
 /**
+ * Same as requireOwnerOrManagerCtx, but also lets a staff member through if
+ * they're flagged is_supervisor on their staff_profiles row for this
+ * business. ctx.role is "owner"/"manager" for those, or the literal string
+ * "supervisor" for a supervisor-staff caller — callers that need to treat
+ * supervisors differently from owner/manager (e.g. "supervisors can't
+ * reassign an already-completed appointment, owner/manager can") should
+ * branch on that.
+ *
+ * Usage — identical shape to requireOwnerOrManagerCtx:
+ *   const ctx = await requireOwnerManagerOrSupervisorCtx(req, businessId)
+ *   if (ctx instanceof Response) return ctx
+ */
+export async function requireOwnerManagerOrSupervisorCtx(
+  req: Request,
+  businessId: string | undefined,
+): Promise<AuthContext | Response> {
+  if (!businessId) return forbidden("business_id is required");
+
+  const ownerResult = await requireOwnerOrManagerCtx(req, businessId);
+  if (!(ownerResult instanceof Response)) return ownerResult;
+
+  try {
+    const user = await verifyAuth(req);
+    const { data: memberRow } = await supabaseAdmin
+      .from("business_members")
+      .select("id, role")
+      .eq("user_id", user.id)
+      .eq("business_id", businessId)
+      .eq("is_active", true)
+      .maybeSingle();
+    if (!memberRow || (memberRow as { role: string }).role !== "staff") {
+      return ownerResult;
+    }
+    const { data: sp } = await supabaseAdmin
+      .from("staff_profiles")
+      .select("is_supervisor")
+      .eq("business_member_id", (memberRow as { id: string }).id)
+      .eq("business_id", businessId)
+      .maybeSingle();
+    if (!(sp as { is_supervisor: boolean } | null)?.is_supervisor) {
+      return ownerResult;
+    }
+    return { userId: user.id, businessId, role: "supervisor" };
+  } catch (e) {
+    if (e instanceof Response) return e;
+    return ownerResult;
+  }
+}
+
+/**
  * Find an existing client by email within a business, or create a new guest
  * client record. Returns the client row.
  */

@@ -260,6 +260,7 @@ Deno.serve(withLogging("staff", async (req: Request) => {
           position,
           avatar_url,
           is_active,
+          is_supervisor,
           invited_email,
           business_member_id,
           staff_working_hours (
@@ -346,6 +347,7 @@ Deno.serve(withLogging("staff", async (req: Request) => {
           email: memberInfo?.email ?? invitedEmail ?? null,
           role: memberInfo?.role ?? "staff",
           is_active: row.is_active,
+          is_supervisor: Boolean(row.is_supervisor),
           avatar_url: row.avatar_url ?? null,
           invited_at: invitedAt,
           invited_email: invitedEmail,
@@ -1177,6 +1179,9 @@ Deno.serve(withLogging("staff", async (req: Request) => {
       if (body.calendar_color !== undefined) {
         profileUpdate.calendar_color = String(body.calendar_color);
       }
+      if (body.is_supervisor !== undefined) {
+        profileUpdate.is_supervisor = Boolean(body.is_supervisor);
+      }
 
       const newRole = body.role as string | undefined;
       if (Object.keys(profileUpdate).length === 0 && !newRole) {
@@ -1223,7 +1228,7 @@ Deno.serve(withLogging("staff", async (req: Request) => {
         .from("staff_profiles")
         .select(`
           id, display_name, position, bio, avatar_url, specialties,
-          calendar_color, is_active, created_at,
+          calendar_color, is_active, is_supervisor, created_at,
           business_member:business_members(id, role, users(email))
         `)
         .eq("id", staffId)

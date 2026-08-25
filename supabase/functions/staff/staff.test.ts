@@ -95,6 +95,38 @@ Deno.test("staff: PATCH no fields provided → 400", async () => {
   await res.body?.cancel()
 })
 
+Deno.test("staff: PATCH is_supervisor — owner can promote and demote a staff member", async () => {
+  if (!OWNER_TOKEN) return
+
+  const promote = await call("PATCH", OWNER_TOKEN, { is_supervisor: true }, { id: TEST_STAFF_ID })
+  if (promote.status !== 200) {
+    const body = await promote.json().catch(() => null)
+    throw new Error(`Expected 200, got ${promote.status}: ${JSON.stringify(body)}`)
+  }
+  const promoted = await promote.json()
+  assertEquals(promoted.is_supervisor, true)
+
+  try {
+    // Booking notifications must pick up the newly-promoted supervisor —
+    // read back via PostgREST rather than re-deriving the query, so this
+    // actually exercises the stored column the notification helper reads.
+    const restBase = BASE.replace("/functions/v1", "/rest/v1")
+    const check = await fetch(
+      `${restBase}/staff_profiles?id=eq.${TEST_STAFF_ID}&select=is_supervisor`,
+      { headers: { apikey: ANON_KEY, Authorization: `Bearer ${OWNER_TOKEN}` } },
+    )
+    assertEquals(check.status, 200)
+    const rows = await check.json()
+    assertEquals(Array.isArray(rows) && rows.length === 1 && rows[0].is_supervisor, true)
+  } finally {
+    // Reset so this fixture doesn't leak supervisor status into other tests.
+    const demote = await call("PATCH", OWNER_TOKEN, { is_supervisor: false }, { id: TEST_STAFF_ID })
+    assertEquals(demote.status, 200)
+    const demoted = await demote.json()
+    assertEquals(demoted.is_supervisor, false)
+  }
+})
+
 // ── PUT ?action=schedule ──────────────────────────────────────────────────────
 
 Deno.test("staff: PUT schedule without id → 400", async () => {

@@ -15,6 +15,7 @@ import { issueCancelToken } from "../_shared/bookingCancelToken.ts";
 import { sendSms } from "../_shared/messagebird.ts";
 import { sendWhatsApp } from "../_shared/meta-whatsapp.ts";
 import { localWallClockToUtcIso, utcIsoToLocalParts } from "../_shared/timezone.ts";
+import { getBookingNotificationRecipients } from "../_shared/bookingNotificationRecipients.ts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -280,7 +281,7 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
       supabaseAdmin
         .from("business_settings")
         .select(
-          "deposit_percentage, tax_enabled, tax_rate, stripe_account_id, enabled_payment_methods, booking_notification_email, sms_notifications_enabled, whatsapp_notifications_enabled",
+          "deposit_percentage, tax_enabled, tax_rate, stripe_account_id, enabled_payment_methods, sms_notifications_enabled, whatsapp_notifications_enabled",
         )
         .eq("business_id", business_id)
         .maybeSingle(),
@@ -859,12 +860,10 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
         }
       }
 
-      // Send owner notification email if configured
-      const ownerNotifEmail = settings?.booking_notification_email as
-        | string
-        | null
-        | undefined;
-      if (ownerNotifEmail) {
+      // Booking notification — every supervisor, or the owner if none is set
+      // (replaces the old fixed business_settings.booking_notification_email)
+      const bookingNotifRecipients = await getBookingNotificationRecipients(business_id);
+      for (const recipient of bookingNotifRecipients) {
         const ownerEmailData = bookingReceivedOwnerEmail({
           clientName: first,
           clientEmail: client.email ?? null,
@@ -881,35 +880,27 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
           }`,
           manageUrl: `${appUrl}/owner`,
         });
-        sendEmail(ownerNotifEmail, ownerEmailData.subject, ownerEmailData.html)
+        sendEmail(recipient.email, ownerEmailData.subject, ownerEmailData.html)
           .catch(
-            (err) => console.error("Owner notification email failed:", err),
+            (err) => console.error("Booking notification email failed:", err),
           );
       }
 
-      // Insert notification for business
-      // Find the owner's user_id for the notification
-      const { data: ownerMember } = await supabaseAdmin
-        .from("business_members")
-        .select("user_id")
-        .eq("business_id", business_id)
-        .eq("role", "owner")
-        .eq("is_active", true)
-        .limit(1)
-        .maybeSingle();
-
-      if (ownerMember) {
-        await supabaseAdmin.from("notifications").insert({
-          business_id,
-          user_id: ownerMember.user_id,
-          type: "new_booking",
-          title: "New Booking",
-          body: `${client.name} booked ${service.name} on ${date} at ${time}`,
-          metadata: {
-            appointment_id: appointmentId,
-            booking_reference: bookingReference,
-          },
-        });
+      // Insert in-app notification for each recipient (bell badge)
+      if (bookingNotifRecipients.length > 0) {
+        await supabaseAdmin.from("notifications").insert(
+          bookingNotifRecipients.map((recipient) => ({
+            business_id,
+            user_id: recipient.userId,
+            type: "new_booking",
+            title: "New Booking",
+            body: `${client.name} booked ${service.name} on ${date} at ${time}`,
+            metadata: {
+              appointment_id: appointmentId,
+              booking_reference: bookingReference,
+            },
+          })),
+        );
       }
 
       // In-app notification for the assigned staff member (bell badge on mobile/web)
@@ -932,7 +923,7 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
               ?.user_id as string | null;
             if (
               staffUserId &&
-              staffUserId !== (ownerMember?.user_id as string | undefined)
+              !bookingNotifRecipients.some((r) => r.userId === staffUserId)
             ) {
               await supabaseAdmin.from("notifications").insert({
                 business_id,

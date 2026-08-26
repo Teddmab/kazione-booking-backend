@@ -14,6 +14,7 @@ import { requireOwnerOrManagerCtx } from "../_shared/auth.ts";
  * GET  ?action=tax-summary&business_id=&year=[&quarter=]
  * GET  ?action=bookkeeping&business_id=&from=&to=
  * GET  ?action=staff-performance&business_id=&from=&to=
+ * GET  ?action=service-performance&business_id=&from=&to=
  * GET  ?action=supplier-spend&business_id=&from=&to=
  * GET  ?action=annual-summary&business_id=&year=YYYY
  * GET  ?action=bank-coverage&business_id=&year=YYYY
@@ -219,6 +220,17 @@ Deno.serve(withLogging("finance", async (req: Request) => {
         const to = url.searchParams.get("to");
         if (!from || !to) return badRequest("from and to are required");
         const { data, error } = await supabaseAdmin.rpc("get_staff_performance", {
+          p_business_id: businessId, p_start_date: from, p_end_date: to,
+        });
+        if (error) return serverError(error.message);
+        return jsonCors(req, data ?? []);
+      }
+
+      if (action === "service-performance") {
+        const from = url.searchParams.get("from");
+        const to = url.searchParams.get("to");
+        if (!from || !to) return badRequest("from and to are required");
+        const { data, error } = await supabaseAdmin.rpc("get_service_performance", {
           p_business_id: businessId, p_start_date: from, p_end_date: to,
         });
         if (error) return serverError(error.message);

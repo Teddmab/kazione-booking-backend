@@ -160,7 +160,11 @@ Deno.serve(withLogging("services", async (req: Request) => {
         return jsonCors(req, staffRows);
       }
 
-      // Owner / manager path — full list with all columns including auto_show_to_staff.
+      // Owner / manager path — full list with all columns including
+      // auto_show_to_staff, plus catalogue-wide staff/product signals so the
+      // Services page can render them per row without an N+1 fan-out (one
+      // getStaffServices/service-usage call per service). Same embedding
+      // pattern already proven in appointments/index.ts's APPT_SELECT.
       const { data, error } = await supabaseAdmin
         .from("services")
         .select(`
@@ -172,7 +176,9 @@ Deno.serve(withLogging("services", async (req: Request) => {
           use_intake_form, auto_show_to_staff,
           requires_two_staff, commission_split_pct,
           created_at, updated_at,
-          category:service_categories(name)
+          category:service_categories(name),
+          staff_services(status, staff:staff_profiles(id, display_name, avatar_url)),
+          service_product_usage(product:product_catalog(current_stock, min_stock_alert))
         `)
         .eq("business_id", businessId)
         .order("is_active", { ascending: false })
@@ -182,12 +188,34 @@ Deno.serve(withLogging("services", async (req: Request) => {
       if (error) return serverError(error.message);
 
       const rows = (data ?? []).map((row) => {
-        const category = (row as Record<string, unknown>).category as {
-          name?: string;
-        } | null;
+        const r = row as Record<string, unknown>;
+        const category = r.category as { name?: string } | null;
+
+        const staffLinks = (r.staff_services ?? []) as Array<{
+          status: string;
+          staff: { id: string; display_name: string; avatar_url: string | null } | null;
+        }>;
+        const assignedStaff = staffLinks
+          .filter((s) => s.status === "accepted" && s.staff)
+          .map((s) => ({ id: s.staff!.id, display_name: s.staff!.display_name, avatar_url: s.staff!.avatar_url }));
+
+        const productLinks = (r.service_product_usage ?? []) as Array<{
+          product: { current_stock: number; min_stock_alert: number | null } | null;
+        }>;
+        const linkedProducts = productLinks.filter((p) => p.product);
+        // Same one-line low-stock comparison products/index.ts already uses —
+        // not a new formula, just applied across a service's linked products.
+        const hasLowStock = linkedProducts.some(
+          (p) => p.product!.min_stock_alert !== null && p.product!.current_stock <= p.product!.min_stock_alert,
+        );
+
+        const { staff_services: _ss, service_product_usage: _spu, category: _cat, ...rest } = r;
         return {
-          ...(row as Record<string, unknown>),
+          ...rest,
           category_name: category?.name ?? null,
+          assigned_staff: assignedStaff,
+          product_count: linkedProducts.length,
+          has_low_stock: hasLowStock,
         };
       });
 

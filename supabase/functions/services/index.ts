@@ -90,17 +90,29 @@ Deno.serve(withLogging("services", async (req: Request) => {
           .limit(50),
         // "Relevant booking activity" is derived directly from appointments,
         // not logged — service_activity_log does not duplicate booking events.
+        // Matches the old catalogue modal's Booking History fidelity (client
+        // name + price, up to 20 rows) so retiring that modal loses nothing.
         supabaseAdmin
           .from("appointments")
-          .select("id, status, starts_at, updated_at")
+          .select("id, status, starts_at, updated_at, price, client:clients(first_name, last_name)")
           .eq("service_id", id)
-          .order("updated_at", { ascending: false })
-          .limit(10),
+          .order("starts_at", { ascending: false })
+          .limit(20),
       ]);
+
+      const recentBookings = (apptRes.data ?? []).map((row) => {
+        const r = row as Record<string, unknown>;
+        const client = r.client as { first_name?: string; last_name?: string } | null;
+        const { client: _c, ...rest } = r;
+        return {
+          ...rest,
+          client_name: client ? `${client.first_name ?? ""} ${client.last_name ?? ""}`.trim() || null : null,
+        };
+      });
 
       return jsonCors(req, {
         events: logRes.data ?? [],
-        recent_bookings: apptRes.data ?? [],
+        recent_bookings: recentBookings,
       });
     }
 

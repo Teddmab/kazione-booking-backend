@@ -338,3 +338,40 @@ Deno.test("services: GET activity — logs service_created, offer_sent and offer
   if (!eventTypes.includes("service_created")) throw new Error(`Expected service_created in ${JSON.stringify(eventTypes)}`)
   if (!eventTypes.includes("offer_sent")) throw new Error(`Expected offer_sent in ${JSON.stringify(eventTypes)}`)
 })
+
+Deno.test("services: GET activity — recent_bookings includes client_name and price (parity with the old Booking History)", async () => {
+  if (!OWNER_TOKEN) return
+
+  const createRes = await callFn("POST", OWNER_TOKEN, {
+    business_id: BUSINESS_ID,
+    name: `Activity Booking Detail Test ${Date.now()}`,
+    price: 33,
+    duration_minutes: 30,
+  })
+  assertEquals(createRes.status, 201)
+  const service = await createRes.json()
+
+  const bookingRes = await callAppointments("POST", OWNER_TOKEN, {
+    business_id: BUSINESS_ID,
+    client_id: TEST_CLIENT_ID,
+    service_id: service.id,
+    staff_profile_id: TEST_STAFF_ID,
+    date: "2027-05-10",
+    time: "10:00",
+    duration_minutes: 30,
+    price: 33,
+    payment_method: "later",
+  })
+  assertEquals(bookingRes.status, 201)
+  const booking = await bookingRes.json()
+
+  const activityRes = await callFn("GET", OWNER_TOKEN, undefined, { action: "activity", id: service.id })
+  assertEquals(activityRes.status, 200)
+  const activity = await activityRes.json()
+  const row = (activity.recent_bookings as Array<Record<string, unknown>>).find((b) => b.id === booking.id)
+  if (!row) throw new Error(`Expected booking ${booking.id} in recent_bookings`)
+  assertEquals(row.price, 33)
+  if (!row.client_name || typeof row.client_name !== "string" || row.client_name.trim() === "") {
+    throw new Error(`Expected a non-empty client_name, got: ${JSON.stringify(row.client_name)}`)
+  }
+})

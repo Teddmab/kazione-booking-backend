@@ -884,6 +884,54 @@ Deno.serve(withLogging("staff", async (req: Request) => {
       return jsonCors(req, { success: true, service_id: serviceId, status: "withdrawn" });
     }
 
+    // ── PATCH /staff?action=remove-service-assignment&id= (row-scoped delete) ──
+    // Body: { service_id }. Unlike withdraw-service-offer (pending-only,
+    // preserves history), this hard-deletes the row at ANY status — the
+    // Team tab's "Remove" action for an accepted/declined/withdrawn
+    // assignment the owner wants gone entirely, not just paused.
+    if (method === "PATCH" && action === "remove-service-assignment") {
+      if (!staffId) return badRequest("id query param is required");
+      const body = await req.json() as Record<string, unknown>;
+      const serviceId = body.service_id as string | undefined;
+      if (!serviceId) return badRequest("service_id is required");
+
+      const { data: staffRow, error: staffErr } = await supabaseAdmin
+        .from("staff_profiles")
+        .select("id, business_id")
+        .eq("id", staffId)
+        .maybeSingle();
+      if (staffErr) return serverError(staffErr.message);
+      if (!staffRow) return notFound("Staff member not found");
+
+      const ctx = await requireOwnerOrManagerCtx(req, (staffRow as Record<string, unknown>).business_id as string);
+      if (ctx instanceof Response) return ctx;
+
+      const { data: offerRow } = await supabaseAdmin
+        .from("staff_services")
+        .select("id")
+        .eq("staff_profile_id", staffId)
+        .eq("service_id", serviceId)
+        .maybeSingle();
+      if (!offerRow) return notFound("No service assignment found");
+
+      const { error: delErr } = await supabaseAdmin
+        .from("staff_services")
+        .delete()
+        .eq("staff_profile_id", staffId)
+        .eq("service_id", serviceId);
+      if (delErr) return serverError(delErr.message);
+
+      logServiceActivity({
+        businessId: ctx.businessId,
+        serviceId,
+        actorUserId: ctx.userId,
+        eventType: "assignment_removed",
+        payload: { staff_profile_id: staffId },
+      });
+
+      return jsonCors(req, { success: true, service_id: serviceId, removed: true });
+    }
+
     // ── PATCH /staff?action=update-service-assignment&id= (row-scoped edit) ──
     // Body: { service_id, role?, commission_type?, commission_value?, effective_date? }
     // Distinct from assign-services' bulk diff, which is wrong for a single

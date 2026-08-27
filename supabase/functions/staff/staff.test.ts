@@ -588,6 +588,48 @@ Deno.test("staff: withdraw-service-offer — pending offer becomes withdrawn, no
   assertEquals(secondRes.status, 400)
 })
 
+Deno.test("staff: remove-service-assignment — deletes the row with no status precondition, unlike withdraw", async () => {
+  if (!OWNER_TOKEN) return
+
+  const svcRes = await callServices("POST", OWNER_TOKEN, {
+    business_id: TEST_BUSINESS_ID,
+    name: `Remove Test ${Date.now()}`,
+    price: 20,
+    duration_minutes: 30,
+  })
+  assertEquals(svcRes.status, 201)
+  const service = await svcRes.json()
+
+  // Auto-assignment on create leaves this 'pending' for TEST_STAFF_ID.
+  // withdraw-service-offer would work here too (it's pending), but the
+  // point of this test is that remove has NO status check at all — it must
+  // also succeed once the row is 'accepted'/'declined'/'withdrawn', which
+  // update-service-assignment lets us reach without a second staff token.
+  const acceptViaUpdateRes = await call(
+    "PATCH",
+    OWNER_TOKEN,
+    { service_id: service.id, role: "primary" },
+    { action: "update-service-assignment", id: TEST_STAFF_ID },
+  )
+  assertEquals(acceptViaUpdateRes.status, 200)
+
+  const removeRes = await call("PATCH", OWNER_TOKEN, { service_id: service.id }, { action: "remove-service-assignment", id: TEST_STAFF_ID })
+  assertEquals(removeRes.status, 200)
+  const removed = await removeRes.json()
+  assertEquals(removed.removed, true)
+
+  const staffListRes = await call("GET", OWNER_TOKEN, undefined, { action: "services", id: TEST_STAFF_ID })
+  assertEquals(staffListRes.status, 200)
+  const staffServices = await staffListRes.json()
+  if ((staffServices.service_ids as string[]).includes(service.id)) {
+    throw new Error("Removed assignment must no longer appear in the staff member's service list")
+  }
+
+  // A second remove on an already-gone row is a clean 404, not a crash.
+  const secondRemoveRes = await call("PATCH", OWNER_TOKEN, { service_id: service.id }, { action: "remove-service-assignment", id: TEST_STAFF_ID })
+  assertEquals(secondRemoveRes.status, 404)
+})
+
 Deno.test("staff: update-service-assignment — updates role/commission/effective_date independently", async () => {
   if (!OWNER_TOKEN) return
 

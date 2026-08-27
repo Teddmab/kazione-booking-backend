@@ -11,6 +11,7 @@ export type ServiceActivityEvent =
   | "offer_accepted"
   | "offer_declined"
   | "offer_withdrawn"
+  | "assignment_removed"
   | "product_usage_added"
   | "product_usage_removed"
   | "product_usage_updated";

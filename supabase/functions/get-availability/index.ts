@@ -279,18 +279,34 @@ Deno.serve(withLogging("get-availability", async (req: Request) => {
     } catch (rpcErr) {
       console.warn("get_available_slots RPC failed, using fallback availability generation", rpcErr);
       const dayOfWeek = requestedDate.getUTCDay();
-      const { data: staffProfiles, error: staffProfilesErr } = await supabaseAdmin
-        .from("staff_profiles")
-        .select("id, display_name, avatar_url")
-        .eq("business_id", businessId!)
-        .eq("is_active", true);
-      if (staffProfilesErr) throw staffProfilesErr;
 
+      // Eligibility must mirror get_available_slots (migration 126): only
+      // staff with an ACCEPTED offer for this service, and only once their
+      // effective_date (if any) has arrived — this fallback previously
+      // ignored staff_services entirely and showed every active staff
+      // member of the business for any service, ready or not.
       const { data: staffServices, error: staffServicesErr } = await supabaseAdmin
         .from("staff_services")
-        .select("staff_profile_id, custom_price")
-        .eq("service_id", serviceId!);
+        .select("staff_profile_id, custom_price, effective_date")
+        .eq("service_id", serviceId!)
+        .eq("status", "accepted");
       if (staffServicesErr) throw staffServicesErr;
+
+      const eligibleStaffIds = (staffServices ?? [])
+        .filter((s) => !s.effective_date || s.effective_date <= dateStr!)
+        .map((s) => s.staff_profile_id as string);
+
+      let staffProfiles: { id: string; display_name: string; avatar_url: string | null }[] = [];
+      if (eligibleStaffIds.length > 0) {
+        const { data: profiles, error: staffProfilesErr } = await supabaseAdmin
+          .from("staff_profiles")
+          .select("id, display_name, avatar_url")
+          .eq("business_id", businessId!)
+          .eq("is_active", true)
+          .in("id", eligibleStaffIds);
+        if (staffProfilesErr) throw staffProfilesErr;
+        staffProfiles = profiles ?? [];
+      }
 
       const { data: workingHoursRows, error: workingHoursErr } = await supabaseAdmin
         .from("staff_working_hours")

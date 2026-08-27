@@ -3,6 +3,7 @@ import { handleCors, jsonCors } from "../_shared/cors.ts";
 import { badRequest, notFound, serverError } from "../_shared/errors.ts";
 import { withLogging } from "../_shared/logger.ts";
 import { requireOwnerOrManagerCtx, verifyAuth, verifyBusinessMember } from "../_shared/auth.ts";
+import { logServiceActivity } from "../_shared/serviceActivity.ts";
 
 /**
  * /products — product catalog CRUD + stock management + service-product usage
@@ -15,6 +16,7 @@ import { requireOwnerOrManagerCtx, verifyAuth, verifyBusinessMember } from "../_
  * PATCH ?id=          body={...fields}        → update product fields
  * PATCH ?action=adjust&id=                    → manual stock adjustment
  * PATCH ?action=deactivate&id=               → soft-delete product
+ * PATCH ?action=service-usage&id=            → update a service-product link's quantity
  * DELETE ?action=service-usage&id=           → remove service-product link
  */
 Deno.serve(withLogging("products", async (req: Request) => {
@@ -145,6 +147,15 @@ Deno.serve(withLogging("products", async (req: Request) => {
           .single();
 
         if (error) return serverError(error.message);
+
+        logServiceActivity({
+          businessId: ctx.businessId,
+          serviceId: body.service_id as string,
+          actorUserId: ctx.userId,
+          eventType: "product_usage_added",
+          payload: { product_id: body.product_id },
+        });
+
         return jsonCors(req, data, 201);
       }
 
@@ -224,6 +235,45 @@ Deno.serve(withLogging("products", async (req: Request) => {
         return jsonCors(req, updated);
       }
 
+      // PATCH /products?action=service-usage&id=  — update linked quantity
+      if (action === "service-usage") {
+        const body = await req.json() as Record<string, unknown>;
+        const quantity = Number(body.quantity_per_service);
+        if (!Number.isFinite(quantity) || quantity <= 0) {
+          return badRequest("quantity_per_service must be a positive number");
+        }
+
+        const { data: usage } = await supabaseAdmin
+          .from("service_product_usage")
+          .select(`service_id, product_id, service:services(business_id)`)
+          .eq("id", id)
+          .maybeSingle();
+        if (!usage) return notFound("Usage entry not found");
+
+        const bizId = ((usage as Record<string, unknown>).service as Record<string, unknown>)?.business_id as string;
+        const ctx = await requireOwnerOrManagerCtx(req, bizId);
+        if (ctx instanceof Response) return ctx;
+
+        const { data, error } = await supabaseAdmin
+          .from("service_product_usage")
+          .update({ quantity_per_service: quantity })
+          .eq("id", id)
+          .select(`*, product:product_catalog(id, name, sku, unit)`)
+          .single();
+
+        if (error) return serverError(error.message);
+
+        logServiceActivity({
+          businessId: ctx.businessId,
+          serviceId: (usage as Record<string, unknown>).service_id as string,
+          actorUserId: ctx.userId,
+          eventType: "product_usage_updated",
+          payload: { product_id: (usage as Record<string, unknown>).product_id, quantity_per_service: quantity },
+        });
+
+        return jsonCors(req, data);
+      }
+
       // PATCH /products?action=deactivate&id=
       if (action === "deactivate") {
         const { data: product } = await supabaseAdmin
@@ -282,7 +332,7 @@ Deno.serve(withLogging("products", async (req: Request) => {
 
         const { data: usage } = await supabaseAdmin
           .from("service_product_usage")
-          .select(`service_id, service:services(business_id)`)
+          .select(`service_id, product_id, service:services(business_id)`)
           .eq("id", id)
           .single();
         if (!usage) return notFound("Usage entry not found");
@@ -297,6 +347,15 @@ Deno.serve(withLogging("products", async (req: Request) => {
           .eq("id", id);
 
         if (error) return serverError(error.message);
+
+        logServiceActivity({
+          businessId: ctx.businessId,
+          serviceId: (usage as Record<string, unknown>).service_id as string,
+          actorUserId: ctx.userId,
+          eventType: "product_usage_removed",
+          payload: { product_id: (usage as Record<string, unknown>).product_id },
+        });
+
         return jsonCors(req, { ok: true });
       }
 

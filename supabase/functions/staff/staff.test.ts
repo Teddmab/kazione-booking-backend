@@ -554,3 +554,96 @@ Deno.test("staff: commissions — a Support-role (secondary) staff member's spli
     await callServices("PATCH", OWNER_TOKEN, { staff_commission_type: originalType, staff_commission_value: originalValue }, { id: DUAL_SERVICE_ID })
   }
 })
+
+// ── Owner Services workspace redesign (WEB-OWNER-SERVICES-01) ──────────────
+
+function callAvailability(params: Record<string, string>) {
+  const url = new URL(`${BASE}/get-availability`)
+  Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v))
+  return fetch(url.toString(), { method: "GET", headers: { "apikey": ANON_KEY } })
+}
+
+Deno.test("staff: withdraw-service-offer — pending offer becomes withdrawn, not deleted", async () => {
+  if (!OWNER_TOKEN) return
+
+  const svcRes = await callServices("POST", OWNER_TOKEN, {
+    business_id: TEST_BUSINESS_ID,
+    name: `Withdraw Test ${Date.now()}`,
+    price: 20,
+    duration_minutes: 30,
+  })
+  assertEquals(svcRes.status, 201)
+  const service = await svcRes.json()
+
+  // Auto-assignment on create already offers this to every active staff
+  // member (including TEST_STAFF_ID) as pending — withdraw that directly.
+  const withdrawRes = await call("PATCH", OWNER_TOKEN, { service_id: service.id }, { action: "withdraw-service-offer", id: TEST_STAFF_ID })
+  assertEquals(withdrawRes.status, 200)
+  const body = await withdrawRes.json()
+  assertEquals(body.status, "withdrawn")
+
+  // A second withdraw must fail — only a pending offer can be withdrawn,
+  // and it's no longer pending.
+  const secondRes = await call("PATCH", OWNER_TOKEN, { service_id: service.id }, { action: "withdraw-service-offer", id: TEST_STAFF_ID })
+  assertEquals(secondRes.status, 400)
+})
+
+Deno.test("staff: update-service-assignment — updates role/commission/effective_date independently", async () => {
+  if (!OWNER_TOKEN) return
+
+  const svcRes = await callServices("POST", OWNER_TOKEN, {
+    business_id: TEST_BUSINESS_ID,
+    name: `Update Assignment Test ${Date.now()}`,
+    price: 20,
+    duration_minutes: 30,
+  })
+  assertEquals(svcRes.status, 201)
+  const service = await svcRes.json()
+
+  const updateRes = await call(
+    "PATCH",
+    OWNER_TOKEN,
+    { service_id: service.id, role: "secondary", commission_type: "percentage", commission_value: 12, effective_date: "2027-01-01" },
+    { action: "update-service-assignment", id: TEST_STAFF_ID },
+  )
+  assertEquals(updateRes.status, 200)
+  const updated = await updateRes.json()
+  assertEquals(updated.role, "secondary")
+  assertEquals(updated.effective_date, "2027-01-01")
+  assertEquals(updated.offered_commission_type, "percentage")
+  assertEquals(Number(updated.offered_commission_value), 12)
+})
+
+// This is the direct regression check for the get_available_slots fix in
+// migration 126: before it, the eligible_staff CTE filtered only on
+// staff_profiles.is_active, never staff_services.status, so a staff member
+// with a still-PENDING offer could be booked publicly.
+Deno.test("get-availability: a staff member with only a pending offer never appears in slots", async () => {
+  if (!OWNER_TOKEN) return
+
+  const svcRes = await callServices("POST", OWNER_TOKEN, {
+    business_id: TEST_BUSINESS_ID,
+    name: `Pending Eligibility Test ${Date.now()}`,
+    price: 20,
+    duration_minutes: 30,
+  })
+  assertEquals(svcRes.status, 201)
+  const service = await svcRes.json()
+  // Newly created service auto-assigns every active staff member as
+  // 'pending' — none have accepted, so no slots should ever be returned.
+
+  const base = new Date()
+  base.setUTCDate(base.getUTCDate() + 7)
+  let sawAnySlot = false
+  for (let offset = 0; offset < 14; offset++) {
+    const d = new Date(base)
+    d.setUTCDate(base.getUTCDate() + offset)
+    const dateStr = d.toISOString().slice(0, 10)
+    const res = await callAvailability({ business_id: TEST_BUSINESS_ID, service_id: service.id, date: dateStr })
+    if (res.status !== 200) { await res.body?.cancel(); continue }
+    const data = await res.json()
+    const slots = Array.isArray(data) ? data : (data.slots ?? [])
+    if (Array.isArray(slots) && slots.length > 0) { sawAnySlot = true; break }
+  }
+  if (sawAnySlot) throw new Error("A service with only pending (unaccepted) staff offers must never show available slots")
+})

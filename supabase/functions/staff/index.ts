@@ -12,6 +12,7 @@ import {
 } from "../_shared/resend.ts";
 import { logStaffAction } from "../_shared/staffAudit.ts";
 import { getCallerIp } from "../_shared/adminAuth.ts";
+import { logServiceActivity } from "../_shared/serviceActivity.ts";
 
 /**
  * Resolve the caller's primary owner/manager business from their JWT.
@@ -483,7 +484,13 @@ Deno.serve(withLogging("staff", async (req: Request) => {
       const body = await req.json() as Record<string, unknown>;
 
       // Normalise both input shapes into an offers array.
-      type OfferInput = { service_id: string; commission_type?: string | null; commission_value?: number | null };
+      type OfferInput = {
+        service_id: string;
+        commission_type?: string | null;
+        commission_value?: number | null;
+        role?: string | null;
+        effective_date?: string | null;
+      };
       let offers: OfferInput[];
       if (Array.isArray(body.offers)) {
         offers = body.offers as OfferInput[];
@@ -585,7 +592,7 @@ Deno.serve(withLogging("staff", async (req: Request) => {
           continue;
         }
 
-        // New or previously declined — insert/upsert as pending.
+        // New, previously declined, or previously withdrawn — insert/upsert as pending.
         newlyOfferedServiceIds.push(offer.service_id);
         const { error: upsertErr } = await supabaseAdmin
           .from("staff_services")
@@ -594,6 +601,8 @@ Deno.serve(withLogging("staff", async (req: Request) => {
               staff_profile_id: staffId,
               service_id: offer.service_id,
               status: "pending",
+              role: offer.role === "secondary" ? "secondary" : "primary",
+              effective_date: offer.effective_date ?? null,
               offered_commission_type: offer.commission_type ?? null,
               offered_commission_value: offer.commission_value ?? null,
               assigned_at: new Date().toISOString(),
@@ -602,6 +611,16 @@ Deno.serve(withLogging("staff", async (req: Request) => {
             { onConflict: "staff_profile_id,service_id" },
           );
         if (upsertErr) return serverError(upsertErr.message);
+      }
+
+      for (const svcId of newlyOfferedServiceIds) {
+        logServiceActivity({
+          businessId: ctx.businessId,
+          serviceId: svcId,
+          actorUserId: ctx.userId,
+          eventType: "offer_sent",
+          payload: { staff_profile_id: staffId },
+        });
       }
 
       // Email staff about newly offered services (fire & forget)
@@ -753,6 +772,14 @@ Deno.serve(withLogging("staff", async (req: Request) => {
 
       if (updErr) return serverError(updErr.message);
 
+      logServiceActivity({
+        businessId: offerBusinessId,
+        serviceId: serviceId,
+        actorUserId: user.id,
+        eventType: response === "accepted" ? "offer_accepted" : "offer_declined",
+        payload: { staff_profile_id: spId },
+      });
+
       // Send confirmation email when staff accepts
       if (response === "accepted") {
         (async () => {
@@ -804,6 +831,136 @@ Deno.serve(withLogging("staff", async (req: Request) => {
       }
 
       return jsonCors(req, { success: true, service_id: serviceId, status: response });
+    }
+
+    // ── PATCH /staff?action=withdraw-service-offer&id= (owner pulls a pending offer) ──
+    // Body: { service_id }. Only valid from 'pending' — distinct from the
+    // staff-initiated 'declined' so the Team/Activity tabs can tell the two
+    // apart. Unlike assign-services' bulk diff, this never hard-deletes the
+    // row, preserving history.
+    if (method === "PATCH" && action === "withdraw-service-offer") {
+      if (!staffId) return badRequest("id query param is required");
+      const body = await req.json() as Record<string, unknown>;
+      const serviceId = body.service_id as string | undefined;
+      if (!serviceId) return badRequest("service_id is required");
+
+      const { data: staffRow, error: staffErr } = await supabaseAdmin
+        .from("staff_profiles")
+        .select("id, business_id")
+        .eq("id", staffId)
+        .maybeSingle();
+      if (staffErr) return serverError(staffErr.message);
+      if (!staffRow) return notFound("Staff member not found");
+
+      const ctx = await requireOwnerOrManagerCtx(req, (staffRow as Record<string, unknown>).business_id as string);
+      if (ctx instanceof Response) return ctx;
+
+      const { data: offerRow } = await supabaseAdmin
+        .from("staff_services")
+        .select("status")
+        .eq("staff_profile_id", staffId)
+        .eq("service_id", serviceId)
+        .maybeSingle();
+      if (!offerRow) return notFound("No service offer found");
+      if ((offerRow as Record<string, unknown>).status !== "pending") {
+        return badRequest("Only a pending offer can be withdrawn");
+      }
+
+      const { error: updErr } = await supabaseAdmin
+        .from("staff_services")
+        .update({ status: "withdrawn", responded_at: new Date().toISOString() })
+        .eq("staff_profile_id", staffId)
+        .eq("service_id", serviceId);
+      if (updErr) return serverError(updErr.message);
+
+      logServiceActivity({
+        businessId: ctx.businessId,
+        serviceId,
+        actorUserId: ctx.userId,
+        eventType: "offer_withdrawn",
+        payload: { staff_profile_id: staffId },
+      });
+
+      return jsonCors(req, { success: true, service_id: serviceId, status: "withdrawn" });
+    }
+
+    // ── PATCH /staff?action=update-service-assignment&id= (row-scoped edit) ──
+    // Body: { service_id, role?, commission_type?, commission_value?, effective_date? }
+    // Distinct from assign-services' bulk diff, which is wrong for a single
+    // row's independent save/loading/error feedback in the Team tab.
+    if (method === "PATCH" && action === "update-service-assignment") {
+      if (!staffId) return badRequest("id query param is required");
+      const body = await req.json() as Record<string, unknown>;
+      const serviceId = body.service_id as string | undefined;
+      if (!serviceId) return badRequest("service_id is required");
+
+      const { data: staffRow, error: staffErr } = await supabaseAdmin
+        .from("staff_profiles")
+        .select("id, business_id")
+        .eq("id", staffId)
+        .maybeSingle();
+      if (staffErr) return serverError(staffErr.message);
+      if (!staffRow) return notFound("Staff member not found");
+
+      const ctx = await requireOwnerOrManagerCtx(req, (staffRow as Record<string, unknown>).business_id as string);
+      if (ctx instanceof Response) return ctx;
+
+      const { data: offerRow } = await supabaseAdmin
+        .from("staff_services")
+        .select("id")
+        .eq("staff_profile_id", staffId)
+        .eq("service_id", serviceId)
+        .maybeSingle();
+      if (!offerRow) return notFound("No service assignment found");
+
+      const updatePayload: Record<string, unknown> = {};
+      if (body.role !== undefined) {
+        const role = String(body.role);
+        if (!["primary", "secondary"].includes(role)) {
+          return badRequest("role must be 'primary' or 'secondary'");
+        }
+        updatePayload.role = role;
+      }
+      if (body.commission_type !== undefined) {
+        const ct = String(body.commission_type ?? "none");
+        if (!["none", "percentage", "fixed"].includes(ct)) {
+          return badRequest("commission_type must be none, percentage, or fixed");
+        }
+        updatePayload.offered_commission_type = ct === "none" ? null : ct;
+      }
+      if (body.commission_value !== undefined) {
+        const value = body.commission_value === null ? null : Number(body.commission_value);
+        if (value !== null && (!Number.isFinite(value) || value < 0)) {
+          return badRequest("commission_value must be a non-negative number");
+        }
+        updatePayload.offered_commission_value = value;
+      }
+      if (body.effective_date !== undefined) {
+        updatePayload.effective_date = body.effective_date;
+      }
+
+      if (Object.keys(updatePayload).length === 0) {
+        return badRequest("No valid fields provided for update");
+      }
+
+      const { data, error } = await supabaseAdmin
+        .from("staff_services")
+        .update(updatePayload)
+        .eq("staff_profile_id", staffId)
+        .eq("service_id", serviceId)
+        .select("status, role, effective_date, offered_commission_type, offered_commission_value")
+        .single();
+      if (error) return serverError(error.message);
+
+      logServiceActivity({
+        businessId: ctx.businessId,
+        serviceId,
+        actorUserId: ctx.userId,
+        eventType: "service_updated",
+        payload: { staff_profile_id: staffId, fields: Object.keys(updatePayload) },
+      });
+
+      return jsonCors(req, { success: true, service_id: serviceId, ...(data as Record<string, unknown>) });
     }
 
     // ── Self-service schedule override endpoints ──────────────────────────────

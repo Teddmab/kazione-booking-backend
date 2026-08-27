@@ -44,6 +44,87 @@ async function resolveCallerBusiness(
   return { userId: user.id, businessId: data.business_id as string, role: data.role as string };
 }
 
+/**
+ * Emails a staff member about newly offered service(s) and drops an in-app
+ * notification. Shared by the bulk assign-services diff and the single-offer
+ * send-service-offer endpoint — extracted so the two never drift.
+ * Fire-and-forget: caller does not await this; failures are swallowed here.
+ */
+async function notifyServiceOffer(
+  staffId: string,
+  businessId: string,
+  serviceIds: string[],
+): Promise<void> {
+  if (serviceIds.length === 0) return;
+  try {
+    const [profileRes, bizRes, svcRes] = await Promise.all([
+      supabaseAdmin.from("staff_profiles").select("display_name, business_member_id, invited_email, business_id").eq("id", staffId).maybeSingle(),
+      supabaseAdmin.from("businesses").select("name, logo_url").eq("id", businessId).single(),
+      supabaseAdmin.from("services").select("id, name").in("id", serviceIds),
+    ]);
+    const profile = profileRes.data as Record<string, unknown> | null;
+    const biz = bizRes.data as Record<string, unknown> | null;
+    const svcRows = (svcRes.data ?? []) as Record<string, unknown>[];
+    if (!profile) return;
+    const memberId = profile.business_member_id as string | null;
+    let staffEmail: string | null = null;
+    if (memberId) {
+      const { data: memberEmail } = await supabaseAdmin
+        .from("business_members")
+        .select("user:users(email)")
+        .eq("id", memberId)
+        .maybeSingle();
+      const userObj = (memberEmail as Record<string, unknown> | null)?.user as Record<string, unknown> | null;
+      staffEmail = userObj?.email as string | null;
+    } else {
+      // Staff hasn't accepted the invite yet — send notification to the invited email address
+      staffEmail = profile.invited_email as string | null;
+    }
+    if (!staffEmail) return;
+    const appUrl = Deno.env.get("APP_URL") ?? "https://kazionebooking.com";
+    const { subject, html } = staffServiceOfferEmail({
+      staffName: (profile.display_name as string) ?? "Team member",
+      salonName: (biz?.name as string) ?? "KaziOne",
+      salonLogoUrl: biz?.logo_url as string | null ?? null,
+      serviceNames: svcRows.map((s) => s.name as string),
+      dashboardUrl: `${appUrl}/staff/services`,
+    });
+    await sendEmail(staffEmail, subject, html).catch((e) => console.warn("service offer email failed:", e));
+
+    // In-app notification so the staff bell updates immediately
+    if (memberId) {
+      const { data: memberRow } = await supabaseAdmin
+        .from("business_members")
+        .select("user_id")
+        .eq("id", memberId)
+        .maybeSingle();
+      const staffUserId = (memberRow as Record<string, unknown> | null)
+        ?.user_id as string | null;
+      if (staffUserId) {
+        const names = svcRows.map((s) => s.name as string);
+        const label = names.length === 1
+          ? names[0]
+          : `${names.length} services`;
+        await supabaseAdmin.from("notifications").insert({
+          business_id: businessId,
+          user_id: staffUserId,
+          type: "service_offer",
+          title: "New service offer",
+          body: `You've been offered ${label}. Open Services to accept or decline.`,
+          metadata: {
+            service_ids: serviceIds,
+            service_names: names,
+          },
+        }).then(({ error: notifErr }) => {
+          if (notifErr) {
+            console.warn("service offer notification failed:", notifErr);
+          }
+        });
+      }
+    }
+  } catch (e) { console.warn("service offer email error:", e); }
+}
+
 Deno.serve(withLogging("staff", async (req: Request) => {
   const corsResp = handleCors(req);
   if (corsResp) return corsResp;
@@ -623,78 +704,8 @@ Deno.serve(withLogging("staff", async (req: Request) => {
         });
       }
 
-      // Email staff about newly offered services (fire & forget)
-      if (newlyOfferedServiceIds.length > 0) {
-        (async () => {
-          try {
-            const [profileRes, bizRes, svcRes] = await Promise.all([
-              supabaseAdmin.from("staff_profiles").select("display_name, business_member_id, invited_email, business_id").eq("id", staffId).maybeSingle(),
-              supabaseAdmin.from("businesses").select("name, logo_url").eq("id", ctx.businessId).single(),
-              supabaseAdmin.from("services").select("id, name").in("id", newlyOfferedServiceIds),
-            ]);
-            const profile = profileRes.data as Record<string, unknown> | null;
-            const biz = bizRes.data as Record<string, unknown> | null;
-            const svcRows = (svcRes.data ?? []) as Record<string, unknown>[];
-            if (!profile) return;
-            const memberId = profile.business_member_id as string | null;
-            let staffEmail: string | null = null;
-            if (memberId) {
-              const { data: memberEmail } = await supabaseAdmin
-                .from("business_members")
-                .select("user:users(email)")
-                .eq("id", memberId)
-                .maybeSingle();
-              const userObj = (memberEmail as Record<string, unknown> | null)?.user as Record<string, unknown> | null;
-              staffEmail = userObj?.email as string | null;
-            } else {
-              // Staff hasn't accepted the invite yet — send notification to the invited email address
-              staffEmail = profile.invited_email as string | null;
-            }
-            if (!staffEmail) return;
-            const appUrl = Deno.env.get("APP_URL") ?? "https://kazionebooking.com";
-            const { subject, html } = staffServiceOfferEmail({
-              staffName: (profile.display_name as string) ?? "Team member",
-              salonName: (biz?.name as string) ?? "KaziOne",
-              salonLogoUrl: biz?.logo_url as string | null ?? null,
-              serviceNames: svcRows.map((s) => s.name as string),
-              dashboardUrl: `${appUrl}/staff/services`,
-            });
-            await sendEmail(staffEmail, subject, html).catch((e) => console.warn("service offer email failed:", e));
-
-            // In-app notification so the staff bell updates immediately
-            if (memberId) {
-              const { data: memberRow } = await supabaseAdmin
-                .from("business_members")
-                .select("user_id")
-                .eq("id", memberId)
-                .maybeSingle();
-              const staffUserId = (memberRow as Record<string, unknown> | null)
-                ?.user_id as string | null;
-              if (staffUserId) {
-                const names = svcRows.map((s) => s.name as string);
-                const label = names.length === 1
-                  ? names[0]
-                  : `${names.length} services`;
-                await supabaseAdmin.from("notifications").insert({
-                  business_id: ctx.businessId,
-                  user_id: staffUserId,
-                  type: "service_offer",
-                  title: "New service offer",
-                  body: `You've been offered ${label}. Open Services to accept or decline.`,
-                  metadata: {
-                    service_ids: newlyOfferedServiceIds,
-                    service_names: names,
-                  },
-                }).then(({ error: notifErr }) => {
-                  if (notifErr) {
-                    console.warn("service offer notification failed:", notifErr);
-                  }
-                });
-              }
-            }
-          } catch (e) { console.warn("service offer email error:", e); }
-        })();
-      }
+      // Email + in-app notification for newly offered services (fire & forget)
+      notifyServiceOffer(staffId, ctx.businessId, newlyOfferedServiceIds);
 
       return jsonCors(req, { success: true, offered_count: offeredIds.length });
     }
@@ -930,6 +941,86 @@ Deno.serve(withLogging("staff", async (req: Request) => {
       });
 
       return jsonCors(req, { success: true, service_id: serviceId, removed: true });
+    }
+
+    // ── PATCH /staff?action=send-service-offer&id= (row-scoped, single new offer) ──
+    // Body: { service_id, role?, commission_type?, commission_value?, effective_date? }
+    // The Team tab's "Assign service" panel sends exactly one offer to one
+    // staff member for one service. assign-services' bulk diff is NOT safe
+    // for this — passing a single-item offers[] there would hard-delete
+    // every OTHER assignment that staff member has, since anything omitted
+    // from the list is treated as removed. This endpoint upserts only the
+    // one row. Rejects if the staff member already has an ACCEPTED
+    // assignment for this service (re-offering doesn't make sense there —
+    // the Team tab shouldn't surface an already-assigned staff member as
+    // "available" in the first place).
+    if (method === "PATCH" && action === "send-service-offer") {
+      if (!staffId) return badRequest("id query param is required");
+      const body = await req.json() as Record<string, unknown>;
+      const serviceId = body.service_id as string | undefined;
+      if (!serviceId) return badRequest("service_id is required");
+
+      const { data: staffRow, error: staffErr } = await supabaseAdmin
+        .from("staff_profiles")
+        .select("id, business_id")
+        .eq("id", staffId)
+        .maybeSingle();
+      if (staffErr) return serverError(staffErr.message);
+      if (!staffRow) return notFound("Staff member not found");
+
+      const ctx = await requireOwnerOrManagerCtx(req, (staffRow as Record<string, unknown>).business_id as string);
+      if (ctx instanceof Response) return ctx;
+
+      const { data: svc } = await supabaseAdmin
+        .from("services")
+        .select("id")
+        .eq("id", serviceId)
+        .eq("business_id", ctx.businessId)
+        .maybeSingle();
+      if (!svc) return badRequest("service_id does not belong to this business");
+
+      const { data: existing } = await supabaseAdmin
+        .from("staff_services")
+        .select("status")
+        .eq("staff_profile_id", staffId)
+        .eq("service_id", serviceId)
+        .maybeSingle();
+      if ((existing as Record<string, unknown> | null)?.status === "accepted") {
+        return badRequest("This staff member is already assigned to this service");
+      }
+
+      const role = body.role === "secondary" ? "secondary" : "primary";
+      const commissionType = body.commission_type != null ? String(body.commission_type) : null;
+      const commissionValue = body.commission_value != null ? Number(body.commission_value) : null;
+
+      const { error: upsertErr } = await supabaseAdmin
+        .from("staff_services")
+        .upsert(
+          {
+            staff_profile_id: staffId,
+            service_id: serviceId,
+            status: "pending",
+            role,
+            effective_date: body.effective_date ?? null,
+            offered_commission_type: commissionType,
+            offered_commission_value: commissionValue,
+            assigned_at: new Date().toISOString(),
+            responded_at: null,
+          },
+          { onConflict: "staff_profile_id,service_id" },
+        );
+      if (upsertErr) return serverError(upsertErr.message);
+
+      logServiceActivity({
+        businessId: ctx.businessId,
+        serviceId,
+        actorUserId: ctx.userId,
+        eventType: "offer_sent",
+        payload: { staff_profile_id: staffId },
+      });
+      notifyServiceOffer(staffId, ctx.businessId, [serviceId]);
+
+      return jsonCors(req, { success: true, service_id: serviceId, status: "pending" });
     }
 
     // ── PATCH /staff?action=update-service-assignment&id= (row-scoped edit) ──

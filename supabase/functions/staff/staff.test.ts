@@ -764,3 +764,34 @@ Deno.test("staff: send-service-offer — upserts one row without touching the st
     assertEquals(reSendRes.status, 400)
   }
 })
+
+Deno.test("staff: send-service-offer and assign-services both reject a draft service", async () => {
+  if (!OWNER_TOKEN) return
+
+  const draftRes = await callServices("POST", OWNER_TOKEN, {
+    business_id: TEST_BUSINESS_ID,
+    name: `Draft Offer Guard Test ${Date.now()}`,
+    price: 20,
+    duration_minutes: 30,
+    status: "draft",
+  })
+  assertEquals(draftRes.status, 201)
+  const draft = await draftRes.json()
+  assertEquals(draft.status, "draft")
+
+  const sendRes = await call(
+    "PATCH",
+    OWNER_TOKEN,
+    { service_id: draft.id, role: "primary" },
+    { action: "send-service-offer", id: TEST_STAFF_ID },
+  )
+  assertEquals(sendRes.status, 400)
+
+  const bulkRes = await call(
+    "PATCH",
+    OWNER_TOKEN,
+    { offers: [{ service_id: draft.id }] },
+    { action: "assign-services", id: TEST_STAFF_ID },
+  )
+  assertEquals(bulkRes.status, 400)
+})

@@ -598,17 +598,22 @@ Deno.serve(withLogging("staff", async (req: Request) => {
 
       const offeredIds = offers.map((o) => o.service_id);
 
-      // Validate all offered service_ids belong to this business.
+      // Validate all offered service_ids belong to this business, and that
+      // none are still drafts — a draft isn't published yet, so no staff
+      // offers go out for it (WEB-OWNER-SERVICES-01 product decision).
       if (offeredIds.length > 0) {
         const { data: validSvcs, error: svcErr } = await supabaseAdmin
           .from("services")
-          .select("id")
+          .select("id, status")
           .in("id", offeredIds)
           .eq("business_id", ctx.businessId);
 
         if (svcErr) return serverError(svcErr.message);
         if ((validSvcs ?? []).length !== offeredIds.length) {
           return badRequest("One or more service_ids do not belong to this business");
+        }
+        if ((validSvcs ?? []).some((s) => (s as Record<string, unknown>).status === "draft")) {
+          return badRequest("Cannot send a service offer for a draft service — publish it first");
         }
       }
 
@@ -973,11 +978,14 @@ Deno.serve(withLogging("staff", async (req: Request) => {
 
       const { data: svc } = await supabaseAdmin
         .from("services")
-        .select("id")
+        .select("id, status")
         .eq("id", serviceId)
         .eq("business_id", ctx.businessId)
         .maybeSingle();
       if (!svc) return badRequest("service_id does not belong to this business");
+      if ((svc as Record<string, unknown>).status === "draft") {
+        return badRequest("Cannot send a service offer for a draft service — publish it first");
+      }
 
       const { data: existing } = await supabaseAdmin
         .from("staff_services")

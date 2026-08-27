@@ -771,6 +771,23 @@ Deno.serve(withLogging("services", async (req: Request) => {
       const ctx = await requireOwnerOrManagerCtx(req, prev.business_id as string);
       if (ctx instanceof Response) return ctx;
 
+      // Checked explicitly rather than relying solely on a FK violation:
+      // appointments.service_id is ON DELETE SET NULL (a single-service
+      // booking's header row survives service deletion by design), so only
+      // multi-service appointment_services rows (ON DELETE RESTRICT) would
+      // ever actually block the delete at the DB level. Any appointment
+      // history — single- or multi-service — must block delete per product
+      // decision, so both are checked here instead of trusting the FK alone.
+      const [apptCheck, apptSvcCheck] = await Promise.all([
+        supabaseAdmin.from("appointments").select("id", { count: "exact", head: true }).eq("service_id", id),
+        supabaseAdmin.from("appointment_services").select("id", { count: "exact", head: true }).eq("service_id", id),
+      ]);
+      if (apptCheck.error) return serverError(apptCheck.error.message);
+      if (apptSvcCheck.error) return serverError(apptSvcCheck.error.message);
+      if ((apptCheck.count ?? 0) > 0 || (apptSvcCheck.count ?? 0) > 0) {
+        return conflict(req, "HAS_APPOINTMENT_HISTORY", "This service has appointment history and cannot be deleted. Archive it instead.");
+      }
+
       const { error } = await supabaseAdmin
         .from("services")
         .delete()
@@ -778,10 +795,9 @@ Deno.serve(withLogging("services", async (req: Request) => {
         .eq("business_id", ctx.businessId);
 
       if (error) {
-        // Postgres foreign_key_violation — appointments.service_id is
-        // ON DELETE RESTRICT, so any service with appointment history
-        // (past or future) cannot be hard-deleted. Archive is the path for
-        // those; this is a deliberate block, not a bug to work around.
+        // Belt-and-suspenders: appointment_services' RESTRICT FK would still
+        // catch a race (a booking created between the check above and this
+        // delete), surfaced the same way as the explicit check.
         if ((error as { code?: string }).code === "23503") {
           return conflict(req, "HAS_APPOINTMENT_HISTORY", "This service has appointment history and cannot be deleted. Archive it instead.");
         }

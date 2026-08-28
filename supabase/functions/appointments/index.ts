@@ -1334,15 +1334,24 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
       // manual override so the action stays distinguishable from a real
       // processor confirmation. Checked before any write so a rejected
       // completion never leaves the appointment status changed underneath it.
+      //
+      // Fetches every payment row for this appointment, not just one: manual
+      // bookings already insert a placeholder cash/pending row at booking
+      // time (see the POST handler above), and pawapay-payment's own
+      // existing-row lookup is scoped to provider='pawapay', so it inserts a
+      // *second* row rather than reusing that placeholder. A .maybeSingle()
+      // here would error (and silently resolve to null, disabling the guard)
+      // the moment both rows exist.
       if (status === "completed") {
-        const { data: pendingPayment } = await supabaseAdmin
+        const { data: paymentRows } = await supabaseAdmin
           .from("payments")
           .select("status, stripe_payment_intent_id, provider_deposit_id")
-          .eq("appointment_id", id)
-          .maybeSingle();
-        const pp = pendingPayment as Record<string, unknown> | null;
-        const isProcessorLinked = !!pp?.stripe_payment_intent_id || !!pp?.provider_deposit_id;
-        if (pp && isProcessorLinked && pp.status === "pending" && !body.confirm_manual_payment) {
+          .eq("appointment_id", id);
+        const stillPendingProcessorPayment = (paymentRows ?? []).find((p) => {
+          const row = p as Record<string, unknown>;
+          return (!!row.stripe_payment_intent_id || !!row.provider_deposit_id) && row.status === "pending";
+        });
+        if (stillPendingProcessorPayment && !body.confirm_manual_payment) {
           return conflict(
             "PROCESSOR_PAYMENT_PENDING",
             "This appointment has a payment still pending confirmation from the payment processor. Pass confirm_manual_payment to record it as paid manually anyway.",
@@ -1602,11 +1611,21 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
         const businessIdForPayment = completedRow.business_id as string;
         const price = Number(completedRow.price ?? 0);
 
-        const { data: existingPayment } = await supabaseAdmin
+        // Multiple payment rows can legitimately exist for one appointment
+        // (see the guard above) — .maybeSingle() would error the moment a
+        // second row appears. Prefer an already-paid row (nothing to do),
+        // else the processor-linked row (the one a manual override targets),
+        // else the most recently created row.
+        const { data: paymentRows } = await supabaseAdmin
           .from("payments")
-          .select("id, status, method, stripe_payment_intent_id, provider, provider_deposit_id")
+          .select("id, status, method, stripe_payment_intent_id, provider, provider_deposit_id, created_at")
           .eq("appointment_id", id)
-          .maybeSingle();
+          .order("created_at", { ascending: false });
+        const rows = (paymentRows ?? []) as Record<string, unknown>[];
+        const existingPayment = rows.find((p) => p.status === "paid")
+          ?? rows.find((p) => !!p.stripe_payment_intent_id || !!p.provider_deposit_id)
+          ?? rows[0]
+          ?? null;
 
         // Use body.payment_method if provided; otherwise fall back to what staff already saved
         const method = paymentMethod ?? (existingPayment as Record<string, unknown> | null)?.method as string ?? "cash";

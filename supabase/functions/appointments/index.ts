@@ -962,7 +962,7 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
 
       const { data: existing, error: fetchErr } = await supabaseAdmin
         .from("appointments")
-        .select("business_id, status, price, final_price")
+        .select("business_id, status, price, final_price, entitlement_discount, offer_discount")
         .eq("id", id)
         .is("deleted_at", null)
         .single();
@@ -980,6 +980,26 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
 
       const oldPrice = Number(existingRow.final_price ?? existingRow.price);
       const finalPrice = Math.round(finalPriceInput * 100) / 100;
+      const discount = Number(existingRow.entitlement_discount ?? 0) + Number(existingRow.offer_discount ?? 0);
+
+      // A lower final price must never retroactively put the appointment
+      // "in credit" — there's no refund/credit flow this can hand off to
+      // (see PaymentStep's money-handling note), so reject rather than
+      // silently create a phantom overpayment the rest of the app can't
+      // represent.
+      const { data: priorPaymentRows } = await supabaseAdmin
+        .from("payments")
+        .select("amount, refund_amount, is_test")
+        .eq("appointment_id", id)
+        .in("status", ["paid", "partial_refund"]);
+      const previouslyReceived = ((priorPaymentRows ?? []) as Array<{ amount: number; refund_amount: number | null; is_test: boolean | null }>)
+        .filter((p) => !p.is_test)
+        .reduce((sum, p) => sum + Number(p.amount) - Number(p.refund_amount ?? 0), 0);
+      if (finalPrice - discount < previouslyReceived - 0.01) {
+        return badRequest(
+          `New price (${(finalPrice - discount).toFixed(2)} after discount) is less than the ${previouslyReceived.toFixed(2)} already received for this appointment. Refund the difference first, or choose a higher price.`,
+        );
+      }
 
       const { data: updated, error: updateErr } = await supabaseAdmin
         .from("appointments")
@@ -1424,7 +1444,7 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
       // Fetch appointment to get business_id for auth (+ service_id for stock-out + price for payment settlement)
       const { data: existing, error: fetchErr } = await supabaseAdmin
         .from("appointments")
-        .select("status, business_id, service_id, staff_profile_id, staff_profile_id_2, price, final_price, commission_split_pct")
+        .select("status, business_id, service_id, staff_profile_id, staff_profile_id_2, price, final_price, commission_split_pct, entitlement_discount, offer_discount")
         .eq("id", id)
         .single();
 
@@ -1439,11 +1459,18 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
         price: number;
         final_price: number | null;
         commission_split_pct: number | null;
+        entitlement_discount: number | null;
+        offer_discount: number | null;
       };
       // The price actually being charged: the Step 1 "Edit price" override
       // if one was authorized, else the original booking price. `price`
       // itself is never mutated — see 127_appointment_completion_step1.sql.
       const chargedPrice = existingRow.final_price ?? existingRow.price;
+      // What the client actually owes after any entitlement/offer discount —
+      // the same formula the frontend's effectivePrice()/PaymentStep use, so
+      // the wizard's "balance due" and the amount this handler will actually
+      // settle never disagree.
+      const amountOwed = Math.max(chargedPrice - Number(existingRow.entitlement_discount ?? 0) - Number(existingRow.offer_discount ?? 0), 0);
 
       // Owner/manager OR a supervisor OR the assigned staff member may update
       // status (staff portal MS1; supervisors added for cross-staff completion)
@@ -1530,6 +1557,36 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
           return conflict(
             "PROCESSOR_PAYMENT_PENDING",
             "This appointment has a payment still pending confirmation from the payment processor. Pass confirm_manual_payment to record it as paid manually anyway.",
+          );
+        }
+      }
+
+      // Resolve and validate the amount actually being recorded as received
+      // before any write — same reasoning as the processor-pending guard
+      // above: a rejected completion must never leave the status already
+      // flipped underneath it. There's no overpayment/credit flow (see
+      // PaymentStep's money-handling note), so an amount beyond what's
+      // actually owed is rejected outright rather than silently accepted.
+      let amountToRecord: number | null = null;
+      if (status === "completed") {
+        amountToRecord = typeof body.amount_received_now === "number" && Number.isFinite(body.amount_received_now)
+          ? Math.max(0, body.amount_received_now as number)
+          : null;
+        if (amountToRecord === null) {
+          const { data: draftRow } = await supabaseAdmin
+            .from("appointment_completion_drafts")
+            .select("payload")
+            .eq("appointment_id", id)
+            .maybeSingle();
+          const draftPayload = (draftRow as { payload: Record<string, unknown> } | null)?.payload;
+          const draftAmount = draftPayload?.amount_received_now;
+          amountToRecord = typeof draftAmount === "number" && Number.isFinite(draftAmount) ? Math.max(0, draftAmount) : amountOwed;
+        }
+        amountToRecord = Math.round(amountToRecord * 100) / 100;
+
+        if (amountToRecord > amountOwed + 0.01) {
+          return badRequest(
+            `Amount received (${amountToRecord.toFixed(2)}) exceeds the ${amountOwed.toFixed(2)} owed for this appointment. KaziOne does not support recording an overpayment.`,
           );
         }
       }
@@ -1793,29 +1850,9 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
       if (status === "completed") {
         const completedRow = existing as Record<string, unknown>;
         const businessIdForPayment = completedRow.business_id as string;
-        // The amount actually due: the Step 1 "Edit price" override if one
-        // was authorized, else the original booking price.
-        const amountDue = chargedPrice;
-
-        // Prefer an explicit amount from this request; otherwise fall back
-        // to whatever the completion wizard last saved as a draft (Step 1
-        // "Amount received"); otherwise assume the full amount due, which
-        // reproduces this handler's previous behaviour for every caller
-        // that predates partial-payment support (e.g. the staff portal).
-        let amountToRecord = typeof body.amount_received_now === "number" && Number.isFinite(body.amount_received_now)
-          ? Math.max(0, body.amount_received_now as number)
-          : null;
-        if (amountToRecord === null) {
-          const { data: draftRow } = await supabaseAdmin
-            .from("appointment_completion_drafts")
-            .select("payload")
-            .eq("appointment_id", id)
-            .maybeSingle();
-          const draftPayload = (draftRow as { payload: Record<string, unknown> } | null)?.payload;
-          const draftAmount = draftPayload?.amount_received_now;
-          amountToRecord = typeof draftAmount === "number" && Number.isFinite(draftAmount) ? Math.max(0, draftAmount) : amountDue;
-        }
-        amountToRecord = Math.round(amountToRecord * 100) / 100;
+        // Resolved and overpayment-validated above, before the status CAS.
+        const amountDue = amountOwed;
+        const amountToRecordFinal = amountToRecord as number;
 
         // A completion-wizard draft only makes sense while completion is
         // still in progress — now that it's actually settled, drop it.
@@ -1847,14 +1884,14 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
           // this point either the payment isn't processor-pending or the
           // caller explicitly passed confirm_manual_payment.
           const isProcessorLinked = !!pay.stripe_payment_intent_id || !!pay.provider_deposit_id;
-          const settledInFull = amountToRecord >= amountDue;
+          const settledInFull = amountToRecordFinal >= amountDue;
 
           if (pay.status !== "paid") {
             const manualOverride = isProcessorLinked && pay.status === "pending";
             await supabaseAdmin
               .from("payments")
               .update({
-                amount: amountToRecord > 0 ? amountToRecord : pay.amount,
+                amount: amountToRecordFinal > 0 ? amountToRecordFinal : pay.amount,
                 status: settledInFull ? "paid" : "pending",
                 paid_at: settledInFull ? new Date().toISOString() : null,
                 method,
@@ -1862,7 +1899,7 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
                   ? `Manually confirmed as paid by ${changedBy ?? "owner"} on completion, overriding a still-pending ${pay.provider ?? "processor"} payment.`
                   : settledInFull
                   ? `Recorded as paid by ${changedBy ?? "owner"} on completion.`
-                  : `Partial payment of ${amountToRecord} recorded by ${changedBy ?? "owner"} on completion (${(amountDue - amountToRecord).toFixed(2)} still due).`,
+                  : `Partial payment of ${amountToRecordFinal} recorded by ${changedBy ?? "owner"} on completion (${(amountDue - amountToRecordFinal).toFixed(2)} still due).`,
               })
               .eq("id", pay.id as string);
             await supabaseAdmin.from("appointment_status_log").insert({
@@ -1874,24 +1911,24 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
                 ? `Payment manually marked paid (method: ${method}), overriding pending ${pay.provider ?? "processor"} confirmation`
                 : settledInFull
                 ? `Payment recorded as paid (method: ${method})`
-                : `Partial payment recorded (method: ${method}, ${amountToRecord} of ${amountDue})`,
+                : `Partial payment recorded (method: ${method}, ${amountToRecordFinal} of ${amountDue})`,
             });
           }
-        } else if (amountToRecord > 0) {
+        } else if (amountToRecordFinal > 0) {
           // amount > 0 is a hard DB constraint (chk_payments_amount) — an
           // appointment completed with nothing received yet (balance fully
           // due) legitimately has no payment row to create here.
-          const settledInFull = amountToRecord >= amountDue;
+          const settledInFull = amountToRecordFinal >= amountDue;
           await supabaseAdmin.from("payments").insert({
             business_id: businessIdForPayment,
             appointment_id: id,
-            amount: amountToRecord,
+            amount: amountToRecordFinal,
             status: settledInFull ? "paid" : "pending",
             method,
             paid_at: settledInFull ? new Date().toISOString() : null,
             notes: settledInFull
               ? `Recorded as paid by ${changedBy ?? "owner"} on completion.`
-              : `Partial payment of ${amountToRecord} recorded by ${changedBy ?? "owner"} on completion (${(amountDue - amountToRecord).toFixed(2)} still due).`,
+              : `Partial payment of ${amountToRecordFinal} recorded by ${changedBy ?? "owner"} on completion (${(amountDue - amountToRecordFinal).toFixed(2)} still due).`,
           });
           await supabaseAdmin.from("appointment_status_log").insert({
             appointment_id: id,
@@ -1900,7 +1937,7 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
             changed_by: changedBy ?? null,
             reason: settledInFull
               ? `Payment recorded as paid (method: ${method})`
-              : `Partial payment recorded (method: ${method}, ${amountToRecord} of ${amountDue})`,
+              : `Partial payment recorded (method: ${method}, ${amountToRecordFinal} of ${amountDue})`,
           });
         }
 
@@ -1922,7 +1959,13 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
             const commType = svc?.staff_commission_type ?? "none";
             const commValue = Number(svc?.staff_commission_value ?? 0);
             const staffRate = Number(sp?.commission_rate ?? 0);
-            const commissionAmount = calcCommissionAmount(commType, commValue, staffRate, amountDue, 1);
+            // Commission base stays the raw charged price (not discount-
+            // adjusted) — matches the commission_amount_snapshot formula
+            // above, and the pre-existing policy this auto-pay branch always
+            // used. amountDue here is deliberately NOT reused: it's the
+            // discount-adjusted balance-due figure for payment settlement,
+            // a different concept.
+            const commissionAmount = calcCommissionAmount(commType, commValue, staffRate, chargedPrice, 1);
             if (commissionAmount > 0) {
               await supabaseAdmin.from("appointments").update({
                 commission_paid_at: new Date().toISOString(),

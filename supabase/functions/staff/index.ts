@@ -45,6 +45,40 @@ async function resolveCallerBusiness(
 }
 
 /**
+ * SPRINT_S48: applies any manual commission corrections
+ * (appointment_commission_adjustments) on top of the frozen completion
+ * snapshot. commission_amount_snapshot[_2] is never overwritten — this is
+ * a read-time overlay so `commissions`/`my-commissions` always show the
+ * current payable amount (latest correction, or the original snapshot if
+ * this staff member was never corrected) without duplicating the
+ * correction logic that lives in appointments/index.ts?action=correct-commission.
+ */
+async function applyCommissionAdjustments<
+  T extends { appointment_id: string; commission_amount: number },
+>(rows: T[], staffProfileId: string): Promise<(T & { commission_amount_original: number; commission_corrected: boolean })[]> {
+  if (rows.length === 0) return [];
+
+  const { data: adjustments } = await supabaseAdmin
+    .from("appointment_commission_adjustments")
+    .select("appointment_id, new_amount, created_at")
+    .eq("staff_profile_id", staffProfileId)
+    .in("appointment_id", rows.map((r) => r.appointment_id))
+    .order("created_at", { ascending: false });
+
+  const latestByAppt = new Map<string, number>();
+  for (const adj of (adjustments ?? []) as { appointment_id: string; new_amount: number }[]) {
+    if (!latestByAppt.has(adj.appointment_id)) latestByAppt.set(adj.appointment_id, Number(adj.new_amount));
+  }
+
+  return rows.map((r) => {
+    const corrected = latestByAppt.get(r.appointment_id);
+    return corrected === undefined
+      ? { ...r, commission_amount_original: r.commission_amount, commission_corrected: false }
+      : { ...r, commission_amount_original: r.commission_amount, commission_amount: corrected, commission_corrected: true };
+  });
+}
+
+/**
  * Emails a staff member about newly offered service(s) and drops an in-app
  * notification. Shared by the bulk assign-services diff and the single-offer
  * send-service-offer endpoint — extracted so the two never drift.
@@ -2345,7 +2379,7 @@ Deno.serve(withLogging("staff", async (req: Request) => {
 
       const myPrimaryRows = ((myPrimaryRes.data ?? []) as Record<string, unknown>[]).map((a) => mapMyRow(a, "primary"));
       const mySecondaryRows = ((mySecondaryRes.data ?? []) as Record<string, unknown>[]).map((a) => mapMyRow(a, "secondary"));
-      const commissions = [...myPrimaryRows, ...mySecondaryRows]
+      const commissions = (await applyCommissionAdjustments([...myPrimaryRows, ...mySecondaryRows], mySpId))
         .sort((a, b) => b.starts_at.localeCompare(a.starts_at))
         .slice(0, 200)
         .filter((c) => c.commission_amount > 0 || !!c.commission_paid_at);
@@ -2463,7 +2497,7 @@ Deno.serve(withLogging("staff", async (req: Request) => {
 
       const primaryRows = ((primaryRes.data ?? []) as Record<string, unknown>[]).map((a) => mapRow(a, "primary"));
       const secondaryRows = ((secondaryRes.data ?? []) as Record<string, unknown>[]).map((a) => mapRow(a, "secondary"));
-      const commissions = [...primaryRows, ...secondaryRows]
+      const commissions = (await applyCommissionAdjustments([...primaryRows, ...secondaryRows], targetStaffId))
         .sort((a, b) => b.starts_at.localeCompare(a.starts_at))
         .slice(0, 200)
         .filter((c) => c.commission_amount > 0 || !!c.commission_paid_at);

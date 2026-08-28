@@ -1392,6 +1392,88 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
       return jsonCors(req, normalizePayment(updated));
     }
 
+    // ── PATCH ?action=change-service ────────────────────────────────────────
+    // Corrects which service a confirmed, not-yet-completed appointment is
+    // for (wrong service booked, client's needs changed) — same shape as
+    // reschedule/assign-staff above: fetch, authorize, atomic lock+conflict-
+    // check+write via change_appointment_service_atomic. starts_at is left
+    // untouched — this swaps the service, it does not reschedule. Body:
+    // { service_id }.
+    if (method === "PATCH" && action === "change-service") {
+      if (!id) return badRequest("id is required");
+      const body = await req.json() as Record<string, unknown>;
+      const newServiceId = body.service_id as string | undefined;
+      if (!newServiceId) return badRequest("service_id is required");
+
+      const { data: existing, error: fetchErr } = await supabaseAdmin
+        .from("appointments")
+        .select("business_id, status, service_id")
+        .eq("id", id)
+        .is("deleted_at", null)
+        .single();
+
+      if (fetchErr || !existing) return notFound("Appointment not found");
+      const existingRow = existing as { business_id: string; status: string; service_id: string | null };
+      if (existingRow.status === "cancelled" || existingRow.status === "completed") {
+        return badRequest(`Cannot change the service on a ${existingRow.status} appointment`);
+      }
+
+      const ctx = await requireOwnerOrManagerCtx(req, existingRow.business_id);
+      if (ctx instanceof Response) return ctx;
+
+      // Must belong to the same tenant and be bookable — never trust a
+      // client-supplied service_id without verifying tenant ownership.
+      const { data: newService, error: serviceErr } = await supabaseAdmin
+        .from("services")
+        .select("id, name, price, duration_minutes, buffer_minutes, is_active")
+        .eq("id", newServiceId)
+        .eq("business_id", ctx.businessId)
+        .maybeSingle();
+
+      if (serviceErr) return serverError(serviceErr.message);
+      if (!newService) return badRequest("Service not found for this business");
+      const svc = newService as { id: string; name: string; price: number; duration_minutes: number; buffer_minutes: number | null; is_active: boolean };
+      if (!svc.is_active) return badRequest("Cannot assign an inactive service");
+
+      const { error: changeErr } = await supabaseAdmin.rpc("change_appointment_service_atomic", {
+        p_appointment_id: id,
+        p_new_service_id: svc.id,
+        p_new_duration_minutes: svc.duration_minutes,
+        p_new_buffer_minutes: svc.buffer_minutes ?? 0,
+        p_new_price: svc.price,
+      });
+
+      if (changeErr) {
+        if (isSlotTakenError(changeErr)) {
+          return conflict("SLOT_TAKEN", "The assigned staff member already has a conflicting appointment at the new service's duration");
+        }
+        console.error("change_appointment_service_atomic error:", JSON.stringify(changeErr));
+        return serverError(changeErr.message);
+      }
+
+      const { data: updated, error: updateErr } = await supabaseAdmin
+        .from("appointments")
+        .select(APPT_SELECT)
+        .eq("id", id)
+        .single();
+
+      if (updateErr) return serverError(updateErr.message);
+
+      const { data: oldServiceRow } = existingRow.service_id
+        ? await supabaseAdmin.from("services").select("name").eq("id", existingRow.service_id).maybeSingle()
+        : { data: null };
+
+      await supabaseAdmin.from("appointment_status_log").insert({
+        appointment_id: id,
+        old_status: existingRow.status,
+        new_status: existingRow.status,
+        changed_by: ctx.userId,
+        reason: `Service changed from "${(oldServiceRow as { name: string } | null)?.name ?? "previous service"}" to "${svc.name}"`,
+      });
+
+      return jsonCors(req, normalizePayment(updated as Record<string, unknown>));
+    }
+
     // ── PATCH ?action=mark_commission_paid ─────────────────────────────────
     // Supports retroactive marking: works on any completed appointment regardless
     // of when it was booked. Passing paid=false clears the paid timestamp.

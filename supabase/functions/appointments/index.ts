@@ -1075,6 +1075,9 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
         .single();
 
       if (fetchErr || !existing) return notFound("Appointment not found");
+      if (existing.status === "cancelled" || existing.status === "completed") {
+        return badRequest(`Cannot reschedule a ${existing.status} appointment`);
+      }
 
       const ctx = await requireOwnerOrManagerCtx(req, (existing as Record<string, unknown>).business_id as string);
       if (ctx instanceof Response) return ctx;
@@ -1092,12 +1095,23 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
       const startsAt = new Date(newStartsAt);
       const endsAt = new Date(startsAt.getTime() + durationMs);
 
-      const { error: updateErr } = await supabaseAdmin
-        .from("appointments")
-        .update({ starts_at: startsAt.toISOString(), ends_at: endsAt.toISOString(), status: "confirmed" })
-        .eq("id", id);
+      // Atomic (S58 pattern, same as reschedule-booking/index.ts): re-locks and
+      // re-checks the target slot (excluding this appointment's own row) in the
+      // same transaction as the write, closing the TOCTOU gap a plain .update()
+      // would leave open between reading availability and writing the new slot.
+      const { error: updateErr } = await supabaseAdmin.rpc("reschedule_appointment_atomic", {
+        p_appointment_id: id,
+        p_new_starts_at: startsAt.toISOString(),
+        p_new_ends_at: endsAt.toISOString(),
+        p_new_staff_id: ex.staff_profile_id ?? null,
+      });
 
-      if (updateErr) return serverError(updateErr.message);
+      if (updateErr) {
+        if (isSlotTakenError(updateErr)) {
+          return conflict("SLOT_TAKEN", "The requested slot was just booked by someone else");
+        }
+        return serverError(updateErr.message);
+      }
 
       // Fetch the updated appointment separately — avoids UPDATE+JOIN issues
       const { data: updated, error: fetchUpdatedErr } = await supabaseAdmin
@@ -1313,6 +1327,38 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
         return badRequest(`Cannot transition from '${existingRow.status}' to '${status}'`);
       }
 
+      // A processor (Stripe/PawaPay) payment still `pending` hasn't actually
+      // been confirmed by the processor yet — the confirming webhook may
+      // simply not have landed. Completing the appointment must not silently
+      // stamp it `paid` on the processor's behalf; that requires an explicit
+      // manual override so the action stays distinguishable from a real
+      // processor confirmation. Checked before any write so a rejected
+      // completion never leaves the appointment status changed underneath it.
+      //
+      // Fetches every payment row for this appointment, not just one: manual
+      // bookings already insert a placeholder cash/pending row at booking
+      // time (see the POST handler above), and pawapay-payment's own
+      // existing-row lookup is scoped to provider='pawapay', so it inserts a
+      // *second* row rather than reusing that placeholder. A .maybeSingle()
+      // here would error (and silently resolve to null, disabling the guard)
+      // the moment both rows exist.
+      if (status === "completed") {
+        const { data: paymentRows } = await supabaseAdmin
+          .from("payments")
+          .select("status, stripe_payment_intent_id, provider_deposit_id")
+          .eq("appointment_id", id);
+        const stillPendingProcessorPayment = (paymentRows ?? []).find((p) => {
+          const row = p as Record<string, unknown>;
+          return (!!row.stripe_payment_intent_id || !!row.provider_deposit_id) && row.status === "pending";
+        });
+        if (stillPendingProcessorPayment && !body.confirm_manual_payment) {
+          return conflict(
+            "PROCESSOR_PAYMENT_PENDING",
+            "This appointment has a payment still pending confirmation from the payment processor. Pass confirm_manual_payment to record it as paid manually anyway.",
+          );
+        }
+      }
+
       const updateFields: Record<string, unknown> = { status };
       if (status === "cancelled") {
         updateFields.cancellation_reason = reason ?? null;
@@ -1358,14 +1404,33 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
         }
       }
 
+      // Compare-and-swap on the status we read at the top of this handler:
+      // the WHERE clause only matches if no other request has already moved
+      // this appointment's status since. Two concurrent completion requests
+      // that both passed the allowedFromStatuses check above will race here,
+      // but Postgres's row-level locking during UPDATE means only one can
+      // actually flip the row — the other affects 0 rows, .single() then
+      // errors with PGRST116, and we bail out below before running any of
+      // the completion side effects (payment settlement, stock deduction,
+      // commission tasks), closing the double-completion/double-deduction
+      // race without needing to move this whole flow into a locking RPC.
       const { data, error } = await supabaseAdmin
         .from("appointments")
         .update(updateFields)
         .eq("id", id)
+        .eq("status", existingRow.status)
         .select(APPT_SELECT)
         .single();
 
-      if (error) return serverError(error.message);
+      if (error) {
+        if (error.code === "PGRST116") {
+          return conflict(
+            "ALREADY_TRANSITIONED",
+            "This appointment's status was already changed by another request.",
+          );
+        }
+        return serverError(error.message);
+      }
 
       await supabaseAdmin.from("appointment_status_log").insert({
         appointment_id: id,
@@ -1546,22 +1611,55 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
         const businessIdForPayment = completedRow.business_id as string;
         const price = Number(completedRow.price ?? 0);
 
-        const { data: existingPayment } = await supabaseAdmin
+        // Multiple payment rows can legitimately exist for one appointment
+        // (see the guard above) — .maybeSingle() would error the moment a
+        // second row appears. Prefer an already-paid row (nothing to do),
+        // else the processor-linked row (the one a manual override targets),
+        // else the most recently created row.
+        const { data: paymentRows } = await supabaseAdmin
           .from("payments")
-          .select("id, status, method")
+          .select("id, status, method, stripe_payment_intent_id, provider, provider_deposit_id, created_at")
           .eq("appointment_id", id)
-          .maybeSingle();
+          .order("created_at", { ascending: false });
+        const rows = (paymentRows ?? []) as Record<string, unknown>[];
+        const existingPayment = rows.find((p) => p.status === "paid")
+          ?? rows.find((p) => !!p.stripe_payment_intent_id || !!p.provider_deposit_id)
+          ?? rows[0]
+          ?? null;
 
         // Use body.payment_method if provided; otherwise fall back to what staff already saved
         const method = paymentMethod ?? (existingPayment as Record<string, unknown> | null)?.method as string ?? "cash";
 
         if (existingPayment) {
           const pay = existingPayment as Record<string, unknown>;
+          // The processor-pending guard already ran (and would have returned
+          // a 409) before the appointment status was written above, so by
+          // this point either the payment isn't processor-pending or the
+          // caller explicitly passed confirm_manual_payment.
+          const isProcessorLinked = !!pay.stripe_payment_intent_id || !!pay.provider_deposit_id;
+
           if (pay.status !== "paid") {
+            const manualOverride = isProcessorLinked && pay.status === "pending";
             await supabaseAdmin
               .from("payments")
-              .update({ status: "paid", paid_at: new Date().toISOString(), method })
+              .update({
+                status: "paid",
+                paid_at: new Date().toISOString(),
+                method,
+                notes: manualOverride
+                  ? `Manually confirmed as paid by ${changedBy ?? "owner"} on completion, overriding a still-pending ${pay.provider ?? "processor"} payment.`
+                  : `Recorded as paid by ${changedBy ?? "owner"} on completion.`,
+              })
               .eq("id", pay.id as string);
+            await supabaseAdmin.from("appointment_status_log").insert({
+              appointment_id: id,
+              old_status: existingRow.status,
+              new_status: status,
+              changed_by: changedBy ?? null,
+              reason: manualOverride
+                ? `Payment manually marked paid (method: ${method}), overriding pending ${pay.provider ?? "processor"} confirmation`
+                : `Payment recorded as paid (method: ${method})`,
+            });
           }
         } else if (price > 0) {
           await supabaseAdmin.from("payments").insert({
@@ -1571,6 +1669,14 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
             status: "paid",
             method,
             paid_at: new Date().toISOString(),
+            notes: `Recorded as paid by ${changedBy ?? "owner"} on completion.`,
+          });
+          await supabaseAdmin.from("appointment_status_log").insert({
+            appointment_id: id,
+            old_status: existingRow.status,
+            new_status: status,
+            changed_by: changedBy ?? null,
+            reason: `Payment recorded as paid (method: ${method})`,
           });
         }
 

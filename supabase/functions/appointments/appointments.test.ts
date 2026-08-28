@@ -313,6 +313,172 @@ Deno.test("appointments: GET ?action=notification-log without business membershi
   await res.body?.cancel()
 })
 
+// ── Owner-dashboard reschedule now goes through the same atomic conflict ───
+// lock as reschedule-booking/create-booking (previously a plain .update()
+// with no re-check — a staff member could be silently double-booked).
+
+Deno.test("appointments: PATCH ?action=reschedule — target slot has a conflict → 409 SLOT_TAKEN", async () => {
+  if (!OWNER_TOKEN) return
+
+  // Blocker: Fatima already booked at 10:00 on 2026-10-09.
+  const blockerRes = await callFn("POST", OWNER_TOKEN, manualBookingBody({
+    date: "2026-10-09",
+    time: "10:00",
+  }))
+  assertEquals(blockerRes.status, 201)
+  await blockerRes.json()
+
+  // Target: a separate confirmed appointment, also with Fatima, at a
+  // different time — rescheduling it into the blocker's slot must conflict.
+  const targetRes = await callFn("POST", OWNER_TOKEN, manualBookingBody({
+    date: "2026-10-09",
+    time: "13:00",
+    client_id: CLIENT_ID_2,
+  }))
+  assertEquals(targetRes.status, 201)
+  const target = await targetRes.json()
+
+  const rescheduleRes = await callFn("PATCH", OWNER_TOKEN, { date: "2026-10-09", time: "10:00" }, {
+    action: "reschedule",
+    id: target.id,
+  })
+  assertEquals(rescheduleRes.status, 409)
+  const body = await rescheduleRes.json()
+  assertEquals(body.error.code, "SLOT_TAKEN")
+})
+
+Deno.test("appointments: PATCH ?action=reschedule — concurrent reschedule into the same free slot → exactly one 200, one 409", async () => {
+  if (!OWNER_TOKEN) return
+
+  const targetARes = await callFn("POST", OWNER_TOKEN, manualBookingBody({
+    date: "2026-10-10",
+    time: "09:00",
+  }))
+  assertEquals(targetARes.status, 201)
+  const targetA = await targetARes.json()
+
+  const targetBRes = await callFn("POST", OWNER_TOKEN, manualBookingBody({
+    date: "2026-10-10",
+    time: "11:00",
+    client_id: CLIENT_ID_2,
+  }))
+  assertEquals(targetBRes.status, 201)
+  const targetB = await targetBRes.json()
+
+  const [res1, res2] = await Promise.all([
+    callFn("PATCH", OWNER_TOKEN, { date: "2026-10-10", time: "15:00" }, { action: "reschedule", id: targetA.id }),
+    callFn("PATCH", OWNER_TOKEN, { date: "2026-10-10", time: "15:00" }, { action: "reschedule", id: targetB.id }),
+  ])
+  const statuses = [res1.status, res2.status].sort()
+  assertEquals(statuses[0], 200, `Expected one 200, got statuses ${JSON.stringify(statuses)}`)
+  assertEquals(statuses[1], 409, `Expected one 409, got statuses ${JSON.stringify(statuses)}`)
+  await res1.body?.cancel().catch(() => {})
+  await res2.body?.cancel().catch(() => {})
+})
+
+Deno.test("appointments: PATCH ?action=reschedule — cancelled appointment → 400", async () => {
+  if (!OWNER_TOKEN) return
+
+  const bookRes = await callFn("POST", OWNER_TOKEN, manualBookingBody({ date: "2026-10-11", time: "09:00" }))
+  assertEquals(bookRes.status, 201)
+  const booked = await bookRes.json()
+
+  const cancelRes = await callFn("PATCH", OWNER_TOKEN, { status: "cancelled", reason: "test" }, { id: booked.id })
+  assertEquals(cancelRes.status, 200)
+  await cancelRes.json()
+
+  const rescheduleRes = await callFn("PATCH", OWNER_TOKEN, { date: "2026-10-11", time: "10:00" }, {
+    action: "reschedule",
+    id: booked.id,
+  })
+  assertEquals(rescheduleRes.status, 400)
+  await rescheduleRes.body?.cancel()
+})
+
+// ── Completing an appointment must never silently overwrite a payment the ──
+// processor (Stripe/PawaPay) hasn't actually confirmed yet.
+
+Deno.test("appointments: PATCH complete — processor payment still pending → 409, requires confirm_manual_payment", async () => {
+  if (!OWNER_TOKEN) return
+
+  const bookRes = await callFn("POST", OWNER_TOKEN, manualBookingBody({ date: "2026-10-12", time: "09:00", price: 80 }))
+  assertEquals(bookRes.status, 201)
+  const booked = await bookRes.json()
+
+  const restBase = BASE.replace("/functions/v1", "/rest/v1")
+  const marker = `pi_test_${Date.now()}`
+  const paymentInsertRes = await fetch(`${restBase}/payments`, {
+    method: "POST",
+    headers: {
+      apikey: SERVICE_KEY,
+      Authorization: `Bearer ${SERVICE_KEY}`,
+      "Content-Type": "application/json",
+      Prefer: "return=representation",
+    },
+    body: JSON.stringify({
+      business_id: BUSINESS_ID,
+      appointment_id: booked.id,
+      amount: 80,
+      status: "pending",
+      method: "card",
+      stripe_payment_intent_id: marker,
+    }),
+  })
+  assertEquals(paymentInsertRes.status, 201)
+
+  const blockedRes = await callFn("PATCH", OWNER_TOKEN, { status: "completed" }, { id: booked.id })
+  assertEquals(blockedRes.status, 409)
+  const blockedBody = await blockedRes.json()
+  assertEquals(blockedBody.error.code, "PROCESSOR_PAYMENT_PENDING")
+
+  // The appointment's status must be untouched by the rejected attempt.
+  const checkRes = await callFn("GET", OWNER_TOKEN, undefined, { id: booked.id })
+  const checkBody = await checkRes.json()
+  assertEquals(checkBody.status, "confirmed")
+
+  const overrideRes = await callFn("PATCH", OWNER_TOKEN, { status: "completed", confirm_manual_payment: true, payment_method: "cash" }, { id: booked.id })
+  assertEquals(overrideRes.status, 200)
+  await overrideRes.json()
+
+  // Two payment rows now exist for this appointment: the placeholder cash
+  // row the manual-booking POST always creates when price > 0, and the
+  // processor-linked row inserted above — settlement must resolve the
+  // *processor-linked* one, not just whichever row PostgREST returns first.
+  const paymentCheckRes = await fetch(
+    `${restBase}/payments?appointment_id=eq.${booked.id}&stripe_payment_intent_id=eq.${marker}&select=status,notes`,
+    { headers: { apikey: ANON_KEY, Authorization: `Bearer ${OWNER_TOKEN}` } },
+  )
+  const paymentRows = await paymentCheckRes.json()
+  if (paymentRows.length !== 1) {
+    throw new Error(`Expected exactly one payment row for stripe_payment_intent_id=${marker}, got ${paymentRows.length}`)
+  }
+  assertEquals(paymentRows[0].status, "paid")
+  if (!String(paymentRows[0].notes ?? "").includes("Manually confirmed")) {
+    throw new Error(`Expected the manual-override note on the payment row, got: ${paymentRows[0].notes}`)
+  }
+})
+
+// ── Completion is a compare-and-swap on status — two concurrent completion ─
+// requests must not both run payment settlement/stock deduction/commission.
+
+Deno.test("appointments: PATCH complete — concurrent completion of the same appointment → exactly one 200, one 409", async () => {
+  if (!OWNER_TOKEN) return
+
+  const bookRes = await callFn("POST", OWNER_TOKEN, manualBookingBody({ date: "2026-10-13", time: "09:00" }))
+  assertEquals(bookRes.status, 201)
+  const booked = await bookRes.json()
+
+  const [res1, res2] = await Promise.all([
+    callFn("PATCH", OWNER_TOKEN, { status: "completed", payment_method: "cash" }, { id: booked.id }),
+    callFn("PATCH", OWNER_TOKEN, { status: "completed", payment_method: "cash" }, { id: booked.id }),
+  ])
+  const statuses = [res1.status, res2.status].sort()
+  assertEquals(statuses[0], 200, `Expected one 200, got statuses ${JSON.stringify(statuses)}`)
+  assertEquals(statuses[1], 409, `Expected one 409, got statuses ${JSON.stringify(statuses)}`)
+  await res1.body?.cancel().catch(() => {})
+  await res2.body?.cancel().catch(() => {})
+})
+
 Deno.test("appointments: GET ?action=notification-log returns delivery rows for the appointment's owner", async () => {
   if (!OWNER_TOKEN) return
 

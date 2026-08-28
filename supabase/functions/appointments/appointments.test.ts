@@ -440,11 +440,18 @@ Deno.test("appointments: PATCH complete — processor payment still pending → 
   assertEquals(overrideRes.status, 200)
   await overrideRes.json()
 
+  // Two payment rows now exist for this appointment: the placeholder cash
+  // row the manual-booking POST always creates when price > 0, and the
+  // processor-linked row inserted above — settlement must resolve the
+  // *processor-linked* one, not just whichever row PostgREST returns first.
   const paymentCheckRes = await fetch(
-    `${restBase}/payments?appointment_id=eq.${booked.id}&select=status,notes`,
+    `${restBase}/payments?appointment_id=eq.${booked.id}&stripe_payment_intent_id=eq.${marker}&select=status,notes`,
     { headers: { apikey: ANON_KEY, Authorization: `Bearer ${OWNER_TOKEN}` } },
   )
   const paymentRows = await paymentCheckRes.json()
+  if (paymentRows.length !== 1) {
+    throw new Error(`Expected exactly one payment row for stripe_payment_intent_id=${marker}, got ${paymentRows.length}`)
+  }
   assertEquals(paymentRows[0].status, "paid")
   if (!String(paymentRows[0].notes ?? "").includes("Manually confirmed")) {
     throw new Error(`Expected the manual-override note on the payment row, got: ${paymentRows[0].notes}`)

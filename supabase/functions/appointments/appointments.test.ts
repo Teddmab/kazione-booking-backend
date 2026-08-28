@@ -379,7 +379,7 @@ Deno.test("appointments: PATCH ?action=reschedule — concurrent reschedule into
 Deno.test("appointments: PATCH ?action=reschedule — cancelled appointment → 400", async () => {
   if (!OWNER_TOKEN) return
 
-  const bookRes = await callFn("POST", OWNER_TOKEN, manualBookingBody({ date: "2026-10-11", time: "09:00" }))
+  const bookRes = await callFn("POST", OWNER_TOKEN, manualBookingBody({ date: "2026-10-25", time: "09:00" }))
   assertEquals(bookRes.status, 201)
   const booked = await bookRes.json()
 
@@ -522,3 +522,129 @@ Deno.test("appointments: GET ?action=notification-log returns delivery rows for 
   assertEquals(row.channel, "email")
   assertEquals(row.recipient_type, "client")
 })
+// ── SPRINT_S48: commission correction workflow ──────────────────────────────
+// Each test books and completes its own fresh appointment (rather than
+// reusing COMM_TEST_APPT_ID, which an earlier test already completes) so
+// these are independent of file execution order.
+
+async function bookAndComplete(date: string, time: string, overrides: Record<string, unknown> = {}) {
+  const bookRes = await callFn("POST", OWNER_TOKEN, manualBookingBody({ date, time, ...overrides }))
+  assertEquals(bookRes.status, 201)
+  const booked = await bookRes.json()
+
+  const completeRes = await callFn("PATCH", OWNER_TOKEN, { status: "completed", payment_method: "cash" }, { id: booked.id })
+  assertEquals(completeRes.status, 200)
+  await completeRes.json()
+
+  const getRes = await callFn("GET", OWNER_TOKEN, undefined, { id: booked.id })
+  assertEquals(getRes.status, 200)
+  const appt = await getRes.json()
+  return appt as {
+    id: string
+    staff_profile_id: string
+    commission_amount_snapshot: number
+    status_log: { reason: string | null }[]
+  }
+}
+
+Deno.test("appointments: PATCH ?action=correct-commission — corrects the payable amount without overwriting the snapshot, and logs the change", async () => {
+  if (!OWNER_TOKEN) return
+
+  const appt = await bookAndComplete("2026-10-20", "09:00")
+  const originalSnapshot = appt.commission_amount_snapshot
+  const newAmount = Math.round((originalSnapshot + 10) * 100) / 100
+
+  const correctRes = await callFn("PATCH", OWNER_TOKEN, {
+    staff_profile_id: STAFF_ID,
+    new_amount: newAmount,
+    reason: "Wrong commission rate was configured at completion",
+  }, { action: "correct-commission", id: appt.id })
+  if (correctRes.status !== 200) {
+    throw new Error(`Expected 200, got ${correctRes.status}: ${JSON.stringify(await correctRes.json().catch(() => null))}`)
+  }
+  const correctBody = await correctRes.json()
+  assertEquals(correctBody.adjustment.previous_amount, originalSnapshot)
+  assertEquals(correctBody.adjustment.new_amount, newAmount)
+  assertEquals(correctBody.current_amount, newAmount)
+
+  const afterRes = await callFn("GET", OWNER_TOKEN, undefined, { id: appt.id })
+  const after = await afterRes.json()
+  // The original completion-time snapshot must survive the correction untouched.
+  assertEquals(after.commission_amount_snapshot, originalSnapshot)
+  assertEquals(after.commission_adjustments.length, 1)
+  assertEquals(after.commission_adjustments[0].new_amount, newAmount)
+  const hasCorrectionLogEntry = (after.status_log as { reason: string | null }[]).some(
+    (e) => e.reason?.includes("Commission corrected"),
+  )
+  if (!hasCorrectionLogEntry) throw new Error("Expected an appointment_status_log entry recording the correction")
+})
+
+Deno.test("appointments: PATCH ?action=correct-commission — missing reason → 400", async () => {
+  if (!OWNER_TOKEN) return
+
+  const appt = await bookAndComplete("2026-10-21", "09:00")
+  const res = await callFn("PATCH", OWNER_TOKEN, {
+    staff_profile_id: STAFF_ID,
+    new_amount: appt.commission_amount_snapshot + 5,
+  }, { action: "correct-commission", id: appt.id })
+  assertEquals(res.status, 400)
+})
+
+Deno.test("appointments: PATCH ?action=correct-commission — appointment not completed → 400", async () => {
+  if (!OWNER_TOKEN) return
+
+  const bookRes = await callFn("POST", OWNER_TOKEN, manualBookingBody({ date: "2026-10-25", time: "09:00" }))
+  assertEquals(bookRes.status, 201)
+  const booked = await bookRes.json()
+
+  const res = await callFn("PATCH", OWNER_TOKEN, {
+    staff_profile_id: STAFF_ID,
+    new_amount: 20,
+    reason: "Should not be allowed yet",
+  }, { action: "correct-commission", id: booked.id })
+  assertEquals(res.status, 400)
+})
+
+Deno.test("appointments: PATCH ?action=correct-commission — staff_profile_id not assigned to this appointment → 400", async () => {
+  if (!OWNER_TOKEN) return
+
+  const appt = await bookAndComplete("2026-10-22", "09:00")
+  const res = await callFn("PATCH", OWNER_TOKEN, {
+    staff_profile_id: STAFF_ID_2,
+    new_amount: 20,
+    reason: "Regina was never on this appointment",
+  }, { action: "correct-commission", id: appt.id })
+  assertEquals(res.status, 400)
+})
+
+Deno.test("appointments: PATCH ?action=correct-commission — already paid → 409, commission never silently rewritten", async () => {
+  if (!OWNER_TOKEN) return
+
+  const appt = await bookAndComplete("2026-10-23", "09:00")
+
+  const payRes = await callFn("PATCH", OWNER_TOKEN, { pay_method: "cash" }, { action: "mark_commission_paid", id: appt.id })
+  assertEquals(payRes.status, 200)
+  await payRes.json()
+
+  const res = await callFn("PATCH", OWNER_TOKEN, {
+    staff_profile_id: STAFF_ID,
+    new_amount: appt.commission_amount_snapshot + 5,
+    reason: "Too late — already paid out",
+  }, { action: "correct-commission", id: appt.id })
+  assertEquals(res.status, 409)
+  const body = await res.json()
+  assertEquals(body.error.code, "COMMISSION_ALREADY_PAID")
+})
+
+Deno.test("appointments: PATCH ?action=correct-commission — new_amount equal to current amount → 400 (no-op rejected)", async () => {
+  if (!OWNER_TOKEN) return
+
+  const appt = await bookAndComplete("2026-10-24", "09:00")
+  const res = await callFn("PATCH", OWNER_TOKEN, {
+    staff_profile_id: STAFF_ID,
+    new_amount: appt.commission_amount_snapshot,
+    reason: "No actual change",
+  }, { action: "correct-commission", id: appt.id })
+  assertEquals(res.status, 400)
+})
+

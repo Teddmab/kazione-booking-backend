@@ -206,6 +206,82 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
         return jsonCors(req, logRows ?? []);
       }
 
+      // ── GET ?action=export-receipt&id=... ─────────────────────────────────
+      // SPRINT_S51: returns the data for a printable receipt view — JSON, not
+      // a rendered document, matching every other action in this codebase
+      // (the frontend renders it into a print-friendly page). No PDF/storage
+      // dependency: the "export" is the browser's own print-to-PDF.
+      if (action === "export-receipt") {
+        if (!id) return badRequest("id is required");
+
+        const { data: apptRow, error: apptErr } = await supabaseAdmin
+          .from("appointments")
+          .select(`
+            id, business_id, booking_reference, starts_at, price, final_price,
+            entitlement_discount, offer_discount, payments(amount, status, method, paid_at),
+            client:clients(first_name, last_name),
+            service:services(name),
+            staff:staff_profiles!staff_profile_id(display_name)
+          `)
+          .eq("id", id)
+          .is("deleted_at", null)
+          .maybeSingle();
+
+        if (apptErr) return serverError(apptErr.message);
+        if (!apptRow) return notFound("Appointment not found");
+
+        const a = apptRow as Record<string, unknown>;
+        const ctx = await requireOwnerOrManagerCtx(req, a.business_id as string);
+        if (ctx instanceof Response) return ctx;
+
+        const { data: bizRow } = await supabaseAdmin
+          .from("businesses")
+          .select("name, logo_url, timezone, currency_code")
+          .eq("id", a.business_id as string)
+          .maybeSingle();
+        const { data: settingsRow } = await supabaseAdmin
+          .from("business_settings")
+          .select("tax_enabled, tax_rate, tax_label, tax_number")
+          .eq("business_id", a.business_id as string)
+          .maybeSingle();
+
+        const biz = (bizRow ?? {}) as Record<string, unknown>;
+        const settings = (settingsRow ?? {}) as Record<string, unknown>;
+        const client = a.client as Record<string, string> | null;
+        const service = a.service as Record<string, string> | null;
+        const staff = a.staff as Record<string, string> | null;
+        const payments = (a.payments ?? []) as Record<string, unknown>[];
+        const chargedPrice = Number(a.final_price ?? a.price ?? 0);
+        const value = Math.max(chargedPrice - Number(a.entitlement_discount ?? 0) - Number(a.offer_discount ?? 0), 0);
+        const paid = payments.filter((p) => p.status === "paid").reduce((s, p) => s + Number(p.amount ?? 0), 0);
+
+        return jsonCors(req, {
+          business: {
+            name: biz.name ?? "",
+            logo_url: biz.logo_url ?? null,
+            currency_code: biz.currency_code ?? "EUR",
+            tax_label: settings.tax_enabled ? settings.tax_label ?? "VAT" : null,
+            tax_rate: settings.tax_enabled ? settings.tax_rate ?? null : null,
+            tax_number: settings.tax_enabled ? settings.tax_number ?? null : null,
+          },
+          appointment: {
+            booking_reference: a.booking_reference,
+            starts_at: a.starts_at,
+            timezone: biz.timezone ?? "UTC",
+            service_name: service?.name ?? "Service",
+            staff_name: staff?.display_name ?? null,
+            client_name: client ? `${client.first_name ?? ""} ${client.last_name ?? ""}`.trim() : "Client",
+          },
+          payment: {
+            value,
+            paid,
+            balance: Math.max(value - paid, 0),
+            method: payments.find((p) => p.status === "paid")?.method ?? null,
+            paid_at: payments.find((p) => p.status === "paid")?.paid_at ?? null,
+          },
+        });
+      }
+
       // Single appointment lookup by id (no business_id param required).
       // We infer business_id from the row and then verify membership.
       if (id) {
@@ -547,6 +623,99 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
       });
 
       return jsonCors(req, { appointments, total: count ?? 0 });
+    }
+
+    // ── POST ?action=resend-review-request&id=... ───────────────────────────
+    // SPRINT_S51: on-demand resend of the review-request email, distinct
+    // from the automatic one sent on completion. Reuses an existing
+    // unexpired token instead of minting a new one, so a link the client
+    // already clicked never gets silently orphaned. Rate-limited to once
+    // per hour via reviews.last_manual_resend_at (130_review_resend.sql),
+    // which only this action ever writes.
+    if (method === "POST" && action === "resend-review-request") {
+      if (!id) return badRequest("id is required");
+
+      const { data: apptRow, error: apptErr } = await supabaseAdmin
+        .from("appointments")
+        .select("business_id, status, client_id, service:services(name)")
+        .eq("id", id)
+        .is("deleted_at", null)
+        .maybeSingle();
+
+      if (apptErr) return serverError(apptErr.message);
+      if (!apptRow) return notFound("Appointment not found");
+
+      const a = apptRow as Record<string, unknown>;
+      if (a.status !== "completed") {
+        return badRequest("Review requests can only be resent for completed appointments");
+      }
+
+      const ctx = await requireOwnerOrManagerCtx(req, a.business_id as string);
+      if (ctx instanceof Response) return ctx;
+
+      const { data: client } = await supabaseAdmin
+        .from("clients")
+        .select("first_name, last_name, email")
+        .eq("id", a.client_id as string)
+        .maybeSingle();
+      const clientRow = client as Record<string, string> | null;
+      if (!clientRow?.email) return badRequest("This client has no email on file");
+
+      const { data: existingReview } = await supabaseAdmin
+        .from("reviews")
+        .select("id, review_token, last_manual_resend_at")
+        .eq("appointment_id", id)
+        .maybeSingle();
+      const review = existingReview as Record<string, unknown> | null;
+
+      if (review?.last_manual_resend_at) {
+        const elapsedMs = Date.now() - new Date(review.last_manual_resend_at as string).getTime();
+        if (elapsedMs < 60 * 60 * 1000) {
+          return jsonCors(req, {
+            error: { code: "RATE_LIMITED", message: "A review request was already resent for this appointment in the last hour" },
+          }, 429);
+        }
+      }
+
+      let reviewToken = review?.review_token as string | undefined;
+      if (!reviewToken) {
+        const tokenBytes = crypto.getRandomValues(new Uint8Array(16));
+        reviewToken = Array.from(tokenBytes).map((b) => b.toString(16).padStart(2, "0")).join("");
+      }
+
+      const now = new Date().toISOString();
+      if (review) {
+        await supabaseAdmin.from("reviews").update({ review_token: reviewToken, last_manual_resend_at: now }).eq("id", review.id as string);
+      } else {
+        await supabaseAdmin.from("reviews").insert({
+          business_id: a.business_id, client_id: a.client_id, appointment_id: id,
+          rating: 5, is_public: false, review_token: reviewToken, last_manual_resend_at: now,
+        });
+      }
+
+      const { data: bizRow } = await supabaseAdmin.from("businesses").select("name, logo_url").eq("id", a.business_id as string).maybeSingle();
+      const biz = bizRow as Record<string, unknown> | null;
+      const service = a.service as Record<string, string> | null;
+      const appUrl = Deno.env.get("STOREFRONT_BASE_URL") ?? "https://kazione.app";
+      const reviewUrl = `${appUrl}/review?token=${reviewToken}`;
+      const { subject, html } = reviewRequestEmail({
+        clientName: `${clientRow.first_name ?? ""} ${clientRow.last_name ?? ""}`.trim() || "there",
+        salonName: (biz?.name as string) ?? "KaziOne",
+        salonLogoUrl: biz?.logo_url as string | undefined,
+        serviceName: service?.name ?? "your appointment",
+        reviewUrl,
+      });
+      await sendEmail(clientRow.email, subject, html).catch((e) => console.warn("resend review request email failed:", e));
+
+      await supabaseAdmin.from("appointment_status_log").insert({
+        appointment_id: id,
+        old_status: a.status,
+        new_status: a.status,
+        changed_by: ctx.userId,
+        reason: "Review request resent",
+      });
+
+      return jsonCors(req, { success: true });
     }
 
     // ── POST ───────────────────────────────────────────────────────────────

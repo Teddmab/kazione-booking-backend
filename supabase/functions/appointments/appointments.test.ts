@@ -522,3 +522,106 @@ Deno.test("appointments: GET ?action=notification-log returns delivery rows for 
   assertEquals(row.channel, "email")
   assertEquals(row.recipient_type, "client")
 })
+// ── SPRINT_S51: receipt export & review-request resend ──────────────────────
+
+// ── SPRINT_S51 helper — mirrors SPRINT_S48's bookAndComplete but kept local
+// to this section (distinct name) so the two sprints' test additions never
+// collide if both land in this file independently. ──────────────────────
+async function bookAndCompleteForReceipt(date: string, time: string, overrides: Record<string, unknown> = {}) {
+  const bookRes = await callFn("POST", OWNER_TOKEN, manualBookingBody({ date, time, ...overrides }))
+  assertEquals(bookRes.status, 201)
+  const booked = await bookRes.json()
+
+  const completeRes = await callFn("PATCH", OWNER_TOKEN, { status: "completed", payment_method: "cash" }, { id: booked.id })
+  assertEquals(completeRes.status, 200)
+  await completeRes.json()
+
+  const getRes = await callFn("GET", OWNER_TOKEN, undefined, { id: booked.id })
+  assertEquals(getRes.status, 200)
+  const appt = await getRes.json()
+  return appt as { id: string }
+}
+
+Deno.test("appointments: GET ?action=export-receipt — returns real business/appointment/payment data", async () => {
+  if (!OWNER_TOKEN) return
+
+  const appt = await bookAndCompleteForReceipt("2026-10-15", "09:00")
+  const res = await callFn("GET", OWNER_TOKEN, undefined, { action: "export-receipt", id: appt.id })
+  if (res.status !== 200) {
+    throw new Error(`Expected 200, got ${res.status}: ${JSON.stringify(await res.json().catch(() => null))}`)
+  }
+  const body = await res.json()
+  if (!body.business?.name) throw new Error("Expected a real business name, not a placeholder")
+  if (!body.appointment?.booking_reference) throw new Error("Expected a real booking_reference")
+  if (typeof body.payment?.value !== "number" || body.payment.value <= 0) {
+    throw new Error(`Expected a real positive payment.value, got ${JSON.stringify(body.payment)}`)
+  }
+})
+
+Deno.test("appointments: GET ?action=export-receipt — without auth → 401", async () => {
+  if (!OWNER_TOKEN) return
+
+  const appt = await bookAndCompleteForReceipt("2026-10-16", "09:00")
+  const res = await callFn("GET", undefined, undefined, { action: "export-receipt", id: appt.id })
+  assertEquals(res.status, 401)
+})
+
+Deno.test("appointments: POST ?action=resend-review-request — not completed → 400", async () => {
+  if (!OWNER_TOKEN) return
+
+  const bookRes = await callFn("POST", OWNER_TOKEN, manualBookingBody({ date: "2026-10-17", time: "09:00" }))
+  assertEquals(bookRes.status, 201)
+  const booked = await bookRes.json()
+
+  const res = await callFn("POST", OWNER_TOKEN, {}, { action: "resend-review-request", id: booked.id })
+  assertEquals(res.status, 400)
+})
+
+Deno.test("appointments: POST ?action=resend-review-request — resent, then rate-limited within the hour", async () => {
+  if (!OWNER_TOKEN) return
+
+  const appt = await bookAndCompleteForReceipt("2026-10-18", "09:00")
+
+  const firstRes = await callFn("POST", OWNER_TOKEN, {}, { action: "resend-review-request", id: appt.id })
+  if (firstRes.status !== 200) {
+    throw new Error(`Expected 200, got ${firstRes.status}: ${JSON.stringify(await firstRes.json().catch(() => null))}`)
+  }
+  await firstRes.json()
+
+  const secondRes = await callFn("POST", OWNER_TOKEN, {}, { action: "resend-review-request", id: appt.id })
+  assertEquals(secondRes.status, 429)
+  const secondBody = await secondRes.json()
+  assertEquals(secondBody.error.code, "RATE_LIMITED")
+})
+
+Deno.test("appointments: POST ?action=resend-review-request — reuses an existing token rather than minting a new one", async () => {
+  if (!OWNER_TOKEN) return
+
+  const appt = await bookAndCompleteForReceipt("2026-10-19", "09:00")
+
+  const restBase = BASE.replace("/functions/v1", "/rest/v1")
+  const readToken = async () => {
+    const r = await fetch(`${restBase}/reviews?appointment_id=eq.${appt.id}&select=review_token`, {
+      headers: { apikey: ANON_KEY, Authorization: `Bearer ${OWNER_TOKEN}` },
+    })
+    const rows = await r.json()
+    return rows[0]?.review_token as string | undefined
+  }
+
+  // The automatic on-completion send is fire-and-forget (not awaited by the
+  // completion PATCH) — poll briefly for its review row to land before
+  // capturing the "before" token.
+  let tokenBeforeResend: string | undefined
+  for (let i = 0; i < 10 && !tokenBeforeResend; i++) {
+    tokenBeforeResend = await readToken()
+    if (!tokenBeforeResend) await new Promise((r) => setTimeout(r, 300))
+  }
+  if (!tokenBeforeResend) throw new Error("Expected the automatic completion flow to have created a review row with a token")
+
+  const resendRes = await callFn("POST", OWNER_TOKEN, {}, { action: "resend-review-request", id: appt.id })
+  assertEquals(resendRes.status, 200)
+  await resendRes.json()
+
+  const tokenAfterResend = await readToken()
+  assertEquals(tokenAfterResend, tokenBeforeResend)
+})

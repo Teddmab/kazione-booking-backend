@@ -379,7 +379,7 @@ Deno.test("appointments: PATCH ?action=reschedule — concurrent reschedule into
 Deno.test("appointments: PATCH ?action=reschedule — cancelled appointment → 400", async () => {
   if (!OWNER_TOKEN) return
 
-  const bookRes = await callFn("POST", OWNER_TOKEN, manualBookingBody({ date: "2026-10-11", time: "09:00" }))
+  const bookRes = await callFn("POST", OWNER_TOKEN, manualBookingBody({ date: "2026-10-25", time: "09:00" }))
   assertEquals(bookRes.status, 201)
   const booked = await bookRes.json()
 
@@ -550,7 +550,7 @@ async function bookAndComplete(date: string, time: string, overrides: Record<str
 Deno.test("appointments: PATCH ?action=correct-commission — corrects the payable amount without overwriting the snapshot, and logs the change", async () => {
   if (!OWNER_TOKEN) return
 
-  const appt = await bookAndComplete("2026-10-09", "09:00")
+  const appt = await bookAndComplete("2026-10-20", "09:00")
   const originalSnapshot = appt.commission_amount_snapshot
   const newAmount = Math.round((originalSnapshot + 10) * 100) / 100
 
@@ -582,7 +582,7 @@ Deno.test("appointments: PATCH ?action=correct-commission — corrects the payab
 Deno.test("appointments: PATCH ?action=correct-commission — missing reason → 400", async () => {
   if (!OWNER_TOKEN) return
 
-  const appt = await bookAndComplete("2026-10-10", "09:00")
+  const appt = await bookAndComplete("2026-10-21", "09:00")
   const res = await callFn("PATCH", OWNER_TOKEN, {
     staff_profile_id: STAFF_ID,
     new_amount: appt.commission_amount_snapshot + 5,
@@ -593,7 +593,7 @@ Deno.test("appointments: PATCH ?action=correct-commission — missing reason →
 Deno.test("appointments: PATCH ?action=correct-commission — appointment not completed → 400", async () => {
   if (!OWNER_TOKEN) return
 
-  const bookRes = await callFn("POST", OWNER_TOKEN, manualBookingBody({ date: "2026-10-11", time: "09:00" }))
+  const bookRes = await callFn("POST", OWNER_TOKEN, manualBookingBody({ date: "2026-10-25", time: "09:00" }))
   assertEquals(bookRes.status, 201)
   const booked = await bookRes.json()
 
@@ -608,7 +608,7 @@ Deno.test("appointments: PATCH ?action=correct-commission — appointment not co
 Deno.test("appointments: PATCH ?action=correct-commission — staff_profile_id not assigned to this appointment → 400", async () => {
   if (!OWNER_TOKEN) return
 
-  const appt = await bookAndComplete("2026-10-12", "09:00")
+  const appt = await bookAndComplete("2026-10-22", "09:00")
   const res = await callFn("PATCH", OWNER_TOKEN, {
     staff_profile_id: STAFF_ID_2,
     new_amount: 20,
@@ -620,7 +620,7 @@ Deno.test("appointments: PATCH ?action=correct-commission — staff_profile_id n
 Deno.test("appointments: PATCH ?action=correct-commission — already paid → 409, commission never silently rewritten", async () => {
   if (!OWNER_TOKEN) return
 
-  const appt = await bookAndComplete("2026-10-13", "09:00")
+  const appt = await bookAndComplete("2026-10-23", "09:00")
 
   const payRes = await callFn("PATCH", OWNER_TOKEN, { pay_method: "cash" }, { action: "mark_commission_paid", id: appt.id })
   assertEquals(payRes.status, 200)
@@ -639,7 +639,7 @@ Deno.test("appointments: PATCH ?action=correct-commission — already paid → 4
 Deno.test("appointments: PATCH ?action=correct-commission — new_amount equal to current amount → 400 (no-op rejected)", async () => {
   if (!OWNER_TOKEN) return
 
-  const appt = await bookAndComplete("2026-10-14", "09:00")
+  const appt = await bookAndComplete("2026-10-24", "09:00")
   const res = await callFn("PATCH", OWNER_TOKEN, {
     staff_profile_id: STAFF_ID,
     new_amount: appt.commission_amount_snapshot,

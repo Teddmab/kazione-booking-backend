@@ -31,7 +31,7 @@ const APPT_SELECT = `
   staff:staff_profiles!staff_profile_id(id, display_name, avatar_url, commission_rate),
   staff2:staff_profiles!staff_profile_id_2(id, display_name, avatar_url, commission_rate),
   referrer_staff:staff_profiles!referrer_staff_id(id, display_name, avatar_url),
-  payment:payments(status, amount, method, paid_at),
+  payment:payments(status, amount, method, paid_at, refund_amount, is_test),
   applied_offer:offer_redemptions!offer_redemption_id(id, status, offer:business_offers(id, type, title, discount_type, discount_value)),
   business:businesses(name, timezone)
 `;
@@ -240,7 +240,34 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
           .eq("appointment_id", id)
           .order("created_at", { ascending: true });
 
-        return jsonCors(req, { ...normalizePayment(data), status_log: statusLog ?? [] });
+        const { data: draftRow } = await supabaseAdmin
+          .from("appointment_completion_drafts")
+          .select("step, payload")
+          .eq("appointment_id", id)
+          .maybeSingle();
+
+        // Sum of everything actually received so far (paid + the retained
+        // portion of any partial refund), across every payment row this
+        // appointment has ever had — not just the single row `payment`
+        // (below) collapses to. This is what the completion wizard's
+        // "previously received" figure has to reconcile against so an
+        // existing deposit is never counted twice.
+        const paymentRows = ((data as Record<string, unknown>).payment ?? []) as Array<{
+          status: string;
+          amount: number | string;
+          refund_amount: number | string | null;
+          is_test: boolean | null;
+        }>;
+        const previouslyReceived = paymentRows
+          .filter((p) => (p.status === "paid" || p.status === "partial_refund") && !p.is_test)
+          .reduce((sum, p) => sum + (Number(p.amount) || 0) - (Number(p.refund_amount) || 0), 0);
+
+        return jsonCors(req, {
+          ...normalizePayment(data),
+          status_log: statusLog ?? [],
+          previously_received: Math.round(previouslyReceived * 100) / 100,
+          completion_draft: draftRow ?? null,
+        });
       }
 
       const businessId = url.searchParams.get("business_id");
@@ -917,6 +944,169 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
       return jsonCors(req, normalizePayment(updated2 as Record<string, unknown>));
     }
 
+    // ── PATCH ?action=adjust-final-price ────────────────────────────────────
+    // Owner/manager/supervisor may set an authorized, audited override of
+    // what this appointment is actually being charged (Complete-appointment
+    // wizard, Step 1 "Edit price"). `price` — the original booking value —
+    // is never touched; appointment_price_log keeps the before/after/reason
+    // trail. Body: { final_price, reason }.
+    if (method === "PATCH" && action === "adjust-final-price") {
+      if (!id) return badRequest("id is required");
+      const body = await req.json() as Record<string, unknown>;
+      const finalPriceInput = body.final_price;
+      const reason = typeof body.reason === "string" ? body.reason.trim() : "";
+      if (typeof finalPriceInput !== "number" || !Number.isFinite(finalPriceInput) || finalPriceInput < 0) {
+        return badRequest("final_price must be a non-negative number");
+      }
+      if (!reason) return badRequest("reason is required");
+
+      const { data: existing, error: fetchErr } = await supabaseAdmin
+        .from("appointments")
+        .select("business_id, status, price, final_price, entitlement_discount, offer_discount")
+        .eq("id", id)
+        .is("deleted_at", null)
+        .single();
+
+      if (fetchErr || !existing) return notFound("Appointment not found");
+      const existingRow = existing as Record<string, unknown>;
+
+      const ctx = await requireOwnerManagerOrSupervisorCtx(req, existingRow.business_id as string);
+      if (ctx instanceof Response) return ctx;
+
+      const status = existingRow.status as string;
+      if (!["confirmed", "in_progress", "pending", "offered", "pending_completion"].includes(status)) {
+        return badRequest(`Cannot adjust price for an appointment with status '${status}'`);
+      }
+
+      const oldPrice = Number(existingRow.final_price ?? existingRow.price);
+      const finalPrice = Math.round(finalPriceInput * 100) / 100;
+      const discount = Number(existingRow.entitlement_discount ?? 0) + Number(existingRow.offer_discount ?? 0);
+
+      // A lower final price must never retroactively put the appointment
+      // "in credit" — there's no refund/credit flow this can hand off to
+      // (see PaymentStep's money-handling note), so reject rather than
+      // silently create a phantom overpayment the rest of the app can't
+      // represent.
+      const { data: priorPaymentRows } = await supabaseAdmin
+        .from("payments")
+        .select("amount, refund_amount, is_test")
+        .eq("appointment_id", id)
+        .in("status", ["paid", "partial_refund"]);
+      const previouslyReceived = ((priorPaymentRows ?? []) as Array<{ amount: number; refund_amount: number | null; is_test: boolean | null }>)
+        .filter((p) => !p.is_test)
+        .reduce((sum, p) => sum + Number(p.amount) - Number(p.refund_amount ?? 0), 0);
+      if (finalPrice - discount < previouslyReceived - 0.01) {
+        return badRequest(
+          `New price (${(finalPrice - discount).toFixed(2)} after discount) is less than the ${previouslyReceived.toFixed(2)} already received for this appointment. Refund the difference first, or choose a higher price.`,
+        );
+      }
+
+      const { data: updated, error: updateErr } = await supabaseAdmin
+        .from("appointments")
+        .update({
+          final_price: finalPrice,
+          final_price_adjusted_at: new Date().toISOString(),
+          final_price_adjusted_by: ctx.userId,
+        })
+        .eq("id", id)
+        .select(APPT_SELECT)
+        .single();
+
+      if (updateErr) return serverError(updateErr.message);
+
+      await supabaseAdmin.from("appointment_price_log").insert({
+        business_id: existingRow.business_id as string,
+        appointment_id: id,
+        actor_user_id: ctx.userId,
+        old_price: oldPrice,
+        new_price: finalPrice,
+        reason,
+      });
+
+      return jsonCors(req, normalizePayment(updated as Record<string, unknown>));
+    }
+
+    // ── PATCH ?action=save-completion-draft ─────────────────────────────────
+    // Persists in-progress "Complete appointment" wizard state with zero
+    // operational side effects — no stock/commission/payment mutation, no
+    // appointment-status change. Body: { step, payload }. Eligibility
+    // mirrors the completion PATCH itself (owner/manager/supervisor, or the
+    // staff member assigned to this specific appointment).
+    if (method === "PATCH" && action === "save-completion-draft") {
+      if (!id) return badRequest("id is required");
+      const body = await req.json() as Record<string, unknown>;
+      const step = typeof body.step === "string" && body.step ? body.step : "payment";
+      const payload = (body.payload && typeof body.payload === "object") ? body.payload : {};
+
+      const { data: existing, error: fetchErr } = await supabaseAdmin
+        .from("appointments")
+        .select("business_id, status, staff_profile_id")
+        .eq("id", id)
+        .is("deleted_at", null)
+        .single();
+
+      if (fetchErr || !existing) return notFound("Appointment not found");
+      const existingRow = existing as { business_id: string; status: string; staff_profile_id: string | null };
+
+      // Same owner/manager/supervisor-or-assigned-staff pattern as the
+      // completion PATCH handler below.
+      const ownerResult = await requireOwnerManagerOrSupervisorCtx(req, existingRow.business_id);
+      let ctx: { userId: string; businessId: string; role: string };
+      if (ownerResult instanceof Response) {
+        try {
+          const user = await verifyAuth(req);
+          const { data: memberRow } = await supabaseAdmin
+            .from("business_members")
+            .select("id, role")
+            .eq("user_id", user.id)
+            .eq("business_id", existingRow.business_id)
+            .eq("is_active", true)
+            .maybeSingle();
+          if (!memberRow || (memberRow as { role: string }).role !== "staff") {
+            return ownerResult;
+          }
+          const { data: sp } = await supabaseAdmin
+            .from("staff_profiles")
+            .select("id")
+            .eq("business_member_id", (memberRow as { id: string }).id)
+            .eq("business_id", existingRow.business_id)
+            .maybeSingle();
+          const callerStaffId = (sp as { id: string } | null)?.id ?? null;
+          if (!callerStaffId || callerStaffId !== existingRow.staff_profile_id) {
+            return forbidden("You can only draft completion for your own appointments");
+          }
+          ctx = { userId: user.id, businessId: existingRow.business_id, role: "staff" };
+        } catch (e) {
+          if (e instanceof Response) return e;
+          return ownerResult;
+        }
+      } else {
+        ctx = ownerResult;
+      }
+
+      if (!["confirmed", "in_progress", "pending", "offered", "pending_completion"].includes(existingRow.status)) {
+        return badRequest(`Cannot draft completion for an appointment with status '${existingRow.status}'`);
+      }
+
+      const { data: draft, error: draftErr } = await supabaseAdmin
+        .from("appointment_completion_drafts")
+        .upsert(
+          {
+            business_id: existingRow.business_id,
+            appointment_id: id,
+            actor_user_id: ctx.userId,
+            step,
+            payload,
+          },
+          { onConflict: "appointment_id" },
+        )
+        .select("step, payload, updated_at")
+        .single();
+
+      if (draftErr) return serverError(draftErr.message);
+      return jsonCors(req, draft);
+    }
+
     // ── PATCH ?action=respond-offer ────────────────────────────────────────────
     // Staff member accepts or declines an offered appointment.
     // Body: { business_id, response: 'accepted' | 'declined' }
@@ -1202,6 +1392,88 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
       return jsonCors(req, normalizePayment(updated));
     }
 
+    // ── PATCH ?action=change-service ────────────────────────────────────────
+    // Corrects which service a confirmed, not-yet-completed appointment is
+    // for (wrong service booked, client's needs changed) — same shape as
+    // reschedule/assign-staff above: fetch, authorize, atomic lock+conflict-
+    // check+write via change_appointment_service_atomic. starts_at is left
+    // untouched — this swaps the service, it does not reschedule. Body:
+    // { service_id }.
+    if (method === "PATCH" && action === "change-service") {
+      if (!id) return badRequest("id is required");
+      const body = await req.json() as Record<string, unknown>;
+      const newServiceId = body.service_id as string | undefined;
+      if (!newServiceId) return badRequest("service_id is required");
+
+      const { data: existing, error: fetchErr } = await supabaseAdmin
+        .from("appointments")
+        .select("business_id, status, service_id")
+        .eq("id", id)
+        .is("deleted_at", null)
+        .single();
+
+      if (fetchErr || !existing) return notFound("Appointment not found");
+      const existingRow = existing as { business_id: string; status: string; service_id: string | null };
+      if (existingRow.status === "cancelled" || existingRow.status === "completed") {
+        return badRequest(`Cannot change the service on a ${existingRow.status} appointment`);
+      }
+
+      const ctx = await requireOwnerOrManagerCtx(req, existingRow.business_id);
+      if (ctx instanceof Response) return ctx;
+
+      // Must belong to the same tenant and be bookable — never trust a
+      // client-supplied service_id without verifying tenant ownership.
+      const { data: newService, error: serviceErr } = await supabaseAdmin
+        .from("services")
+        .select("id, name, price, duration_minutes, buffer_minutes, is_active")
+        .eq("id", newServiceId)
+        .eq("business_id", ctx.businessId)
+        .maybeSingle();
+
+      if (serviceErr) return serverError(serviceErr.message);
+      if (!newService) return badRequest("Service not found for this business");
+      const svc = newService as { id: string; name: string; price: number; duration_minutes: number; buffer_minutes: number | null; is_active: boolean };
+      if (!svc.is_active) return badRequest("Cannot assign an inactive service");
+
+      const { error: changeErr } = await supabaseAdmin.rpc("change_appointment_service_atomic", {
+        p_appointment_id: id,
+        p_new_service_id: svc.id,
+        p_new_duration_minutes: svc.duration_minutes,
+        p_new_buffer_minutes: svc.buffer_minutes ?? 0,
+        p_new_price: svc.price,
+      });
+
+      if (changeErr) {
+        if (isSlotTakenError(changeErr)) {
+          return conflict("SLOT_TAKEN", "The assigned staff member already has a conflicting appointment at the new service's duration");
+        }
+        console.error("change_appointment_service_atomic error:", JSON.stringify(changeErr));
+        return serverError(changeErr.message);
+      }
+
+      const { data: updated, error: updateErr } = await supabaseAdmin
+        .from("appointments")
+        .select(APPT_SELECT)
+        .eq("id", id)
+        .single();
+
+      if (updateErr) return serverError(updateErr.message);
+
+      const { data: oldServiceRow } = existingRow.service_id
+        ? await supabaseAdmin.from("services").select("name").eq("id", existingRow.service_id).maybeSingle()
+        : { data: null };
+
+      await supabaseAdmin.from("appointment_status_log").insert({
+        appointment_id: id,
+        old_status: existingRow.status,
+        new_status: existingRow.status,
+        changed_by: ctx.userId,
+        reason: `Service changed from "${(oldServiceRow as { name: string } | null)?.name ?? "previous service"}" to "${svc.name}"`,
+      });
+
+      return jsonCors(req, normalizePayment(updated as Record<string, unknown>));
+    }
+
     // ── PATCH ?action=mark_commission_paid ─────────────────────────────────
     // Supports retroactive marking: works on any completed appointment regardless
     // of when it was booked. Passing paid=false clears the paid timestamp.
@@ -1254,7 +1526,7 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
       // Fetch appointment to get business_id for auth (+ service_id for stock-out + price for payment settlement)
       const { data: existing, error: fetchErr } = await supabaseAdmin
         .from("appointments")
-        .select("status, business_id, service_id, staff_profile_id, staff_profile_id_2, price, commission_split_pct")
+        .select("status, business_id, service_id, staff_profile_id, staff_profile_id_2, price, final_price, commission_split_pct, entitlement_discount, offer_discount")
         .eq("id", id)
         .single();
 
@@ -1267,8 +1539,20 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
         staff_profile_id: string | null;
         staff_profile_id_2: string | null;
         price: number;
+        final_price: number | null;
         commission_split_pct: number | null;
+        entitlement_discount: number | null;
+        offer_discount: number | null;
       };
+      // The price actually being charged: the Step 1 "Edit price" override
+      // if one was authorized, else the original booking price. `price`
+      // itself is never mutated — see 127_appointment_completion_step1.sql.
+      const chargedPrice = existingRow.final_price ?? existingRow.price;
+      // What the client actually owes after any entitlement/offer discount —
+      // the same formula the frontend's effectivePrice()/PaymentStep use, so
+      // the wizard's "balance due" and the amount this handler will actually
+      // settle never disagree.
+      const amountOwed = Math.max(chargedPrice - Number(existingRow.entitlement_discount ?? 0) - Number(existingRow.offer_discount ?? 0), 0);
 
       // Owner/manager OR a supervisor OR the assigned staff member may update
       // status (staff portal MS1; supervisors added for cross-staff completion)
@@ -1359,6 +1643,36 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
         }
       }
 
+      // Resolve and validate the amount actually being recorded as received
+      // before any write — same reasoning as the processor-pending guard
+      // above: a rejected completion must never leave the status already
+      // flipped underneath it. There's no overpayment/credit flow (see
+      // PaymentStep's money-handling note), so an amount beyond what's
+      // actually owed is rejected outright rather than silently accepted.
+      let amountToRecord: number | null = null;
+      if (status === "completed") {
+        amountToRecord = typeof body.amount_received_now === "number" && Number.isFinite(body.amount_received_now)
+          ? Math.max(0, body.amount_received_now as number)
+          : null;
+        if (amountToRecord === null) {
+          const { data: draftRow } = await supabaseAdmin
+            .from("appointment_completion_drafts")
+            .select("payload")
+            .eq("appointment_id", id)
+            .maybeSingle();
+          const draftPayload = (draftRow as { payload: Record<string, unknown> } | null)?.payload;
+          const draftAmount = draftPayload?.amount_received_now;
+          amountToRecord = typeof draftAmount === "number" && Number.isFinite(draftAmount) ? Math.max(0, draftAmount) : amountOwed;
+        }
+        amountToRecord = Math.round(amountToRecord * 100) / 100;
+
+        if (amountToRecord > amountOwed + 0.01) {
+          return badRequest(
+            `Amount received (${amountToRecord.toFixed(2)}) exceeds the ${amountOwed.toFixed(2)} owed for this appointment. KaziOne does not support recording an overpayment.`,
+          );
+        }
+      }
+
       const updateFields: Record<string, unknown> = { status };
       if (status === "cancelled") {
         updateFields.cancellation_reason = reason ?? null;
@@ -1397,10 +1711,10 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
 
         updateFields.commission_type_snapshot = commType;
         updateFields.commission_value_snapshot = commType === "none" ? Number(sp1?.commission_rate ?? 0) : commValue;
-        updateFields.commission_amount_snapshot = calcCommissionAmount(commType, commValue, Number(sp1?.commission_rate ?? 0), existingRow.price, primaryFraction);
+        updateFields.commission_amount_snapshot = calcCommissionAmount(commType, commValue, Number(sp1?.commission_rate ?? 0), chargedPrice, primaryFraction);
         if (hasSecondStaff) {
           const secondaryFraction = (100 - (splitPct ?? 50)) / 100;
-          updateFields.commission_amount_snapshot_2 = calcCommissionAmount(commType, commValue, Number(sp2?.commission_rate ?? 0), existingRow.price, secondaryFraction);
+          updateFields.commission_amount_snapshot_2 = calcCommissionAmount(commType, commValue, Number(sp2?.commission_rate ?? 0), chargedPrice, secondaryFraction);
         }
       }
 
@@ -1439,6 +1753,15 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
         changed_by: changedBy ?? null,
         reason: reason ?? null,
       });
+
+      // A completion-wizard draft only makes sense while the appointment is
+      // still awaiting completion — once it's cancelled, drop it so a stale
+      // draft never reappears against appointment data that's since moved
+      // on. (The 'completed' case is cleaned up below, after its payload
+      // has been read for payment settlement.)
+      if (status === "cancelled") {
+        await supabaseAdmin.from("appointment_completion_drafts").delete().eq("appointment_id", id);
+      }
 
       // Cancellation email notifications
       if (status === "cancelled") {
@@ -1609,7 +1932,13 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
       if (status === "completed") {
         const completedRow = existing as Record<string, unknown>;
         const businessIdForPayment = completedRow.business_id as string;
-        const price = Number(completedRow.price ?? 0);
+        // Resolved and overpayment-validated above, before the status CAS.
+        const amountDue = amountOwed;
+        const amountToRecordFinal = amountToRecord as number;
+
+        // A completion-wizard draft only makes sense while completion is
+        // still in progress — now that it's actually settled, drop it.
+        await supabaseAdmin.from("appointment_completion_drafts").delete().eq("appointment_id", id);
 
         // Multiple payment rows can legitimately exist for one appointment
         // (see the guard above) — .maybeSingle() would error the moment a
@@ -1637,18 +1966,22 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
           // this point either the payment isn't processor-pending or the
           // caller explicitly passed confirm_manual_payment.
           const isProcessorLinked = !!pay.stripe_payment_intent_id || !!pay.provider_deposit_id;
+          const settledInFull = amountToRecordFinal >= amountDue;
 
           if (pay.status !== "paid") {
             const manualOverride = isProcessorLinked && pay.status === "pending";
             await supabaseAdmin
               .from("payments")
               .update({
-                status: "paid",
-                paid_at: new Date().toISOString(),
+                amount: amountToRecordFinal > 0 ? amountToRecordFinal : pay.amount,
+                status: settledInFull ? "paid" : "pending",
+                paid_at: settledInFull ? new Date().toISOString() : null,
                 method,
                 notes: manualOverride
                   ? `Manually confirmed as paid by ${changedBy ?? "owner"} on completion, overriding a still-pending ${pay.provider ?? "processor"} payment.`
-                  : `Recorded as paid by ${changedBy ?? "owner"} on completion.`,
+                  : settledInFull
+                  ? `Recorded as paid by ${changedBy ?? "owner"} on completion.`
+                  : `Partial payment of ${amountToRecordFinal} recorded by ${changedBy ?? "owner"} on completion (${(amountDue - amountToRecordFinal).toFixed(2)} still due).`,
               })
               .eq("id", pay.id as string);
             await supabaseAdmin.from("appointment_status_log").insert({
@@ -1658,25 +1991,35 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
               changed_by: changedBy ?? null,
               reason: manualOverride
                 ? `Payment manually marked paid (method: ${method}), overriding pending ${pay.provider ?? "processor"} confirmation`
-                : `Payment recorded as paid (method: ${method})`,
+                : settledInFull
+                ? `Payment recorded as paid (method: ${method})`
+                : `Partial payment recorded (method: ${method}, ${amountToRecordFinal} of ${amountDue})`,
             });
           }
-        } else if (price > 0) {
+        } else if (amountToRecordFinal > 0) {
+          // amount > 0 is a hard DB constraint (chk_payments_amount) — an
+          // appointment completed with nothing received yet (balance fully
+          // due) legitimately has no payment row to create here.
+          const settledInFull = amountToRecordFinal >= amountDue;
           await supabaseAdmin.from("payments").insert({
             business_id: businessIdForPayment,
             appointment_id: id,
-            amount: price,
-            status: "paid",
+            amount: amountToRecordFinal,
+            status: settledInFull ? "paid" : "pending",
             method,
-            paid_at: new Date().toISOString(),
-            notes: `Recorded as paid by ${changedBy ?? "owner"} on completion.`,
+            paid_at: settledInFull ? new Date().toISOString() : null,
+            notes: settledInFull
+              ? `Recorded as paid by ${changedBy ?? "owner"} on completion.`
+              : `Partial payment of ${amountToRecordFinal} recorded by ${changedBy ?? "owner"} on completion (${(amountDue - amountToRecordFinal).toFixed(2)} still due).`,
           });
           await supabaseAdmin.from("appointment_status_log").insert({
             appointment_id: id,
             old_status: existingRow.status,
             new_status: status,
             changed_by: changedBy ?? null,
-            reason: `Payment recorded as paid (method: ${method})`,
+            reason: settledInFull
+              ? `Payment recorded as paid (method: ${method})`
+              : `Partial payment recorded (method: ${method}, ${amountToRecordFinal} of ${amountDue})`,
           });
         }
 
@@ -1698,7 +2041,13 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
             const commType = svc?.staff_commission_type ?? "none";
             const commValue = Number(svc?.staff_commission_value ?? 0);
             const staffRate = Number(sp?.commission_rate ?? 0);
-            const commissionAmount = calcCommissionAmount(commType, commValue, staffRate, price, 1);
+            // Commission base stays the raw charged price (not discount-
+            // adjusted) — matches the commission_amount_snapshot formula
+            // above, and the pre-existing policy this auto-pay branch always
+            // used. amountDue here is deliberately NOT reused: it's the
+            // discount-adjusted balance-due figure for payment settlement,
+            // a different concept.
+            const commissionAmount = calcCommissionAmount(commType, commValue, staffRate, chargedPrice, 1);
             if (commissionAmount > 0) {
               await supabaseAdmin.from("appointments").update({
                 commission_paid_at: new Date().toISOString(),
@@ -1918,7 +2267,7 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
                 svcComm?.staff_commission_type,
                 Number(svcComm?.staff_commission_value ?? 0),
                 Number(spRow.commission_rate ?? 0),
-                Number(existingRow.price ?? 0),
+                chargedPrice,
                 fraction,
               );
             }

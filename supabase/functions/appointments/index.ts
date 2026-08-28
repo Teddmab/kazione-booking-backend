@@ -33,7 +33,8 @@ const APPT_SELECT = `
   referrer_staff:staff_profiles!referrer_staff_id(id, display_name, avatar_url),
   payment:payments(status, amount, method, paid_at, refund_amount, is_test),
   applied_offer:offer_redemptions!offer_redemption_id(id, status, offer:business_offers(id, type, title, discount_type, discount_value)),
-  business:businesses(name, timezone)
+  business:businesses(name, timezone),
+  commission_adjustments:appointment_commission_adjustments(id, staff_profile_id, previous_amount, new_amount, reason, created_at)
 `;
 
 function normalizePayment(row: Record<string, unknown>) {
@@ -1685,6 +1686,108 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
       if (updateErr) return serverError("Failed to update commission status");
 
       return jsonCors(req, { success: true });
+    }
+
+    // ── PATCH ?action=correct-commission ────────────────────────────────────
+    // SPRINT_S48: audited correction of a completed appointment's frozen
+    // commission amount. Never overwrites commission_amount_snapshot[_2] —
+    // inserts an appointment_commission_adjustments row instead, so the
+    // original completion-time figure stays intact and every correction is
+    // traceable. Owner/manager only; blocked once commission_paid_at is set
+    // (a paid commission is never silently rewritten — see 129 migration).
+    if (method === "PATCH" && action === "correct-commission") {
+      if (!id) return badRequest("id is required");
+      const body = await req.json() as Record<string, unknown>;
+
+      const staffProfileId = typeof body.staff_profile_id === "string" ? body.staff_profile_id : null;
+      const newAmount = typeof body.new_amount === "number" && Number.isFinite(body.new_amount) ? body.new_amount : null;
+      const reason = typeof body.reason === "string" ? body.reason.trim() : "";
+
+      if (!staffProfileId) return badRequest("staff_profile_id is required");
+      if (newAmount === null || newAmount < 0) return badRequest("new_amount must be a non-negative number");
+      if (!reason) return badRequest("reason is required");
+
+      const { data: appt, error: apptErr } = await supabaseAdmin
+        .from("appointments")
+        .select("business_id, status, staff_profile_id, staff_profile_id_2, commission_amount_snapshot, commission_amount_snapshot_2, commission_paid_at")
+        .eq("id", id)
+        .is("deleted_at", null)
+        .maybeSingle();
+
+      if (apptErr) return serverError(apptErr.message);
+      if (!appt) return notFound("Appointment not found");
+
+      const apptRow = appt as {
+        business_id: string;
+        status: string;
+        staff_profile_id: string | null;
+        staff_profile_id_2: string | null;
+        commission_amount_snapshot: number | null;
+        commission_amount_snapshot_2: number | null;
+        commission_paid_at: string | null;
+      };
+
+      if (apptRow.status !== "completed") {
+        return badRequest("Commission can only be corrected on completed appointments");
+      }
+
+      const ctx = await requireOwnerOrManagerCtx(req, apptRow.business_id);
+      if (ctx instanceof Response) return ctx;
+
+      const isPrimary = staffProfileId === apptRow.staff_profile_id;
+      const isSecondary = staffProfileId === apptRow.staff_profile_id_2;
+      if (!isPrimary && !isSecondary) {
+        return badRequest("staff_profile_id is not assigned to this appointment");
+      }
+
+      if (apptRow.commission_paid_at) {
+        return conflict("COMMISSION_ALREADY_PAID", "This commission has already been paid and cannot be corrected — reverse the payment first if it was paid in error");
+      }
+
+      // Current payable = the most recent correction's new_amount, or the
+      // original snapshot if this staff member has never been corrected.
+      const { data: lastAdjustment, error: lastAdjErr } = await supabaseAdmin
+        .from("appointment_commission_adjustments")
+        .select("new_amount")
+        .eq("appointment_id", id)
+        .eq("staff_profile_id", staffProfileId)
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (lastAdjErr) return serverError(lastAdjErr.message);
+
+      const snapshotAmount = Number((isPrimary ? apptRow.commission_amount_snapshot : apptRow.commission_amount_snapshot_2) ?? 0);
+      const previousAmount = lastAdjustment ? Number((lastAdjustment as { new_amount: number }).new_amount) : snapshotAmount;
+
+      if (Math.abs(previousAmount - newAmount) < 0.005) {
+        return badRequest("new_amount is the same as the current amount — nothing to correct");
+      }
+
+      const { data: adjustment, error: insertErr } = await supabaseAdmin
+        .from("appointment_commission_adjustments")
+        .insert({
+          business_id: apptRow.business_id,
+          appointment_id: id,
+          staff_profile_id: staffProfileId,
+          previous_amount: previousAmount,
+          new_amount: newAmount,
+          reason,
+          adjusted_by: ctx.userId,
+        })
+        .select("id, previous_amount, new_amount, reason, created_at")
+        .single();
+
+      if (insertErr) return serverError(insertErr.message);
+
+      await supabaseAdmin.from("appointment_status_log").insert({
+        appointment_id: id,
+        old_status: apptRow.status,
+        new_status: apptRow.status,
+        changed_by: ctx.userId,
+        reason: `Commission corrected: ${previousAmount.toFixed(2)} → ${newAmount.toFixed(2)} (${reason})`,
+      });
+
+      return jsonCors(req, { success: true, adjustment, current_amount: newAmount });
     }
 
     // ── PATCH ──────────────────────────────────────────────────────────────

@@ -13,6 +13,7 @@ import {
 import { logStaffAction } from "../_shared/staffAudit.ts";
 import { getCallerIp } from "../_shared/adminAuth.ts";
 import { logServiceActivity } from "../_shared/serviceActivity.ts";
+import { notifyUserPush } from "../_shared/sendExpoPush.ts";
 
 /**
  * Resolve the caller's primary owner/manager business from their JWT.
@@ -139,12 +140,15 @@ async function notifyServiceOffer(
         const label = names.length === 1
           ? names[0]
           : `${names.length} services`;
+        const serviceTitle = "New service offer";
+        const serviceBody =
+          `You've been offered ${label}. Open Services to accept or decline.`;
         await supabaseAdmin.from("notifications").insert({
           business_id: businessId,
           user_id: staffUserId,
           type: "service_offer",
-          title: "New service offer",
-          body: `You've been offered ${label}. Open Services to accept or decline.`,
+          title: serviceTitle,
+          body: serviceBody,
           metadata: {
             service_ids: serviceIds,
             service_names: names,
@@ -152,7 +156,14 @@ async function notifyServiceOffer(
         }).then(({ error: notifErr }) => {
           if (notifErr) {
             console.warn("service offer notification failed:", notifErr);
+            return;
           }
+          notifyUserPush({
+            userId: staffUserId,
+            title: serviceTitle,
+            body: serviceBody,
+            data: { type: "service_offer" },
+          });
         });
       }
     }

@@ -16,6 +16,7 @@ import { sendSms } from "../_shared/messagebird.ts";
 import { sendWhatsApp } from "../_shared/meta-whatsapp.ts";
 import { localWallClockToUtcIso, utcIsoToLocalParts } from "../_shared/timezone.ts";
 import { getBookingNotificationRecipients } from "../_shared/bookingNotificationRecipients.ts";
+import { notifyUserPush } from "../_shared/sendExpoPush.ts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -886,21 +887,36 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
           );
       }
 
-      // Insert in-app notification for each recipient (bell badge)
+      // Insert in-app notification for each recipient (bell badge) + remote push
+      const bookingNotifTitle = "New Booking";
+      const bookingNotifBody =
+        `${client.name} booked ${service.name} on ${date} at ${time}`;
       if (bookingNotifRecipients.length > 0) {
         await supabaseAdmin.from("notifications").insert(
           bookingNotifRecipients.map((recipient) => ({
             business_id,
             user_id: recipient.userId,
             type: "new_booking",
-            title: "New Booking",
-            body: `${client.name} booked ${service.name} on ${date} at ${time}`,
+            title: bookingNotifTitle,
+            body: bookingNotifBody,
             metadata: {
               appointment_id: appointmentId,
               booking_reference: bookingReference,
             },
           })),
         );
+        for (const recipient of bookingNotifRecipients) {
+          notifyUserPush({
+            userId: recipient.userId,
+            title: bookingNotifTitle,
+            body: bookingNotifBody,
+            data: {
+              type: "new_booking",
+              appointment_id: appointmentId,
+              booking_reference: bookingReference,
+            },
+          });
+        }
       }
 
       // In-app notification for the assigned staff member (bell badge on mobile/web)
@@ -925,15 +941,29 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
               staffUserId &&
               !bookingNotifRecipients.some((r) => r.userId === staffUserId)
             ) {
+              const staffType = referrerStaffId
+                ? "appointment_offer"
+                : "new_booking";
+              const staffTitle = referrerStaffId
+                ? "New appointment offer"
+                : "New Booking";
               await supabaseAdmin.from("notifications").insert({
                 business_id,
                 user_id: staffUserId,
-                type: referrerStaffId ? "appointment_offer" : "new_booking",
-                title: referrerStaffId
-                  ? "New appointment offer"
-                  : "New Booking",
-                body: `${client.name} booked ${service.name} on ${date} at ${time}`,
+                type: staffType,
+                title: staffTitle,
+                body: bookingNotifBody,
                 metadata: {
+                  appointment_id: appointmentId,
+                  booking_reference: bookingReference,
+                },
+              });
+              notifyUserPush({
+                userId: staffUserId,
+                title: staffTitle,
+                body: bookingNotifBody,
+                data: {
+                  type: staffType,
                   appointment_id: appointmentId,
                   booking_reference: bookingReference,
                 },

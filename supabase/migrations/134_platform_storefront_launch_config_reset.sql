@@ -1,4 +1,4 @@
--- 133_platform_storefront_launch_config_reset.sql
+-- 134_platform_storefront_launch_config_reset.sql
 --
 -- Migration 131 was edited in place between two merged PRs (#218's original
 -- broad draft/published/version schema, then #220's narrower

@@ -9,20 +9,19 @@ function json(req: Request, data: unknown, status = 200): Response {
     headers: {
       ...corsHeadersFor(req),
       "Content-Type": "application/json",
-      "Cache-Control": "public, max-age=30",
+      "Cache-Control": "public, max-age=300",
     },
   });
 }
 
 /**
- * GET /storefront-launch-config — public, no auth required.
+ * GET /platform-partners — public, no auth required.
  *
- * Returns the launch countdown fields only ({ launch_at, launch_timezone,
- * countdown_visible }). Always 200 — if nothing has been configured yet,
- * returns nulls/false rather than an error, so the client never shows a
- * fake countdown but also never breaks on an unconfigured platform.
+ * Returns only enabled partner logos, ordered for display. The client
+ * hides the partner strip entirely when this list is empty — never invents
+ * placeholder brands.
  */
-Deno.serve(withLogging("storefront-launch-config", async (req: Request) => {
+Deno.serve(withLogging("platform-partners", async (req: Request) => {
   const corsResp = handleCors(req);
   if (corsResp) return corsResp;
 
@@ -32,20 +31,16 @@ Deno.serve(withLogging("storefront-launch-config", async (req: Request) => {
 
   try {
     const { data, error } = await supabaseAdmin
-      .from("platform_storefront_launch_config")
-      .select("launch_at, launch_timezone, countdown_visible")
-      .eq("id", 1)
-      .maybeSingle();
+      .from("platform_partners")
+      .select("id, name, logo_url, website_url")
+      .eq("is_enabled", true)
+      .order("display_order", { ascending: true });
 
     if (error) return serverError(req, error.message);
 
-    return json(req, {
-      launch_at: data?.launch_at ?? null,
-      launch_timezone: data?.launch_timezone ?? null,
-      countdown_visible: data?.countdown_visible ?? false,
-    });
+    return json(req, { partners: data ?? [] });
   } catch (err) {
-    console.error("storefront-launch-config error:", err);
+    console.error("platform-partners error:", err);
     return serverError(req, err instanceof Error ? err.message : "Internal error");
   }
 }));

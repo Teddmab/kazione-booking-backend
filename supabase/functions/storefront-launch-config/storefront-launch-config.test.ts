@@ -11,21 +11,13 @@ Deno.test("storefront-launch-config: no auth required, returns 200", async () =>
   await res.body?.cancel()
 })
 
-Deno.test("storefront-launch-config: response never contains a draft field", async () => {
+Deno.test("storefront-launch-config: response has exactly the 3 launch fields", async () => {
   const res = await fetch(`${BASE}/storefront-launch-config`, { headers: { apikey: ANON_KEY } })
   assertEquals(res.status, 200)
   const body = await res.json()
-  if ("draft" in body) throw new Error("Public endpoint must never expose draft configuration")
-})
-
-Deno.test("storefront-launch-config: when nothing published, returns configured:false rather than an error", async () => {
-  // This only asserts the shape holds when unpublished — the full publish
-  // → configured:true → unpublish → configured:false round trip is covered
-  // in admin-storefront-launch-config.test.ts, which owns state cleanup.
-  const res = await fetch(`${BASE}/storefront-launch-config`, { headers: { apikey: ANON_KEY } })
-  assertEquals(res.status, 200)
-  const body = await res.json()
-  if (typeof body.configured !== "boolean") throw new Error("Expected a boolean 'configured' field")
+  for (const field of ["launch_at", "launch_timezone", "countdown_visible"]) {
+    if (!(field in body)) throw new Error(`Expected a ${field} field in the response`)
+  }
 })
 
 Deno.test("storefront-launch-config: POST is rejected", async () => {

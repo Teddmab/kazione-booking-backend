@@ -20,6 +20,7 @@ import {
 import { generateIcs, icsToBase64, googleCalendarUrl } from "../_shared/ics.ts";
 import { localDateRangeToUtcIso, localWallClockToUtcIso, utcIsoToLocalParts } from "../_shared/timezone.ts";
 import { getBookingNotificationRecipients } from "../_shared/bookingNotificationRecipients.ts";
+import { notifyUserPush } from "../_shared/sendExpoPush.ts";
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const TIME_RE = /^\d{2}:\d{2}$/;
@@ -1027,18 +1028,34 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
 
             const staffUserId = await fetchStaffUserId(staffProfileId);
             if (staffUserId) {
+              const offerTitle = "New appointment offer";
+              const offerBody =
+                `${client ? `${client.first_name} ${client.last_name}` : "A client"} — ${service?.name ?? "Service"} on ${startsAtDate.toLocaleDateString("en-GB", { day: "numeric", month: "short", timeZone: bizTz })} at ${startsAtDate.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: bizTz })}`;
               await supabaseAdmin.from("notifications").insert({
                 business_id: apptRow.business_id,
                 user_id: staffUserId,
                 type: "appointment_offer",
-                title: "New appointment offer",
-                body: `${client ? `${client.first_name} ${client.last_name}` : "A client"} — ${service?.name ?? "Service"} on ${startsAtDate.toLocaleDateString("en-GB", { day: "numeric", month: "short", timeZone: bizTz })} at ${startsAtDate.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: bizTz })}`,
+                title: offerTitle,
+                body: offerBody,
                 metadata: {
                   appointment_id: apptRow.id,
                   booking_reference: apptRow.booking_reference,
                 },
               }).then(({ error: notifErr }) => {
-                if (notifErr) console.warn("assign-staff offer notification failed:", notifErr);
+                if (notifErr) {
+                  console.warn("assign-staff offer notification failed:", notifErr);
+                  return;
+                }
+                notifyUserPush({
+                  userId: staffUserId,
+                  title: offerTitle,
+                  body: offerBody,
+                  data: {
+                    type: "appointment_offer",
+                    appointment_id: String(apptRow.id),
+                    booking_reference: String(apptRow.booking_reference ?? ""),
+                  },
+                });
               });
             }
           } catch (e) { console.warn("assign-staff offer email error:", e); }

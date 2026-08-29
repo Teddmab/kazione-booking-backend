@@ -93,14 +93,26 @@ Deno.test("admin-reviews: platform admin can hide ANY review (cross-tenant) → 
   // Verify the audit trail directly via PostgREST — admin_read_audit_log's
   // RLS policy lets any platform admin read admin_audit_log (migration
   // 045_admin_audit_log.sql).
-  const logRes = await fetch(
-    `${REST_BASE}/admin_audit_log?action=eq.REVIEW_HIDDEN&target_id=eq.${REVIEW_ID}&order=created_at.desc&limit=1`,
-    { headers: { apikey: ANON_KEY, Authorization: `Bearer ${ADMIN_TOKEN}` } },
-  )
-  assertEquals(logRes.status, 200)
-  const rows = await logRes.json()
+  //
+  // logAdminAction() is deliberately fire-and-forget (admin-reviews/index.ts
+  // does not await it, by design — adminAudit.ts: "An audit-log failure must
+  // never block the actual operation"), so the row can land a few ms after
+  // the 200 response the client already received. Poll briefly instead of
+  // checking once immediately, so this test isn't racing that async write —
+  // this is a real timing gap in a passing system, not a fake success.
+  let rows: unknown[] = []
+  for (let attempt = 0; attempt < 10; attempt++) {
+    const logRes = await fetch(
+      `${REST_BASE}/admin_audit_log?action=eq.REVIEW_HIDDEN&target_id=eq.${REVIEW_ID}&order=created_at.desc&limit=1`,
+      { headers: { apikey: ANON_KEY, Authorization: `Bearer ${ADMIN_TOKEN}` } },
+    )
+    assertEquals(logRes.status, 200)
+    rows = await logRes.json()
+    if (Array.isArray(rows) && rows.length > 0) break
+    await new Promise((resolve) => setTimeout(resolve, 100))
+  }
   if (!Array.isArray(rows) || rows.length === 0) {
-    throw new Error("Expected a REVIEW_HIDDEN row in admin_audit_log for this review")
+    throw new Error("Expected a REVIEW_HIDDEN row in admin_audit_log for this review (waited up to 1s)")
   }
 
   // Restore state so this file can be re-run without depending on order.

@@ -15,10 +15,68 @@ const KAMPALA_BUSINESS_ID = "b0000000-0000-4000-8000-000000000003"
 const KAMPALA_SERVICE_ID = "c0000000-0000-4000-8000-000000000006"
 const KAMPALA_MONDAY = "2026-10-05" // confirmed Monday
 
+// Salon Seat Capacity sprint, Step Zero: the owner reported that with 2+
+// staff who should have had genuinely free overlapping slots, the client
+// booking flow still wouldn't let them book 2 appointments at the same
+// time. Fatima K. and Regina M. (014_seed_data.sql) don't share a single
+// service in staff_services — Fatima only has Knotless/Box Braids, Regina
+// only has Loc Maintenance/Natural Hair Consultation — so today there is
+// structurally only one eligible staff member per service. These tests
+// prove that's the actual explanation (not a bug): get_available_slots
+// correctly aggregates multiple staff once they're genuinely both assigned
+// to the same service, and correctly shows only one when they aren't.
+const STAFF_FATIMA_ID = "d0000000-0000-4000-8000-000000000001"
+const STAFF_REGINA_ID = "d0000000-0000-4000-8000-000000000002"
+
+// Afrotouch's business_settings.booking_future_days is only 60 (014_seed_data.sql)
+// — unlike the Kampala fixture's 365 — so a hardcoded far-future date goes stale
+// against a real clock and trips OUTSIDE_BOOKING_WINDOW. Compute relative to
+// "now" instead, snapping past Sunday (non-working) like the "working day" test
+// above already does.
+function futureBusinessDate(minOffsetDays: number): string {
+  const d = new Date()
+  d.setUTCDate(d.getUTCDate() + minOffsetDays)
+  while (d.getUTCDay() === 0) d.setUTCDate(d.getUTCDate() + 1)
+  return d.toISOString().slice(0, 10)
+}
+
+const MULTI_STAFF_DATE = futureBusinessDate(40)
+
+const SUPABASE_URL = "http://127.0.0.1:54321"
+const SERVICE_KEY =
+  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU"
+const REST_BASE = `${SUPABASE_URL}/rest/v1`
+const SERVICE_HEADERS = {
+  apikey: SERVICE_KEY,
+  Authorization: `Bearer ${SERVICE_KEY}`,
+  "Content-Type": "application/json",
+  Prefer: "return=representation",
+}
+
 function callFn(params: Record<string, string>) {
   const url = new URL(`${BASE}/get-availability`)
   Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v))
   return fetch(url.toString(), { method: "GET", headers: { "apikey": ANON_KEY } })
+}
+
+async function grantServiceOffer(staffId: string, serviceId: string) {
+  const res = await fetch(`${REST_BASE}/staff_services`, {
+    method: "POST",
+    headers: { ...SERVICE_HEADERS, Prefer: "return=representation,resolution=merge-duplicates" },
+    body: JSON.stringify({ staff_profile_id: staffId, service_id: serviceId, status: "accepted" }),
+  })
+  if (res.status !== 201 && res.status !== 200) {
+    throw new Error(`Failed to grant service offer: ${res.status} ${await res.text()}`)
+  }
+  await res.body?.cancel().catch(() => {})
+}
+
+async function revokeServiceOffer(staffId: string, serviceId: string) {
+  const res = await fetch(
+    `${REST_BASE}/staff_services?staff_profile_id=eq.${staffId}&service_id=eq.${serviceId}`,
+    { method: "DELETE", headers: SERVICE_HEADERS },
+  )
+  await res.body?.cancel().catch(() => {})
 }
 
 Deno.test("get-availability: missing business_id", async () => {
@@ -109,3 +167,33 @@ Deno.test("get-availability: past date", async () => {
   const body = await res.json();
   if (!Array.isArray(body.slots) || body.slots.length !== 0) throw new Error("Expected empty slots array for past date");
 });
+
+// ── Seat Capacity Step Zero: staff_services eligibility, not a bug ─────────
+
+Deno.test("get-availability: Knotless Braids has only one eligible staff (Fatima) today — Step Zero finding", async () => {
+  const res = await callFn({ business_id: BUSINESS_ID, service_id: SERVICE_ID, date: MULTI_STAFF_DATE })
+  assertEquals(res.status, 200)
+  const body = await res.json()
+  if (!Array.isArray(body.slots) || body.slots.length === 0) {
+    throw new Error(`Expected slots on ${MULTI_STAFF_DATE}, got: ${JSON.stringify(body)}`)
+  }
+  for (const slot of body.slots) {
+    assertEquals(slot.staff.length, 1)
+    assertEquals(slot.staff[0].id, STAFF_FATIMA_ID)
+  }
+})
+
+Deno.test("get-availability: aggregates both staff once they're genuinely both assigned to the same service", async () => {
+  await grantServiceOffer(STAFF_REGINA_ID, SERVICE_ID)
+  try {
+    const res = await callFn({ business_id: BUSINESS_ID, service_id: SERVICE_ID, date: MULTI_STAFF_DATE })
+    assertEquals(res.status, 200)
+    const body = await res.json()
+    const slot = (body.slots ?? []).find((s: { time: string }) => s.time === "10:00")
+    if (!slot) throw new Error(`Expected a 10:00 slot, got: ${JSON.stringify(body.slots)}`)
+    const staffIds = slot.staff.map((s: { id: string }) => s.id).sort()
+    assertEquals(staffIds, [STAFF_FATIMA_ID, STAFF_REGINA_ID].sort())
+  } finally {
+    await revokeServiceOffer(STAFF_REGINA_ID, SERVICE_ID)
+  }
+})

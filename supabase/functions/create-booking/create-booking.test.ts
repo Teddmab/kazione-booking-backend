@@ -7,6 +7,7 @@ const ANON_KEY =
 const BUSINESS_ID = "b0000000-0000-4000-8000-000000000001"; // from seed
 const SERVICE_ID = "c0000000-0000-4000-8000-000000000001"; // Knotless Braids from seed
 const STAFF_ID = "d0000000-0000-4000-8000-000000000001"; // Fatima K. from seed
+const STAFF_ID_2 = "d0000000-0000-4000-8000-000000000002"; // Regina M. from seed
 
 // S59: Africa/Kampala fixture (UTC+3, no DST) — proves date+time are
 // interpreted as the business's local wall-clock, not UTC.
@@ -387,4 +388,113 @@ Deno.test("create-booking: Africa/Kampala 09:00 local books as 06:00 UTC (S59)",
   // timezone before storage, not stored as if they were literal UTC digits.
   const storedStartsAt = new Date(rows[0].starts_at).toISOString();
   assertEquals(storedStartsAt, `${KAMPALA_BOOKING_DATE}T06:00:00.000Z`);
+});
+
+// ── Seat Capacity Step Zero: staff_services eligibility, not a bug ─────────
+// The owner reported that with 2+ staff who should have had genuinely free
+// overlapping slots, the client booking flow still wouldn't let them book 2
+// appointments at the same time. Fatima K. and Regina M. (014_seed_data.sql)
+// don't share a single service in staff_services — so today there is
+// structurally only one eligible staff member per service. These two tests
+// reproduce the owner's exact scenario (2 concurrent bookings, same
+// service, same time) both with and without a shared staff assignment,
+// proving the public booking path itself has no bug.
+
+async function grantServiceOffer(staffId: string, serviceId: string) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/staff_services`, {
+    method: "POST",
+    headers: {
+      apikey: SERVICE_KEY,
+      Authorization: `Bearer ${SERVICE_KEY}`,
+      "Content-Type": "application/json",
+      Prefer: "return=representation,resolution=merge-duplicates",
+    },
+    body: JSON.stringify({ staff_profile_id: staffId, service_id: serviceId, status: "accepted" }),
+  });
+  if (res.status !== 201 && res.status !== 200) {
+    throw new Error(`Failed to grant service offer: ${res.status} ${await res.text()}`);
+  }
+  await res.body?.cancel().catch(() => {});
+}
+
+async function revokeServiceOffer(staffId: string, serviceId: string) {
+  const res = await fetch(
+    `${SUPABASE_URL}/rest/v1/staff_services?staff_profile_id=eq.${staffId}&service_id=eq.${serviceId}`,
+    { method: "DELETE", headers: { apikey: SERVICE_KEY, Authorization: `Bearer ${SERVICE_KEY}` } },
+  );
+  await res.body?.cancel().catch(() => {});
+}
+
+// Afrotouch's business_settings.booking_future_days is only 60 (014_seed_data.sql)
+// — unlike the Kampala fixture's 365 — so a hardcoded far-future date goes stale
+// against a real clock and trips OUTSIDE_BOOKING_WINDOW/create-booking's SLOT_TAKEN
+// (no matching slot). Compute relative to "now" instead, snapping past Sunday
+// (non-working), same approach as get-availability.test.ts's "working day" test.
+function futureBusinessDate(minOffsetDays: number): string {
+  const d = new Date();
+  d.setUTCDate(d.getUTCDate() + minOffsetDays);
+  while (d.getUTCDay() === 0) d.setUTCDate(d.getUTCDate() + 1);
+  return d.toISOString().slice(0, 10);
+}
+
+Deno.test("create-booking: 2 clients CAN book the same service+time with different staff once both staff actually offer it", async () => {
+  const date = futureBusinessDate(41); // distinct from get-availability.test.ts's futureBusinessDate(40)
+  await grantServiceOffer(STAFF_ID_2, SERVICE_ID);
+  try {
+    const res1 = await callFn({
+      business_id: BUSINESS_ID,
+      service_id: SERVICE_ID,
+      staff_profile_id: STAFF_ID,
+      date,
+      time: "10:00",
+      client: { name: "Multi Staff Client 1", email: "multi-staff-1@test.kazione.local" },
+      payment_method: "later",
+    });
+    assertEquals(res1.status, 201);
+    await res1.json();
+
+    const res2 = await callFn({
+      business_id: BUSINESS_ID,
+      service_id: SERVICE_ID,
+      staff_profile_id: STAFF_ID_2,
+      date,
+      time: "10:00",
+      client: { name: "Multi Staff Client 2", email: "multi-staff-2@test.kazione.local" },
+      payment_method: "later",
+    });
+    assertEquals(res2.status, 201);
+    await res2.json();
+  } finally {
+    await revokeServiceOffer(STAFF_ID_2, SERVICE_ID);
+  }
+});
+
+Deno.test("create-booking: without a shared staff assignment, a 2nd booking for the same service+time has no eligible staff left (matches the owner-reported behaviour — not a bug)", async () => {
+  // Regina does not offer Knotless Braids in seed data — Fatima is the only
+  // eligible staff, so once she is booked at this time the same service+time
+  // has no one left to serve it.
+  const date = futureBusinessDate(43); // separate date from the fixture test above
+  const res1 = await callFn({
+    business_id: BUSINESS_ID,
+    service_id: SERVICE_ID,
+    staff_profile_id: STAFF_ID,
+    date,
+    time: "10:00",
+    client: { name: "Solo Staff Client 1", email: "solo-staff-1@test.kazione.local" },
+    payment_method: "later",
+  });
+  assertEquals(res1.status, 201);
+  await res1.json();
+
+  const res2 = await callFn({
+    business_id: BUSINESS_ID,
+    service_id: SERVICE_ID, // no staff_profile_id — "any available"
+    date,
+    time: "10:00",
+    client: { name: "Solo Staff Client 2", email: "solo-staff-2@test.kazione.local" },
+    payment_method: "later",
+  });
+  assertEquals(res2.status, 409);
+  const body = await res2.json();
+  assertEquals(body.error?.code, "SLOT_TAKEN");
 });

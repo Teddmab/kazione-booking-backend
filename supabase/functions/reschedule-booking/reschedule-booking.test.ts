@@ -41,8 +41,20 @@ async function createGuestBooking(date: string, time: string, staffId: string): 
   return { appointmentId: body.appointment_id, bookingReference: body.booking_reference, email }
 }
 
+// Relative to "today" (not hardcoded absolute dates) so this file can never
+// go stale the way it just did: a fixed date far enough in the future when
+// written eventually arrives, at which point the reschedule_hours (24h)
+// lead-time policy legitimately starts rejecting these fixtures. +14..+22
+// days comfortably clears that policy while staying well inside
+// booking_future_days (60, the default this seed business uses).
+function daysFromNow(offset: number): string {
+  const d = new Date()
+  d.setUTCDate(d.getUTCDate() + offset)
+  return d.toISOString().slice(0, 10)
+}
+
 async function findAvailableSlots(): Promise<{ date: string; time: string; staffId: string }[]> {
-  const dates = ["2026-09-01", "2026-09-02", "2026-09-03", "2026-09-07", "2026-09-08", "2026-09-09"]
+  const dates = [14, 15, 16, 20, 21, 22].map(daysFromNow)
   const results: { date: string; time: string; staffId: string }[] = []
   for (const date of dates) {
     const r = await fetch(
@@ -121,7 +133,7 @@ async function findAnotherSlotForStaff(
   staffId: string,
   excludeDates: string[],
 ): Promise<{ date: string; time: string } | null> {
-  const dates = ["2026-09-14", "2026-09-15", "2026-09-16", "2026-09-17", "2026-09-18"]
+  const dates = [25, 26, 27, 28, 29].map(daysFromNow)
   for (const date of dates) {
     if (excludeDates.includes(date)) continue
     const r = await fetch(

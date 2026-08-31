@@ -26,16 +26,24 @@ jobs:
 
       - name: Push pending migrations
         env:
-          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
           SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
           SUPABASE_PROJECT_ID: ${{ secrets.SUPABASE_PROJECT_ID }}
         run: |
-          # db.*.supabase.co resolves to IPv6, which GitHub Actions runners can't reach.
-          # Use the session-mode connection pooler (IPv4) instead — same password, no new secrets.
-          # We derive the pooler hostname from the project region via the Management API.
-          REGION=$(curl -sf \
-            -H "Authorization: Bearer ${SUPABASE_ACCESS_TOKEN}" \
-            "https://api.supabase.com/v1/projects/${SUPABASE_PROJECT_ID}" \
-            | python3 -c "import sys,json; print(json.load(sys.stdin)['region'])")
-          POOLER_URL="postgresql://postgres.${SUPABASE_PROJECT_ID}:${SUPABASE_DB_PASSWORD}@aws-0-${REGION}.pooler.supabase.com:5432/postgres"
+          # db.*.supabase.co (direct connection) resolves to IPv6, which GitHub
+          # Actions runners can't reach — use the session-mode connection
+          # pooler (IPv4) instead, same password, no new secrets.
+          #
+          # The pooler hostname is aws-<N>-<region>.pooler.supabase.com, where
+          # N is a per-project pooler-cluster assignment Supabase's Management
+          # API does not expose (only `region` does) — it is NOT always 0.
+          # This project is on cluster 1 (confirmed via Supabase dashboard ->
+          # Project Settings -> Database -> Connect -> Session pooler), so
+          # this was previously guessing aws-0 and silently connecting to a
+          # pooler node that had never heard of this project ("tenant/user
+          # not found" — every deploy since 2026-08-08 failed here). Hardcoded
+          # since a project's pooler cluster assignment does not change; if
+          # this project is ever migrated to a different cluster, update this
+          # value to match Supabase dashboard -> Connect -> Session pooler.
+          POOLER_HOST="aws-1-eu-west-2.pooler.supabase.com"
+          POOLER_URL="postgresql://postgres.${SUPABASE_PROJECT_ID}:${SUPABASE_DB_PASSWORD}@${POOLER_HOST}:5432/postgres"
           supabase db push --db-url "${POOLER_URL}"

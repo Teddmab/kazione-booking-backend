@@ -27,10 +27,20 @@ const KAMPALA_MONDAY = "2026-10-05" // confirmed Monday
 // to the same service, and correctly shows only one when they aren't.
 const STAFF_FATIMA_ID = "d0000000-0000-4000-8000-000000000001"
 const STAFF_REGINA_ID = "d0000000-0000-4000-8000-000000000002"
-// Monday, deliberately unused by any other *.test.ts fixture — see
-// capacity.test.ts (2026-11-10..13) and cancel-booking.test.ts
-// (2026-12-07/14/21).
-const MULTI_STAFF_MONDAY = "2026-11-16"
+
+// Afrotouch's business_settings.booking_future_days is only 60 (014_seed_data.sql)
+// — unlike the Kampala fixture's 365 — so a hardcoded far-future date goes stale
+// against a real clock and trips OUTSIDE_BOOKING_WINDOW. Compute relative to
+// "now" instead, snapping past Sunday (non-working) like the "working day" test
+// above already does.
+function futureBusinessDate(minOffsetDays: number): string {
+  const d = new Date()
+  d.setUTCDate(d.getUTCDate() + minOffsetDays)
+  while (d.getUTCDay() === 0) d.setUTCDate(d.getUTCDate() + 1)
+  return d.toISOString().slice(0, 10)
+}
+
+const MULTI_STAFF_DATE = futureBusinessDate(40)
 
 const SUPABASE_URL = "http://127.0.0.1:54321"
 const SERVICE_KEY =
@@ -161,11 +171,11 @@ Deno.test("get-availability: past date", async () => {
 // ── Seat Capacity Step Zero: staff_services eligibility, not a bug ─────────
 
 Deno.test("get-availability: Knotless Braids has only one eligible staff (Fatima) today — Step Zero finding", async () => {
-  const res = await callFn({ business_id: BUSINESS_ID, service_id: SERVICE_ID, date: MULTI_STAFF_MONDAY })
+  const res = await callFn({ business_id: BUSINESS_ID, service_id: SERVICE_ID, date: MULTI_STAFF_DATE })
   assertEquals(res.status, 200)
   const body = await res.json()
   if (!Array.isArray(body.slots) || body.slots.length === 0) {
-    throw new Error(`Expected slots on ${MULTI_STAFF_MONDAY}, got: ${JSON.stringify(body)}`)
+    throw new Error(`Expected slots on ${MULTI_STAFF_DATE}, got: ${JSON.stringify(body)}`)
   }
   for (const slot of body.slots) {
     assertEquals(slot.staff.length, 1)
@@ -176,7 +186,7 @@ Deno.test("get-availability: Knotless Braids has only one eligible staff (Fatima
 Deno.test("get-availability: aggregates both staff once they're genuinely both assigned to the same service", async () => {
   await grantServiceOffer(STAFF_REGINA_ID, SERVICE_ID)
   try {
-    const res = await callFn({ business_id: BUSINESS_ID, service_id: SERVICE_ID, date: MULTI_STAFF_MONDAY })
+    const res = await callFn({ business_id: BUSINESS_ID, service_id: SERVICE_ID, date: MULTI_STAFF_DATE })
     assertEquals(res.status, 200)
     const body = await res.json()
     const slot = (body.slots ?? []).find((s: { time: string }) => s.time === "10:00")

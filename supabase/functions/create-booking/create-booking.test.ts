@@ -425,8 +425,20 @@ async function revokeServiceOffer(staffId: string, serviceId: string) {
   await res.body?.cancel().catch(() => {});
 }
 
+// Afrotouch's business_settings.booking_future_days is only 60 (014_seed_data.sql)
+// — unlike the Kampala fixture's 365 — so a hardcoded far-future date goes stale
+// against a real clock and trips OUTSIDE_BOOKING_WINDOW/create-booking's SLOT_TAKEN
+// (no matching slot). Compute relative to "now" instead, snapping past Sunday
+// (non-working), same approach as get-availability.test.ts's "working day" test.
+function futureBusinessDate(minOffsetDays: number): string {
+  const d = new Date();
+  d.setUTCDate(d.getUTCDate() + minOffsetDays);
+  while (d.getUTCDay() === 0) d.setUTCDate(d.getUTCDate() + 1);
+  return d.toISOString().slice(0, 10);
+}
+
 Deno.test("create-booking: 2 clients CAN book the same service+time with different staff once both staff actually offer it", async () => {
-  const date = "2026-11-16"; // Monday; unused by any other *.test.ts fixture
+  const date = futureBusinessDate(41); // distinct from get-availability.test.ts's futureBusinessDate(40)
   await grantServiceOffer(STAFF_ID_2, SERVICE_ID);
   try {
     const res1 = await callFn({
@@ -461,7 +473,7 @@ Deno.test("create-booking: without a shared staff assignment, a 2nd booking for 
   // Regina does not offer Knotless Braids in seed data — Fatima is the only
   // eligible staff, so once she is booked at this time the same service+time
   // has no one left to serve it.
-  const date = "2026-11-17"; // Tuesday; separate date from the fixture test above
+  const date = futureBusinessDate(43); // separate date from the fixture test above
   const res1 = await callFn({
     business_id: BUSINESS_ID,
     service_id: SERVICE_ID,

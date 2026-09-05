@@ -36,7 +36,7 @@ const APPT_SELECT = `
   applied_offer:offer_redemptions!offer_redemption_id(id, status, offer:business_offers(id, type, title, discount_type, discount_value)),
   business:businesses(name, timezone),
   commission_adjustments:appointment_commission_adjustments(id, staff_profile_id, previous_amount, new_amount, reason, created_at),
-  cross_business_conflict:appointments!cross_business_conflict_appointment_id(id, business_id, starts_at, ends_at, business:businesses(name, timezone))
+  cross_business_conflict(id, business_id, starts_at, ends_at, business:businesses(name, timezone))
 `;
 
 /**

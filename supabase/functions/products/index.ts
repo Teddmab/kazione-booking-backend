@@ -11,6 +11,7 @@ import { logServiceActivity } from "../_shared/serviceActivity.ts";
  * GET  ?business_id=                          → product list with is_low_stock flag
  * GET  ?id=                                   → single product + last 20 stock movements
  * GET  ?action=service-usage&service_id=      → products used by a service
+ * GET  ?action=recent-movements&business_id=  → recent stock movements, all products
  * POST                body={business_id,...}  → create product
  * POST ?action=service-usage                  → link product to service
  * PATCH ?id=          body={...fields}        → update product fields
@@ -58,6 +59,57 @@ Deno.serve(withLogging("products", async (req: Request) => {
 
         if (error) return serverError(error.message);
         return jsonCors(req, { items: data ?? [] });
+      }
+
+      // GET /products?action=recent-movements&business_id=
+      // Recent stock movements across every product for the business —
+      // powers the owner's unified "Recent activity" feed (Costs &
+      // Inventory overview). needs_review is computed here, not stored:
+      // a wastage/manual_out movement with no reference_id (not tied to a
+      // supplier order or an appointment's service-use) has no paper
+      // trail explaining it, so it's flagged for the owner to look at.
+      if (action === "recent-movements") {
+        const businessId = url.searchParams.get("business_id");
+        if (!businessId) return badRequest("business_id is required");
+
+        try {
+          const user = await verifyAuth(req);
+          await verifyBusinessMember(user.id, businessId);
+        } catch (e) {
+          if (e instanceof Response) return e;
+          throw e;
+        }
+
+        const limitParam = Number(url.searchParams.get("limit") ?? "20");
+        const limit = Number.isFinite(limitParam) ? Math.min(Math.max(limitParam, 1), 100) : 20;
+
+        const { data, error } = await supabaseAdmin
+          .from("stock_movements")
+          .select(`
+            id, movement_type, quantity, reference_id, reference_type, created_at,
+            product:product_catalog(name, unit)
+          `)
+          .eq("business_id", businessId)
+          .order("created_at", { ascending: false })
+          .limit(limit);
+
+        if (error) return serverError(error.message);
+
+        const movements = (data ?? []).map((row: Record<string, unknown>) => {
+          const product = row.product as { name: string; unit: string | null } | null;
+          const needsReview =
+            (row.movement_type === "wastage" || row.movement_type === "manual_out") &&
+            row.reference_id == null;
+          const { product: _p, ...rest } = row;
+          return {
+            ...rest,
+            product_name: product?.name ?? "Product",
+            unit: product?.unit ?? null,
+            needs_review: needsReview,
+          };
+        });
+
+        return jsonCors(req, { movements });
       }
 
       // GET /products?id=

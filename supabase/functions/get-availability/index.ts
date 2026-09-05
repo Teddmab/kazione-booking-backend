@@ -3,6 +3,27 @@ import { corsHeadersFor, handleCors } from "../_shared/cors.ts";
 import { badRequest, serverError } from "../_shared/errors.ts";
 import { withLogging } from "../_shared/logger.ts";
 import { localDateRangeToUtcIso, localWallClockToUtcIso, utcIsoToLocalParts } from "../_shared/timezone.ts";
+import { verifyAuth, verifyBusinessMember } from "../_shared/auth.ts";
+
+/**
+ * This endpoint is public (no Authorization header required) for the
+ * marketplace booking flow — but the owner dashboard's New Booking dialog
+ * calls the exact same endpoint, and an owner/manager is allowed to see
+ * (and then confirm past, 139) a slot a public customer never should.
+ * Non-throwing: any missing/invalid/non-member/wrong-role auth just means
+ * "treat this as a public caller", never an error.
+ */
+async function isOwnerOrManagerCaller(req: Request, businessId: string): Promise<boolean> {
+  const authHeader = req.headers.get("Authorization");
+  if (!authHeader?.startsWith("Bearer ")) return false;
+  try {
+    const user = await verifyAuth(req);
+    const member = await verifyBusinessMember(user.id, businessId);
+    return member.role === "owner" || member.role === "manager";
+  } catch {
+    return false;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Response types
@@ -13,6 +34,11 @@ interface SlotStaff {
   name: string;
   avatarUrl: string | null;
   price: number;
+  // Only ever true for an owner/manager caller (144) — a public caller
+  // never receives a row where either of these is true, since those rows
+  // are excluded outright for them.
+  hasConflict?: boolean;
+  atCapacity?: boolean;
 }
 
 interface Slot {
@@ -215,6 +241,8 @@ Deno.serve(withLogging("get-availability", async (req: Request) => {
       }
     }
 
+    const ownerOverride = await isOwnerOrManagerCaller(req, businessId!);
+
     // 3. Try the RPC first; fall back to a direct working-hours-based implementation
     // if the database function is missing or errors on this environment.
     let slots: Slot[] = [];
@@ -226,6 +254,7 @@ Deno.serve(withLogging("get-availability", async (req: Request) => {
           p_service_id: serviceId!,
           p_staff_id: staffId ?? null,
           p_date: dateStr!,
+          p_owner_override: ownerOverride,
           p_min_staff: 1,
         },
       );
@@ -270,6 +299,7 @@ Deno.serve(withLogging("get-availability", async (req: Request) => {
           name: hideNames ? "Professional" : row.staff_name,
           avatarUrl: hideNames ? null : (avatarMap[row.staff_profile_id] ?? null),
           price: +(row.custom_price ?? service.price),
+          ...(ownerOverride && { hasConflict: row.has_staff_conflict === true, atCapacity: row.at_capacity === true }),
         });
       }
 
@@ -277,6 +307,11 @@ Deno.serve(withLogging("get-availability", async (req: Request) => {
         .sort(([a], [b]) => a.localeCompare(b))
         .map(([time, staff]) => ({ time, staff }));
     } catch (rpcErr) {
+      // Degraded-mode fallback (RPC missing/erroring) — does not implement
+      // ownerOverride (144). An owner hitting this fallback still sees the
+      // public, conflict-free slot list rather than a hard error, which is
+      // an acceptable narrowing for a path that should essentially never
+      // execute against a healthy database.
       console.warn("get_available_slots RPC failed, using fallback availability generation", rpcErr);
       const dayOfWeek = requestedDate.getUTCDay();
 

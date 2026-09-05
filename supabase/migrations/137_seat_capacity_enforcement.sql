@@ -67,8 +67,18 @@ COMMENT ON TABLE capacity_enforcement_pilot_businesses IS
   'both be true. Widen the pilot by inserting a row here, never by editing '
   'application code.';
 
+-- This literal is the LOCAL/CI seed business id, not any real business's
+-- production id (which is generated at signup and unknown at migration-
+-- write time) — SELECT ... WHERE EXISTS instead of a plain INSERT VALUES so
+-- this is a no-op wherever that seed id doesn't exist (every non-seeded
+-- environment, including production) instead of a hard FK-violation
+-- failure that blocks every migration after it. Enrolling the real
+-- production Afrotouch business is a one-time data operation, not a
+-- migration — see the table comment above.
 INSERT INTO capacity_enforcement_pilot_businesses (business_id, note)
-VALUES ('b0000000-0000-4000-8000-000000000001', 'Afrotouch — Salon Seat Capacity pilot customer')
+SELECT id, 'Afrotouch — Salon Seat Capacity pilot customer'
+  FROM businesses
+ WHERE id = 'b0000000-0000-4000-8000-000000000001'
 ON CONFLICT (business_id) DO NOTHING;
 
 -- ── 3. appointment_capacity_shadow_log: record the real outcome ────────────

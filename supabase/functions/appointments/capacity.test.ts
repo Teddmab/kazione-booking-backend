@@ -535,3 +535,18 @@ Deno.test("get-availability: shadow-only (not enforced) never hides slots, even 
     await setCapacity(false, null)
   }
 })
+
+// ── 138_seat_capacity_pilot_visibility.sql: owner can read their own row ────
+
+Deno.test("capacity_enforcement_pilot_businesses: the business's own owner can read whether they're pilot-eligible", async () => {
+  if (!OWNER_TOKEN) return
+  const res = await fetch(
+    `${REST_BASE}/capacity_enforcement_pilot_businesses?business_id=eq.${BUSINESS_ID}&select=business_id`,
+    { headers: { apikey: ANON_KEY, Authorization: `Bearer ${OWNER_TOKEN}` } },
+  )
+  assertEquals(res.status, 200)
+  const rows = await res.json()
+  if (!Array.isArray(rows) || rows.length !== 1 || rows[0].business_id !== BUSINESS_ID) {
+    throw new Error(`Expected exactly one row for Afrotouch (seeded by migration 137), got: ${JSON.stringify(rows)}`)
+  }
+})

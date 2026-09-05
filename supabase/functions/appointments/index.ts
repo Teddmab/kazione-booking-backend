@@ -3,8 +3,7 @@ import { corsHeadersFor, handleCors, jsonCors } from "../_shared/cors.ts";
 import { badRequest, conflict, forbidden, notFound, serverError } from "../_shared/errors.ts";
 import { withLogging } from "../_shared/logger.ts";
 import { requireOwnerOrManagerCtx, requireOwnerManagerOrSupervisorCtx, verifyAuth, verifyBusinessMember } from "../_shared/auth.ts";
-import { isSeatCapacityExceededError, isSlotTakenError } from "../_shared/slotConflict.ts";
-import { logSeatCapacityRejection } from "../_shared/seatCapacityLog.ts";
+import { buildConflictConfirmation } from "../_shared/slotConflict.ts";
 import {
   bookingCancellationEmail,
   bookingReceivedOwnerEmail,
@@ -36,8 +35,28 @@ const APPT_SELECT = `
   payment:payments(status, amount, method, paid_at, refund_amount, is_test),
   applied_offer:offer_redemptions!offer_redemption_id(id, status, offer:business_offers(id, type, title, discount_type, discount_value)),
   business:businesses(name, timezone),
-  commission_adjustments:appointment_commission_adjustments(id, staff_profile_id, previous_amount, new_amount, reason, created_at)
+  commission_adjustments:appointment_commission_adjustments(id, staff_profile_id, previous_amount, new_amount, reason, created_at),
+  cross_business_conflict(id, business_id, starts_at, ends_at, business:businesses(name, timezone))
 `;
+
+/**
+ * cross_business_conflict (141_cross_business_conflict_visibility.sql) is
+ * only ever meaningful to the staff member it's actually about — an
+ * owner/manager of THIS business has no legitimate visibility into
+ * whichever OTHER business the conflict belongs to. Strips it from every
+ * row except the one this specific viewer is the assigned staff on.
+ * callerStaffProfileId is null for an owner/manager/supervisor viewer, so
+ * this scrubs it unconditionally for them.
+ */
+function scrubCrossBusinessConflict<T extends { staff_profile_id?: unknown; cross_business_conflict?: unknown }>(
+  row: T,
+  callerStaffProfileId: string | null,
+): T {
+  if (!callerStaffProfileId || row.staff_profile_id !== callerStaffProfileId) {
+    return { ...row, cross_business_conflict: null };
+  }
+  return row;
+}
 
 function normalizePayment(row: Record<string, unknown>) {
   const payment = row.payment as unknown[];
@@ -300,7 +319,20 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
         if (existingErr) return serverError(existingErr.message);
         if (!existing) return notFound("Appointment not found");
 
-        await verifyBusinessMember(user.id, (existing as { business_id: string }).business_id);
+        const viewerMember = await verifyBusinessMember(user.id, (existing as { business_id: string }).business_id);
+
+        // Only needed to gate cross_business_conflict below (scrubCrossBusinessConflict) —
+        // an owner/manager/supervisor viewer has no legitimate visibility into
+        // whichever OTHER business a conflict belongs to.
+        let viewerStaffProfileId: string | null = null;
+        if (viewerMember.role === "staff") {
+          const { data: viewerSp } = await supabaseAdmin
+            .from("staff_profiles")
+            .select("id")
+            .eq("business_member_id", viewerMember.memberId)
+            .maybeSingle();
+          viewerStaffProfileId = (viewerSp as { id: string } | null)?.id ?? null;
+        }
 
         const { data, error } = await supabaseAdmin
           .from("appointments")
@@ -342,7 +374,7 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
           .reduce((sum, p) => sum + (Number(p.amount) || 0) - (Number(p.refund_amount) || 0), 0);
 
         return jsonCors(req, {
-          ...normalizePayment(data),
+          ...normalizePayment(scrubCrossBusinessConflict(data as Record<string, unknown>, viewerStaffProfileId)),
           status_log: statusLog ?? [],
           previously_received: Math.round(previouslyReceived * 100) / 100,
           completion_draft: draftRow ?? null,
@@ -595,7 +627,7 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
       if (error) return serverError(error.message);
 
       const appointments = (data ?? []).map((row: Record<string, unknown>) => {
-        const normalized = normalizePayment(row as Record<string, unknown>);
+        const normalized = normalizePayment(scrubCrossBusinessConflict(row, callerStaffProfileId));
         if (!callerStaffProfileId) return normalized;
 
         // Calculate commission_earned for staff view
@@ -791,16 +823,14 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
           p_notes: body.notes ?? null,
           p_internal_notes: body.internal_notes ?? null,
           p_status: body.staff_profile_id ? "confirmed" : "pending",
+          p_confirm_conflict: body.confirm_conflict === true,
         },
       );
 
       if (atomicErr) {
-        if (isSeatCapacityExceededError(atomicErr)) {
-          await logSeatCapacityRejection(atomicErr);
-          return conflict("SEAT_CAPACITY_EXCEEDED", "This time is fully booked — it would exceed this business's configured seat capacity");
-        }
-        if (isSlotTakenError(atomicErr)) {
-          return conflict("SLOT_TAKEN", "This staff member already has a conflicting appointment at that time");
+        const confirmation = buildConflictConfirmation(atomicErr);
+        if (confirmation) {
+          return conflict(confirmation.code, confirmation.message, confirmation.details);
         }
         console.error("create_manual_appointment_atomic error:", JSON.stringify(atomicErr));
         return serverError(atomicErr.message);
@@ -978,15 +1008,13 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
         p_appointment_id: id,
         p_staff_id: staffProfileId,
         p_new_status: newStatus,
+        p_confirm_conflict: body.confirm_conflict === true,
       });
 
       if (assignErr) {
-        if (isSeatCapacityExceededError(assignErr)) {
-          await logSeatCapacityRejection(assignErr);
-          return conflict("SEAT_CAPACITY_EXCEEDED", "This time is fully booked — it would exceed this business's configured seat capacity");
-        }
-        if (isSlotTakenError(assignErr)) {
-          return conflict("SLOT_TAKEN", "This staff member already has a conflicting appointment at that time");
+        const confirmation = buildConflictConfirmation(assignErr);
+        if (confirmation) {
+          return conflict(confirmation.code, confirmation.message, confirmation.details);
         }
         console.error("assign_staff_atomic error:", JSON.stringify(assignErr));
         return serverError(assignErr.message);
@@ -1120,15 +1148,13 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
         p_appointment_id: id,
         p_staff_id_2: staffProfileId2,
         p_commission_split_pct: splitPct2,
+        p_confirm_conflict: body.confirm_conflict === true,
       });
 
       if (assign2Err) {
-        if (isSeatCapacityExceededError(assign2Err)) {
-          await logSeatCapacityRejection(assign2Err);
-          return conflict("SEAT_CAPACITY_EXCEEDED", "This time is fully booked — it would exceed this business's configured seat capacity");
-        }
-        if (isSlotTakenError(assign2Err)) {
-          return conflict("SLOT_TAKEN", "This staff member already has a conflicting appointment at that time");
+        const confirmation = buildConflictConfirmation(assign2Err);
+        if (confirmation) {
+          return conflict(confirmation.code, confirmation.message, confirmation.details);
         }
         console.error("assign_staff_2_atomic error:", JSON.stringify(assign2Err));
         return serverError(assign2Err.message);
@@ -1494,15 +1520,14 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
         p_new_starts_at: startsAt.toISOString(),
         p_new_ends_at: endsAt.toISOString(),
         p_new_staff_id: ex.staff_profile_id ?? null,
+        p_confirm_conflict: body.confirm_conflict === true,
+        p_allow_confirm: true,
       });
 
       if (updateErr) {
-        if (isSeatCapacityExceededError(updateErr)) {
-          await logSeatCapacityRejection(updateErr);
-          return conflict("SEAT_CAPACITY_EXCEEDED", "This time is fully booked — it would exceed this business's configured seat capacity");
-        }
-        if (isSlotTakenError(updateErr)) {
-          return conflict("SLOT_TAKEN", "The requested slot was just booked by someone else");
+        const confirmation = buildConflictConfirmation(updateErr);
+        if (confirmation) {
+          return conflict(confirmation.code, confirmation.message, confirmation.details);
         }
         return serverError(updateErr.message);
       }
@@ -1645,15 +1670,13 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
         p_new_duration_minutes: svc.duration_minutes,
         p_new_buffer_minutes: svc.buffer_minutes ?? 0,
         p_new_price: svc.price,
+        p_confirm_conflict: body.confirm_conflict === true,
       });
 
       if (changeErr) {
-        if (isSeatCapacityExceededError(changeErr)) {
-          await logSeatCapacityRejection(changeErr);
-          return conflict("SEAT_CAPACITY_EXCEEDED", "This time is fully booked — it would exceed this business's configured seat capacity");
-        }
-        if (isSlotTakenError(changeErr)) {
-          return conflict("SLOT_TAKEN", "The assigned staff member already has a conflicting appointment at the new service's duration");
+        const confirmation = buildConflictConfirmation(changeErr);
+        if (confirmation) {
+          return conflict(confirmation.code, confirmation.message, confirmation.details);
         }
         console.error("change_appointment_service_atomic error:", JSON.stringify(changeErr));
         return serverError(changeErr.message);

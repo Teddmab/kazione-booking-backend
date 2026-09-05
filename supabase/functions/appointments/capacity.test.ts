@@ -13,6 +13,7 @@
 // dev sandbox has no Docker, so these only prove anything real in CI (or a
 // local run once TEST_OWNER_TOKEN is provisioned against `supabase start`).
 import { assertEquals } from "std/assert"
+import { localWallClockToUtcIso } from "../_shared/timezone.ts"
 
 const BASE = "http://127.0.0.1:54321/functions/v1"
 const ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9.CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0"
@@ -32,6 +33,17 @@ const STAFF_ID_2 = "d0000000-0000-4000-8000-000000000002" // Regina M. — only 
 const CLIENT_ID = "c1000000-0000-4000-8000-000000000001" // Amara Diallo
 const CLIENT_ID_2 = "c1000000-0000-4000-8000-000000000002" // Sophie Martin
 const LOC_MAINTENANCE_SERVICE_ID = "c0000000-0000-4000-8000-000000000003" // Regina's service, 120-min
+
+// 141_cross_business_conflict_visibility.sql fixtures. Foreign Test Salon
+// (S74) is deliberately minimal in seed.sql (no services/staff of its own)
+// until these tests add one. SHARED_PERSON_USER_ID reuses the seeded
+// customer account's real auth-backed user id purely as a valid FK target
+// for business_members.user_id — these tests never authenticate as that
+// person, they only need users.id -> auth.users.id to resolve.
+const FOREIGN_BUSINESS_ID = "b0000000-0000-4000-8000-000000000002"
+const SHARED_PERSON_USER_ID = "f0000000-0000-4000-8000-000000000002"
+const XBIZ_AFROTOUCH_STAFF_ID = "d0000000-0000-4000-8000-0000000000f1"
+const XBIZ_FOREIGN_STAFF_ID = "d0000000-0000-4000-8000-0000000000f2"
 
 const OWNER_TOKEN = Deno.env.get("TEST_OWNER_TOKEN") || ""
 
@@ -168,6 +180,34 @@ async function shadowLogRowsSince(sinceIso: string): Promise<{ id: string; outco
   return Array.isArray(rows) ? rows : []
 }
 
+// 139_owner_conflict_warn_confirm.sql: check_and_reserve_slot's public-path
+// branch (p_allow_confirm omitted/false — exactly how create_booking_atomic
+// calls it) can no longer be exercised through the owner `appointments`
+// endpoint, since that endpoint now always passes p_allow_confirm=true.
+// Calling the RPC directly tests that branch in isolation, without needing
+// to route a real booking through create-booking's full payment/email
+// side effects just to reach the same check.
+const RPC_HEADERS = { apikey: SERVICE_KEY, Authorization: `Bearer ${SERVICE_KEY}`, "Content-Type": "application/json" }
+
+function checkAndReserveSlotFn(params: Record<string, unknown>) {
+  return fetch(`${REST_BASE}/rpc/check_and_reserve_slot`, {
+    method: "POST",
+    headers: RPC_HEADERS,
+    body: JSON.stringify(params),
+  })
+}
+
+async function getAppointmentInterval(id: string): Promise<{ starts_at: string; ends_at: string }> {
+  const res = await fetch(`${REST_BASE}/appointments?id=eq.${id}&select=starts_at,ends_at`, {
+    headers: { apikey: SERVICE_KEY, Authorization: `Bearer ${SERVICE_KEY}` },
+  })
+  const rows = await res.json()
+  if (!Array.isArray(rows) || rows.length !== 1) {
+    throw new Error(`Expected exactly one appointment row for ${id}, got: ${JSON.stringify(rows)}`)
+  }
+  return rows[0]
+}
+
 async function cancelAppointment(id: string) {
   const res = await fetch(`${REST_BASE}/appointments?id=eq.${id}`, {
     method: "PATCH",
@@ -178,6 +218,91 @@ async function cancelAppointment(id: string) {
     throw new Error(`Failed to cancel fixture appointment: ${res.status} ${await res.text()}`)
   }
   await res.body?.cancel().catch(() => {})
+}
+
+// ── 141_cross_business_conflict_visibility.sql fixtures ────────────────────
+
+async function upsertBusinessMember(businessId: string, userId: string): Promise<string> {
+  // on_conflict is required: business_members' primary key is `id` (auto-
+  // generated, omitted from the payload below), not (business_id, user_id) —
+  // without naming that unique constraint explicitly, PostgREST's
+  // merge-duplicates has nothing to match against and just 409s on a
+  // second call (e.g. this file's second cross-business test re-running
+  // the same upsert).
+  const res = await fetch(`${REST_BASE}/business_members?on_conflict=business_id,user_id`, {
+    method: "POST",
+    headers: { ...SERVICE_HEADERS, Prefer: "return=representation,resolution=merge-duplicates" },
+    body: JSON.stringify({ business_id: businessId, user_id: userId, role: "staff", is_active: true }),
+  })
+  if (!res.ok) throw new Error(`Failed to upsert business_member (${businessId}): ${res.status} ${await res.text()}`)
+  const rows = await res.json()
+  // merge-duplicates on an existing row can return an empty representation
+  // depending on PostgREST version — fall back to a plain SELECT.
+  if (Array.isArray(rows) && rows[0]?.id) return rows[0].id
+  const selectRes = await fetch(
+    `${REST_BASE}/business_members?business_id=eq.${businessId}&user_id=eq.${userId}&select=id`,
+    { headers: { apikey: SERVICE_KEY, Authorization: `Bearer ${SERVICE_KEY}` } },
+  )
+  const selected = await selectRes.json()
+  if (!Array.isArray(selected) || !selected[0]?.id) {
+    throw new Error(`Could not resolve business_member id for (${businessId}, ${userId})`)
+  }
+  return selected[0].id
+}
+
+async function upsertStaffProfile(id: string, businessId: string, businessMemberId: string, displayName: string) {
+  const res = await fetch(`${REST_BASE}/staff_profiles`, {
+    method: "POST",
+    headers: { ...SERVICE_HEADERS, Prefer: "resolution=merge-duplicates" },
+    body: JSON.stringify({
+      id, business_id: businessId, business_member_id: businessMemberId,
+      display_name: displayName, is_active: true,
+    }),
+  })
+  if (!res.ok) throw new Error(`Failed to upsert staff_profile ${id}: ${res.status} ${await res.text()}`)
+  await res.body?.cancel().catch(() => {})
+}
+
+async function ensureCrossBusinessStaffFixtures(): Promise<void> {
+  const bmAfrotouchId = await upsertBusinessMember(BUSINESS_ID, SHARED_PERSON_USER_ID)
+  await upsertStaffProfile(XBIZ_AFROTOUCH_STAFF_ID, BUSINESS_ID, bmAfrotouchId, "Cross-Business Test Staff (Afrotouch)")
+
+  const bmForeignId = await upsertBusinessMember(FOREIGN_BUSINESS_ID, SHARED_PERSON_USER_ID)
+  await upsertStaffProfile(XBIZ_FOREIGN_STAFF_ID, FOREIGN_BUSINESS_ID, bmForeignId, "Cross-Business Test Staff (Foreign)")
+}
+
+async function insertForeignAppointment(startsAtIso: string, endsAtIso: string): Promise<string> {
+  const res = await fetch(`${REST_BASE}/appointments`, {
+    method: "POST",
+    headers: SERVICE_HEADERS,
+    body: JSON.stringify({
+      business_id: FOREIGN_BUSINESS_ID,
+      staff_profile_id: XBIZ_FOREIGN_STAFF_ID,
+      starts_at: startsAtIso,
+      ends_at: endsAtIso,
+      duration_minutes: Math.round((new Date(endsAtIso).getTime() - new Date(startsAtIso).getTime()) / 60000),
+      price: 50,
+      status: "confirmed",
+      booking_reference: `XBIZ-${crypto.randomUUID().slice(0, 8)}`,
+    }),
+  })
+  if (!res.ok) throw new Error(`Failed to insert foreign fixture appointment: ${res.status} ${await res.text()}`)
+  const [row] = await res.json()
+  return row.id
+}
+
+async function getAppointmentStatusAndConflict(
+  id: string,
+): Promise<{ status: string; cross_business_conflict_appointment_id: string | null }> {
+  const res = await fetch(
+    `${REST_BASE}/appointments?id=eq.${id}&select=status,cross_business_conflict_appointment_id`,
+    { headers: { apikey: SERVICE_KEY, Authorization: `Bearer ${SERVICE_KEY}` } },
+  )
+  const rows = await res.json()
+  if (!Array.isArray(rows) || rows.length !== 1) {
+    throw new Error(`Expected exactly one appointment row for ${id}, got: ${JSON.stringify(rows)}`)
+  }
+  return rows[0]
 }
 
 // ── Baseline: feature disabled preserves current behaviour ─────────────────
@@ -226,32 +351,46 @@ Deno.test("capacity: enabled, capacity=2 — two overlapping staff appointments 
   await setCapacity(false, null)
 })
 
-// ── Core case: 2 staff available, capacity 1 → the 2nd overlapping booking
-//    still succeeds (shadow mode) but logs a would-exceed row ──────────────
+// ── Core case: 2 staff available, capacity 1 → the owner-path 2nd
+//    overlapping booking now requires confirmation, then succeeds and logs
+//    an 'overridden' row (139 superseded Stage 1's silent shadow-log-and-
+//    succeed behaviour for the owner path specifically — see the dedicated
+//    "owner path" tests below for the fuller assertions on this). ─────────
 
-Deno.test("capacity: enabled, capacity=1 — 2nd overlapping staff appointment still succeeds but logs a conflict", async () => {
+Deno.test("capacity: enabled, capacity=1 — 2nd overlapping staff appointment on the owner path requires confirmation, then succeeds and logs 'overridden'", async () => {
   if (!OWNER_TOKEN) return
   await setCapacity(true, 1)
   const since = new Date().toISOString()
 
-  const res1 = await callFn("POST", OWNER_TOKEN, bookingBody({
-    date: "2026-11-12", time: "09:00", staff_profile_id: STAFF_ID,
-  }))
-  assertEquals(res1.status, 201)
-  await res1.json()
-  // First booking is the only one occupying the interval — must not log.
-  assertEquals(await shadowLogCountSince(since), 0)
+  try {
+    const res1 = await callFn("POST", OWNER_TOKEN, bookingBody({
+      date: "2026-11-12", time: "09:00", staff_profile_id: STAFF_ID,
+    }))
+    assertEquals(res1.status, 201)
+    await res1.json()
+    // First booking is the only one occupying the interval — must not log.
+    assertEquals(await shadowLogCountSince(since), 0)
 
-  const res2 = await callFn("POST", OWNER_TOKEN, bookingBody({
-    date: "2026-11-12", time: "09:00", staff_profile_id: STAFF_ID_2, client_id: CLIENT_ID_2,
-  }))
-  // Shadow mode: still succeeds even though it exceeds capacity.
-  assertEquals(res2.status, 201)
-  await res2.json()
+    const res2 = await callFn("POST", OWNER_TOKEN, bookingBody({
+      date: "2026-11-12", time: "09:00", staff_profile_id: STAFF_ID_2, client_id: CLIENT_ID_2,
+    }))
+    assertEquals(res2.status, 409)
+    const body2 = await res2.json()
+    assertEquals(body2.error.code, "SEAT_CAPACITY_CONFIRM_REQUIRED")
 
-  assertEquals(await shadowLogCountSince(since), 1)
+    const res3 = await callFn("POST", OWNER_TOKEN, bookingBody({
+      date: "2026-11-12", time: "09:00", staff_profile_id: STAFF_ID_2, client_id: CLIENT_ID_2,
+      confirm_conflict: true,
+    }))
+    const res3Body = await res3.json().catch(() => null)
+    assertEquals(res3.status, 201, `Expected 201 after confirming, got ${res3.status}: ${JSON.stringify(res3Body)}`)
 
-  await setCapacity(false, null)
+    const rows = await shadowLogRowsSince(since)
+    assertEquals(rows.length, 1)
+    assertEquals(rows[0].outcome, "overridden")
+  } finally {
+    await setCapacity(false, null)
+  }
 })
 
 // ── A two-staff service still consumes exactly one unit of capacity ────────
@@ -313,110 +452,152 @@ Deno.test("capacity: a cancelled appointment does not count toward the overlap t
 
 // ── Reschedule re-evaluates capacity at the NEW interval, not the old one ──
 
-Deno.test("capacity: rescheduling into an already-full interval logs a conflict for the new interval, not the old one", async () => {
+Deno.test("capacity: rescheduling into an already-full interval requires confirmation for the new interval, then succeeds and logs 'overridden'", async () => {
   if (!OWNER_TOKEN) return
   await setCapacity(true, 1)
 
-  // Appointment A occupies 11:00 on staff1.
-  const aRes = await callFn("POST", OWNER_TOKEN, bookingBody({
-    date: "2026-11-11", time: "11:00", staff_profile_id: STAFF_ID,
-  }))
-  assertEquals(aRes.status, 201)
-  await aRes.json()
+  try {
+    // Appointment A occupies 11:00 on staff1.
+    const aRes = await callFn("POST", OWNER_TOKEN, bookingBody({
+      date: "2026-11-11", time: "11:00", staff_profile_id: STAFF_ID,
+    }))
+    assertEquals(aRes.status, 201)
+    await aRes.json()
 
-  // Appointment B occupies a disjoint interval (13:00) on staff2 — fits fine.
-  const bRes = await callFn("POST", OWNER_TOKEN, bookingBody({
-    date: "2026-11-11", time: "13:00", staff_profile_id: STAFF_ID_2, client_id: CLIENT_ID_2,
-  }))
-  assertEquals(bRes.status, 201)
-  const booked = await bRes.json()
+    // Appointment B occupies a disjoint interval (13:00) on staff2 — fits fine.
+    const bRes = await callFn("POST", OWNER_TOKEN, bookingBody({
+      date: "2026-11-11", time: "13:00", staff_profile_id: STAFF_ID_2, client_id: CLIENT_ID_2,
+    }))
+    assertEquals(bRes.status, 201)
+    const booked = await bRes.json()
 
-  const since = new Date().toISOString()
+    const since = new Date().toISOString()
 
-  // Move B into A's interval. The reschedule action always keeps the
-  // appointment's existing staff (staff2 here) — it doesn't accept a
-  // staff_profile_id override — so this stays a different-staff overlap
-  // with no staff-conflict, but now two appointments occupy 11:00 against
-  // capacity=1.
-  const rescheduleRes = await callFn("PATCH", OWNER_TOKEN, {
-    date: "2026-11-11", time: "11:00",
-  }, { action: "reschedule", id: booked.id })
-  assertEquals(rescheduleRes.status, 200)
-  await rescheduleRes.json()
+    // Move B into A's interval. The reschedule action always keeps the
+    // appointment's existing staff (staff2 here) — it doesn't accept a
+    // staff_profile_id override — so this stays a different-staff overlap
+    // with no staff-conflict, but now two appointments would occupy 11:00
+    // against capacity=1.
+    const rescheduleRes = await callFn("PATCH", OWNER_TOKEN, {
+      date: "2026-11-11", time: "11:00",
+    }, { action: "reschedule", id: booked.id })
+    assertEquals(rescheduleRes.status, 409)
+    const rescheduleBody = await rescheduleRes.json()
+    assertEquals(rescheduleBody.error.code, "SEAT_CAPACITY_CONFIRM_REQUIRED")
 
-  assertEquals(await shadowLogCountSince(since), 1)
+    const confirmRes = await callFn("PATCH", OWNER_TOKEN, {
+      date: "2026-11-11", time: "11:00", confirm_conflict: true,
+    }, { action: "reschedule", id: booked.id })
+    const confirmBody = await confirmRes.json().catch(() => null)
+    assertEquals(confirmRes.status, 200, `Expected 200 after confirming, got ${confirmRes.status}: ${JSON.stringify(confirmBody)}`)
 
-  await setCapacity(false, null)
+    const rows = await shadowLogRowsSince(since)
+    assertEquals(rows.length, 1)
+    assertEquals(rows[0].outcome, "overridden")
+  } finally {
+    await setCapacity(false, null)
+  }
 })
 
 // ── Concurrency: two different-staff bookings racing for the last unit of
-//    capacity must serialize through the business-scoped advisory lock —
-//    both still succeed (shadow mode), but exactly one logs a conflict ─────
+//    capacity must still serialize through the business-scoped advisory
+//    lock — on the owner path this now surfaces as one 201 and one 409
+//    (needs confirmation), directly observable via status codes rather than
+//    only via the shadow log, proving the lock serialized the two
+//    concurrent capacity checks instead of both reading "0 in use". ───────
 
-Deno.test("capacity: two concurrent different-staff bookings for the last unit of capacity — both succeed, exactly one logs a conflict", async () => {
+Deno.test("capacity: two concurrent different-staff bookings for the last unit of capacity — exactly one succeeds, the other needs confirmation", async () => {
   if (!OWNER_TOKEN) return
   await setCapacity(true, 1)
-  const since = new Date().toISOString()
 
-  const [res1, res2] = await Promise.all([
-    callFn("POST", OWNER_TOKEN, bookingBody({
-      date: "2026-11-12", time: "16:00", staff_profile_id: STAFF_ID,
-    })),
-    callFn("POST", OWNER_TOKEN, bookingBody({
-      date: "2026-11-12", time: "16:00", staff_profile_id: STAFF_ID_2, client_id: CLIENT_ID_2,
-    })),
-  ])
+  try {
+    const [res1, res2] = await Promise.all([
+      callFn("POST", OWNER_TOKEN, bookingBody({
+        date: "2026-11-12", time: "16:00", staff_profile_id: STAFF_ID,
+      })),
+      callFn("POST", OWNER_TOKEN, bookingBody({
+        date: "2026-11-12", time: "16:00", staff_profile_id: STAFF_ID_2, client_id: CLIENT_ID_2,
+      })),
+    ])
 
-  // Different staff members, same slot — never a SLOT_TAKEN conflict.
-  assertEquals(res1.status, 201, `Expected 201, got ${res1.status}: ${JSON.stringify(await res1.json().catch(() => null))}`)
-  assertEquals(res2.status, 201, `Expected 201, got ${res2.status}: ${JSON.stringify(await res2.json().catch(() => null))}`)
-
-  // Whichever call's transaction committed second saw the other's
-  // already-committed appointment and exceeded capacity=1 — exactly one
-  // shadow row, proving the business-scoped advisory lock serialized the
-  // two concurrent capacity checks instead of both reading "0 in use".
-  assertEquals(await shadowLogCountSince(since), 1)
-
-  await setCapacity(false, null)
+    // Different staff members, same slot — never a staff conflict either way.
+    const statuses = [res1.status, res2.status].sort()
+    assertEquals(
+      statuses,
+      [201, 409],
+      `Expected exactly one 201 and one 409, got ${JSON.stringify([res1.status, res2.status])}: ${
+        JSON.stringify([await res1.json().catch(() => null), await res2.json().catch(() => null)])
+      }`,
+    )
+    await res1.body?.cancel().catch(() => {})
+    await res2.body?.cancel().catch(() => {})
+  } finally {
+    await setCapacity(false, null)
+  }
 })
 
 // ── Stage 2 (137_seat_capacity_enforcement.sql): pilot-enforced businesses
 //    actually reject over-capacity bookings, gated by THREE independent
 //    conditions — seat_capacity_enabled, seat_capacity_enforced, and
 //    business_id present in capacity_enforcement_pilot_businesses. Afrotouch
-//    is seeded into the pilot table by migration 137 itself. ────────────────
+//    is seeded into the pilot table by migration 137 itself.
+//
+// 139_owner_conflict_warn_confirm.sql superseded this behaviour for the
+// OWNER path specifically (it now always warns, regardless of pilot/
+// enforced status — see the "owner path" tests further down) — so pilot
+// enforcement is only observable on the PUBLIC path now. These two tests
+// call check_and_reserve_slot directly with p_allow_confirm omitted
+// (exactly how create_booking_atomic calls it) rather than routing through
+// the owner `appointments` endpoint, which no longer exercises this branch
+// at all. ───────────────────────────────────────────────────────────────
 
-Deno.test("capacity: pilot-enforced business — 2nd overlapping appointment is rejected (409 SEAT_CAPACITY_EXCEEDED), not just logged", async () => {
+Deno.test("capacity: pilot-enforced business — a 2nd overlapping PUBLIC-path check is rejected (SEAT_CAPACITY_EXCEEDED), not just logged", async () => {
   if (!OWNER_TOKEN) return
   await setCapacity(true, 1)
   await setEnforcement(true)
   const since = new Date().toISOString()
 
   try {
+    // Fixture: one appointment occupies the interval (created via the owner
+    // endpoint purely for setup convenience — not itself under test).
     const res1 = await callFn("POST", OWNER_TOKEN, bookingBody({
       date: "2026-11-14", time: "09:00", staff_profile_id: STAFF_ID,
     }))
     assertEquals(res1.status, 201)
-    await res1.json()
+    const created1 = await res1.json()
     assertEquals(await shadowLogCountSince(since), 0)
+    const interval = await getAppointmentInterval(created1.id)
 
-    const res2 = await callFn("POST", OWNER_TOKEN, bookingBody({
-      date: "2026-11-14", time: "09:00", staff_profile_id: STAFF_ID_2, client_id: CLIENT_ID_2,
-    }))
-    assertEquals(res2.status, 409)
-    const body = await res2.json()
-    assertEquals(body.error?.code, "SEAT_CAPACITY_EXCEEDED")
-
-    const rows = await shadowLogRowsSince(since)
-    assertEquals(rows.length, 1)
-    assertEquals(rows[0].outcome, "rejected")
+    // What's actually under test: the public path's own conflict check.
+    const checkRes = await checkAndReserveSlotFn({
+      p_business_id: BUSINESS_ID,
+      p_staff_id: STAFF_ID_2,
+      p_starts_at: interval.starts_at,
+      p_ends_at: interval.ends_at,
+      p_buffer_minutes: 0,
+      p_source: "test_public_path",
+    })
+    if (checkRes.ok) {
+      throw new Error(`Expected the public-path check to raise, got ${checkRes.status}: ${await checkRes.text()}`)
+    }
+    const checkBody = await checkRes.json()
+    if (!String(checkBody.message ?? "").includes("SEAT_CAPACITY_EXCEEDED")) {
+      throw new Error(`Expected SEAT_CAPACITY_EXCEEDED, got ${checkRes.status}: ${JSON.stringify(checkBody)}`)
+    }
+    // Not asserted here: the 'rejected' shadow-log row. check_and_reserve_slot
+    // no longer writes it directly — the INSERT would be rolled back along
+    // with the transaction its RAISE aborts (the same reason 137's
+    // seatCapacityLog.ts moved that write to the edge function layer, run
+    // AFTER the RPC call returns). Calling the RPC directly here bypasses
+    // that layer entirely, so there's nothing to assert on without
+    // reimplementing the edge function's own logging inline.
   } finally {
     await setEnforcement(false)
     await setCapacity(false, null)
   }
 })
 
-Deno.test("capacity: enforced=true but business NOT in the pilot allowlist — still only shadow-logs, never rejects", async () => {
+Deno.test("capacity: enforced=true but business NOT in the pilot allowlist — the PUBLIC path still only shadow-logs, never rejects", async () => {
   if (!OWNER_TOKEN) return
   await setCapacity(true, 1)
   await setEnforcement(true)
@@ -428,16 +609,24 @@ Deno.test("capacity: enforced=true but business NOT in the pilot allowlist — s
       date: "2026-11-15", time: "09:00", staff_profile_id: STAFF_ID,
     }))
     assertEquals(res1.status, 201)
-    await res1.json()
+    const created1 = await res1.json()
+    const interval = await getAppointmentInterval(created1.id)
 
-    const res2 = await callFn("POST", OWNER_TOKEN, bookingBody({
-      date: "2026-11-15", time: "09:00", staff_profile_id: STAFF_ID_2, client_id: CLIENT_ID_2,
-    }))
-    // Not pilot-enforced — succeeds exactly like Stage 1 shadow mode, even
-    // though seat_capacity_enforced is true, because the pilot allowlist
-    // gate is independent of that flag.
-    assertEquals(res2.status, 201)
-    await res2.json()
+    // Not pilot-enforced — the public path's check succeeds (204) exactly
+    // like Stage 1 shadow mode, even though seat_capacity_enforced is true,
+    // because the pilot allowlist gate is independent of that flag.
+    const checkRes = await checkAndReserveSlotFn({
+      p_business_id: BUSINESS_ID,
+      p_staff_id: STAFF_ID_2,
+      p_starts_at: interval.starts_at,
+      p_ends_at: interval.ends_at,
+      p_buffer_minutes: 0,
+      p_source: "test_public_path",
+    })
+    if (!checkRes.ok) {
+      throw new Error(`Expected the public-path check to succeed, got ${checkRes.status}: ${await checkRes.text()}`)
+    }
+    await checkRes.body?.cancel().catch(() => {})
 
     const rows = await shadowLogRowsSince(since)
     assertEquals(rows.length, 1)
@@ -549,4 +738,156 @@ Deno.test("capacity_enforcement_pilot_businesses: the business's own owner can r
   if (!Array.isArray(rows) || rows.length !== 1 || rows[0].business_id !== BUSINESS_ID) {
     throw new Error(`Expected exactly one row for Afrotouch (seeded by migration 137), got: ${JSON.stringify(rows)}`)
   }
+})
+
+// ── 139_owner_conflict_warn_confirm.sql: owner path warns, never blocks ────
+
+Deno.test("capacity: owner path — exceeding the limit returns 409 SEAT_CAPACITY_CONFIRM_REQUIRED, then succeeds with confirm_conflict, logged as 'overridden'", async () => {
+  if (!OWNER_TOKEN) return
+  await setCapacity(true, 1)
+  // Deliberately NOT pilot-enforced (no setEnforcement(true) here) — proves
+  // the owner-path warning is driven by seat_capacity_enabled alone,
+  // independent of seat_capacity_enforced/the pilot allowlist, which
+  // continue to govern only the public hard-block path.
+  const since = new Date().toISOString()
+
+  try {
+    const res1 = await callFn("POST", OWNER_TOKEN, bookingBody({
+      date: "2026-11-16", time: "09:00", staff_profile_id: STAFF_ID,
+    }))
+    assertEquals(res1.status, 201)
+    await res1.json()
+
+    const res2 = await callFn("POST", OWNER_TOKEN, bookingBody({
+      date: "2026-11-16", time: "09:00", staff_profile_id: STAFF_ID_2, client_id: CLIENT_ID_2,
+    }))
+    assertEquals(res2.status, 409)
+    const body2 = await res2.json()
+    assertEquals(body2.error.code, "SEAT_CAPACITY_CONFIRM_REQUIRED")
+    assertEquals(body2.error.details?.conflict_type, "seat_capacity")
+    assertEquals(body2.error.details?.configured_capacity, 1)
+    assertEquals(body2.error.details?.overlapping_count, 1)
+
+    const res3 = await callFn("POST", OWNER_TOKEN, bookingBody({
+      date: "2026-11-16", time: "09:00", staff_profile_id: STAFF_ID_2, client_id: CLIENT_ID_2,
+      confirm_conflict: true,
+    }))
+    const res3Body = await res3.json().catch(() => null)
+    assertEquals(res3.status, 201, `Expected 201 after confirming, got ${res3.status}: ${JSON.stringify(res3Body)}`)
+
+    const rows = await shadowLogRowsSince(since)
+    assertEquals(rows.length, 1)
+    assertEquals(rows[0].outcome, "overridden")
+  } finally {
+    await setCapacity(false, null)
+  }
+})
+
+Deno.test("capacity: owner path — staff conflict is warned, not blocked, and confirming it does not also silently need a second seat-capacity confirm when capacity is fine", async () => {
+  if (!OWNER_TOKEN) return
+  // Capacity disabled entirely — isolates this test to the staff-conflict
+  // half of 139, proving it works independently of the capacity feature.
+  const slot = bookingBody({ date: "2026-11-17", time: "09:00", staff_profile_id: STAFF_ID })
+
+  const res1 = await callFn("POST", OWNER_TOKEN, slot)
+  assertEquals(res1.status, 201)
+  await res1.json()
+
+  const res2 = await callFn("POST", OWNER_TOKEN, { ...slot, client_id: CLIENT_ID_2 })
+  assertEquals(res2.status, 409)
+  const body2 = await res2.json()
+  assertEquals(body2.error.code, "STAFF_CONFLICT_CONFIRM_REQUIRED")
+
+  const res3 = await callFn("POST", OWNER_TOKEN, { ...slot, client_id: CLIENT_ID_2, confirm_conflict: true })
+  const res3Body = await res3.json().catch(() => null)
+  assertEquals(res3.status, 201, `Expected 201 after confirming, got ${res3.status}: ${JSON.stringify(res3Body)}`)
+})
+
+// ── 141_cross_business_conflict_visibility.sql ──────────────────────────────
+// Lives in this file (not a standalone one) for the same reason the
+// get-availability capacity tests do: Deno runs separate test FILES in
+// parallel by default, and creating Afrotouch appointments here would race
+// against every test above that toggles business_settings' shared capacity
+// columns on this same business. Co-locating keeps everything touching
+// Afrotouch's write path sequential.
+
+Deno.test("cross-business conflict: booking a staff member already busy at another business succeeds, forces 'offered', and flags the conflict", async () => {
+  if (!OWNER_TOKEN) return
+  await ensureCrossBusinessStaffFixtures()
+
+  const date = "2026-11-20"
+  const time = "10:00"
+  const durationMinutes = 180 // Knotless Braids
+  const startsAtIso = localWallClockToUtcIso(date, time, "Europe/Tallinn")
+  const endsAtIso = new Date(new Date(startsAtIso).getTime() + durationMinutes * 60_000).toISOString()
+
+  // The staff member already has a confirmed appointment at the OTHER
+  // business, at the exact interval we're about to book them into at
+  // Afrotouch.
+  const foreignApptId = await insertForeignAppointment(startsAtIso, endsAtIso)
+
+  const res = await callFn("POST", OWNER_TOKEN, {
+    business_id: BUSINESS_ID,
+    client_id: CLIENT_ID,
+    service_id: SERVICE_ID,
+    staff_profile_id: XBIZ_AFROTOUCH_STAFF_ID,
+    date, time,
+    duration_minutes: durationMinutes,
+    price: 120,
+    payment_method: "later",
+  })
+  // Not blocked — 140 removed the hard trigger-level guard.
+  const body = await res.json().catch(() => null)
+  assertEquals(res.status, 201, `Expected 201, got ${res.status}: ${JSON.stringify(body)}`)
+
+  const row = await getAppointmentStatusAndConflict(body.id)
+  assertEquals(row.status, "offered")
+  assertEquals(row.cross_business_conflict_appointment_id, foreignApptId)
+
+  // The owner of Afrotouch has no legitimate visibility into the Foreign
+  // Test Salon's schedule — the resolved conflict detail must be scrubbed
+  // from their view, even though the raw column is set.
+  const ownerViewRes = await callFn("GET", OWNER_TOKEN, undefined, { id: body.id })
+  assertEquals(ownerViewRes.status, 200)
+  const ownerView = await ownerViewRes.json()
+  assertEquals(ownerView.cross_business_conflict, null)
+})
+
+Deno.test("cross-business conflict: reassigning to a staff member with no conflict clears the flag", async () => {
+  if (!OWNER_TOKEN) return
+  await ensureCrossBusinessStaffFixtures()
+
+  const date = "2026-11-21"
+  const time = "10:00"
+  const durationMinutes = 180
+  const startsAtIso = localWallClockToUtcIso(date, time, "Europe/Tallinn")
+  const endsAtIso = new Date(new Date(startsAtIso).getTime() + durationMinutes * 60_000).toISOString()
+  await insertForeignAppointment(startsAtIso, endsAtIso)
+
+  const createRes = await callFn("POST", OWNER_TOKEN, {
+    business_id: BUSINESS_ID,
+    client_id: CLIENT_ID,
+    service_id: SERVICE_ID,
+    staff_profile_id: XBIZ_AFROTOUCH_STAFF_ID,
+    date, time,
+    duration_minutes: durationMinutes,
+    price: 120,
+    payment_method: "later",
+  })
+  const created = await createRes.json()
+  assertEquals(createRes.status, 201, `Expected 201, got ${createRes.status}: ${JSON.stringify(created)}`)
+  const beforeReassign = await getAppointmentStatusAndConflict(created.id)
+  assertEquals(beforeReassign.cross_business_conflict_appointment_id !== null, true)
+
+  // Reassign to Fatima (no cross-business link at all) — the stale conflict
+  // reference must be cleared, not just left dangling from the old assignment.
+  const assignRes = await callFn("PATCH", OWNER_TOKEN, { staff_profile_id: STAFF_ID }, {
+    action: "assign-staff",
+    id: created.id,
+  })
+  const assignBody = await assignRes.json().catch(() => null)
+  assertEquals(assignRes.status, 200, `Expected 200, got ${assignRes.status}: ${JSON.stringify(assignBody)}`)
+
+  const afterReassign = await getAppointmentStatusAndConflict(created.id)
+  assertEquals(afterReassign.cross_business_conflict_appointment_id, null)
 })

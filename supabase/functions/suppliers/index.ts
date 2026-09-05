@@ -4,6 +4,15 @@ import { badRequest, notFound, serverError } from "../_shared/errors.ts";
 import { withLogging } from "../_shared/logger.ts";
 import { requireOwnerOrManagerCtx, verifyAuth, verifyBusinessMember } from "../_shared/auth.ts";
 
+// Local Supabase (Docker/kong) signs storage URLs with an internal hostname
+// the browser can't reach — rewrite to 127.0.0.1 outside of production.
+function rewriteLocalUrl(u: string): string {
+  const internalUrl = Deno.env.get("SUPABASE_URL") ?? "";
+  const isLocal = internalUrl.includes("kong") || internalUrl.includes("supabase_");
+  if (!isLocal) return u;
+  return u.replace(/^https?:\/\/[^/]+(?=\/storage\/)/, "http://127.0.0.1:54321");
+}
+
 /**
  * /suppliers — suppliers CRUD + supplier order management
  *
@@ -11,11 +20,17 @@ import { requireOwnerOrManagerCtx, verifyAuth, verifyBusinessMember } from "../_
  * GET  ?id=                                                 → single supplier detail
  * GET  ?action=orders&business_id=&[supplier_id=&status=&page=&limit=]
  *                                                           → paginated supplier orders
+ * GET  ?action=documents&supplier_id=                       → supplier's documents & notes
  * POST                body={business_id, ...fields}        → create supplier
  * POST ?action=order  body={business_id, ...order}         → create supplier order
+ * POST ?action=document body={business_id, supplier_id, kind, ...}
+ *                                                           → add a document or note
  * PATCH ?id=          body={...fields}                     → update supplier
  * PATCH ?action=deactivate&id=                             → soft-delete supplier
- * PATCH ?action=order-status&id=   body={status}           → update order status
+ * PATCH ?action=order-status&id=   body={status, due_date?} → update order status
+ * PATCH ?action=order-payment&id=  body={paid_at?, due_date?}
+ *                                                           → record/clear order payment
+ * DELETE ?action=document&id=                               → delete a document or note
  */
 Deno.serve(withLogging("suppliers", async (req: Request) => {
   const corsResp = handleCors(req);
@@ -64,6 +79,40 @@ Deno.serve(withLogging("suppliers", async (req: Request) => {
         return jsonCors(req, { orders: data ?? [], total: count ?? 0 });
       }
 
+      if (action === "documents") {
+        const supplierId = url.searchParams.get("supplier_id");
+        if (!supplierId) return badRequest("supplier_id is required");
+
+        const { data: supplierRow } = await supabaseAdmin.from("suppliers").select("business_id").eq("id", supplierId).single();
+        if (!supplierRow) return notFound("Supplier not found");
+
+        try {
+          const user = await verifyAuth(req);
+          await verifyBusinessMember(user.id, (supplierRow as Record<string, unknown>).business_id as string);
+        } catch (e) {
+          if (e instanceof Response) return e;
+          throw e;
+        }
+
+        const { data, error } = await supabaseAdmin
+          .from("supplier_documents")
+          .select("*")
+          .eq("supplier_id", supplierId)
+          .order("created_at", { ascending: false });
+
+        if (error) return serverError(error.message);
+
+        const documents = await Promise.all((data ?? []).map(async (row: Record<string, unknown>) => {
+          if (!row.file_path) return { ...row, file_url: null };
+          const { data: signed } = await supabaseAdmin.storage
+            .from("supplier-documents")
+            .createSignedUrl(row.file_path as string, 3600);
+          return { ...row, file_url: signed?.signedUrl ? rewriteLocalUrl(signed.signedUrl) : null };
+        }));
+
+        return jsonCors(req, { documents });
+      }
+
       if (id) {
         const { data, error } = await supabaseAdmin
           .from("suppliers")
@@ -81,26 +130,7 @@ Deno.serve(withLogging("suppliers", async (req: Request) => {
           throw e;
         }
 
-        const sixMonthsAgo = new Date();
-        sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
-
-        const [expRows, orderRows, spendRows] = await Promise.all([
-          supabaseAdmin.from("expenses").select("id, description, amount, date, category").eq("supplier_id", id).order("date", { ascending: false }).limit(10),
-          supabaseAdmin.from("supplier_orders").select("id, reference, status, total_amount, ordered_at, expected_at").eq("supplier_id", id).in("status", ["draft", "ordered"]).order("created_at", { ascending: false }),
-          supabaseAdmin.from("expenses").select("amount, date").eq("supplier_id", id).gte("date", sixMonthsAgo.toISOString().slice(0, 10)),
-        ]);
-
-        const monthlyMap = new Map<string, number>();
-        for (const row of spendRows.data ?? []) {
-          const month = (row as Record<string, unknown>).date as string;
-          const monthKey = month.slice(0, 7);
-          monthlyMap.set(monthKey, (monthlyMap.get(monthKey) ?? 0) + ((row as Record<string, unknown>).amount as number));
-        }
-        const monthly_spend = Array.from(monthlyMap.entries())
-          .map(([month, amount]) => ({ month, amount }))
-          .sort((a, b) => a.month.localeCompare(b.month));
-
-        return jsonCors(req, { ...data, recent_expenses: expRows.data ?? [], open_orders: orderRows.data ?? [], monthly_spend });
+        return jsonCors(req, data);
       }
 
       const businessId = url.searchParams.get("business_id");
@@ -122,7 +152,7 @@ Deno.serve(withLogging("suppliers", async (req: Request) => {
       // deno-lint-ignore no-explicit-any
       let query: any = supabaseAdmin
         .from("suppliers")
-        .select(`*, expenses:expenses(amount), orders:supplier_orders(id, status)`, { count: "exact" })
+        .select(`*, orders:supplier_orders(id, status, total_amount)`, { count: "exact" })
         .eq("business_id", businessId)
         .order("name", { ascending: true });
 
@@ -136,11 +166,14 @@ Deno.serve(withLogging("suppliers", async (req: Request) => {
       if (error) return serverError(error.message);
 
       const suppliers = (data ?? []).map((row: Record<string, unknown>) => {
-        const expenses = (row.expenses as { amount: number }[]) ?? [];
-        const orders = (row.orders as { id: string; status: string }[]) ?? [];
-        const total_spent = expenses.reduce((sum, e) => sum + e.amount, 0);
+        const orders = (row.orders as { id: string; status: string; total_amount: number }[]) ?? [];
+        // Total spend is what's actually been received from this supplier —
+        // not the disconnected `expenses` ledger table (receipt-scan/bank
+        // imports), which reads as zero for suppliers only ever ordered
+        // from via formal purchase orders.
+        const total_spent = orders.filter((o) => o.status === "received").reduce((sum, o) => sum + o.total_amount, 0);
         const open_orders = orders.filter((o) => o.status === "draft" || o.status === "ordered").length;
-        const { expenses: _e, orders: _o, ...supplier } = row;
+        const { orders: _o, ...supplier } = row;
         return { ...supplier, total_spent, open_orders };
       });
 
@@ -167,6 +200,7 @@ Deno.serve(withLogging("suppliers", async (req: Request) => {
             notes: body.notes ?? null,
             ordered_at: body.ordered_at ?? null,
             expected_at: body.expected_at ?? null,
+            due_date: body.due_date ?? null,
             total_amount,
             invoice_photo_url: body.invoice_photo_url ?? null,
             created_by: ctx.userId,
@@ -196,6 +230,61 @@ Deno.serve(withLogging("suppliers", async (req: Request) => {
 
         if (fetchErr) return serverError(fetchErr.message);
         return jsonCors(req, full, 201);
+      }
+
+      if (action === "document") {
+        const ctx = await requireOwnerOrManagerCtx(req, body.business_id as string);
+        if (ctx instanceof Response) return ctx;
+
+        const supplierId = body.supplier_id as string;
+        const kind = body.kind as string;
+        if (!supplierId) return badRequest("supplier_id is required");
+        if (kind !== "document" && kind !== "note") return badRequest("kind must be 'document' or 'note'");
+
+        let filePath: string | null = null;
+        let fileSize: number | null = null;
+        let mimeType: string | null = null;
+
+        if (kind === "document") {
+          const fileBase64 = body.file_base64 as string | undefined;
+          mimeType = (body.mime_type as string | undefined) ?? "application/octet-stream";
+          if (!fileBase64) return badRequest("file_base64 is required for a document");
+
+          const ext = mimeType.split("/")[1]?.replace("jpeg", "jpg") ?? "bin";
+          filePath = `${ctx.businessId}/${supplierId}/${crypto.randomUUID()}.${ext}`;
+          const fileBytes = Uint8Array.from(atob(fileBase64), (c) => c.charCodeAt(0));
+          fileSize = fileBytes.byteLength;
+
+          const { error: uploadErr } = await supabaseAdmin.storage
+            .from("supplier-documents")
+            .upload(filePath, fileBytes, { contentType: mimeType, upsert: false });
+          if (uploadErr) return serverError(`Failed to upload document: ${uploadErr.message}`);
+        }
+
+        const { data, error } = await supabaseAdmin
+          .from("supplier_documents")
+          .insert({
+            business_id: ctx.businessId,
+            supplier_id: supplierId,
+            kind,
+            body: body.body ?? null,
+            file_path: filePath,
+            file_size: fileSize,
+            mime_type: mimeType,
+            created_by: ctx.userId,
+          })
+          .select()
+          .single();
+
+        if (error) return serverError(error.message);
+
+        let fileUrl: string | null = null;
+        if (filePath) {
+          const { data: signed } = await supabaseAdmin.storage.from("supplier-documents").createSignedUrl(filePath, 3600);
+          fileUrl = signed?.signedUrl ? rewriteLocalUrl(signed.signedUrl) : null;
+        }
+
+        return jsonCors(req, { ...data, file_url: fileUrl }, 201);
       }
 
       // Create supplier
@@ -230,6 +319,7 @@ Deno.serve(withLogging("suppliers", async (req: Request) => {
         const update: Record<string, unknown> = { status, updated_at: new Date().toISOString() };
         if (status === "received") update.received_at = new Date().toISOString();
         if (body.invoice_photo_url !== undefined) update.invoice_photo_url = body.invoice_photo_url ?? null;
+        if (body.due_date !== undefined) update.due_date = body.due_date ?? null;
 
         const { data, error } = await supabaseAdmin
           .from("supplier_orders")
@@ -340,6 +430,30 @@ Deno.serve(withLogging("suppliers", async (req: Request) => {
         return jsonCors(req, data);
       }
 
+      if (action === "order-payment") {
+        const body = await req.json() as Record<string, unknown>;
+
+        const { data: existing } = await supabaseAdmin.from("supplier_orders").select("business_id").eq("id", id).single();
+        if (!existing) return notFound("Order not found");
+
+        const ctx = await requireOwnerOrManagerCtx(req, (existing as Record<string, unknown>).business_id as string);
+        if (ctx instanceof Response) return ctx;
+
+        const update: Record<string, unknown> = { updated_at: new Date().toISOString() };
+        if (body.paid_at !== undefined) update.paid_at = body.paid_at ?? null;
+        if (body.due_date !== undefined) update.due_date = body.due_date ?? null;
+
+        const { data, error } = await supabaseAdmin
+          .from("supplier_orders")
+          .update(update)
+          .eq("id", id)
+          .select(`*, items:supplier_order_items(*), supplier:suppliers(name)`)
+          .single();
+
+        if (error) return serverError(error.message);
+        return jsonCors(req, data);
+      }
+
       if (action === "deactivate") {
         const { data: existing } = await supabaseAdmin.from("suppliers").select("business_id").eq("id", id).single();
         if (!existing) return notFound("Supplier not found");
@@ -372,6 +486,28 @@ Deno.serve(withLogging("suppliers", async (req: Request) => {
 
       if (error) return serverError(error.message);
       return jsonCors(req, data);
+    }
+
+    // ── DELETE ─────────────────────────────────────────────────────────────
+    if (method === "DELETE") {
+      if (action === "document") {
+        if (!id) return badRequest("id is required");
+
+        const { data: existing } = await supabaseAdmin.from("supplier_documents").select("business_id, file_path").eq("id", id).single();
+        if (!existing) return notFound("Document not found");
+
+        const ctx = await requireOwnerOrManagerCtx(req, (existing as Record<string, unknown>).business_id as string);
+        if (ctx instanceof Response) return ctx;
+
+        const filePath = (existing as Record<string, unknown>).file_path as string | null;
+        if (filePath) {
+          await supabaseAdmin.storage.from("supplier-documents").remove([filePath]);
+        }
+
+        const { error } = await supabaseAdmin.from("supplier_documents").delete().eq("id", id);
+        if (error) return serverError(error.message);
+        return jsonCors(req, { ok: true });
+      }
     }
 
     return badRequest("Method not allowed");

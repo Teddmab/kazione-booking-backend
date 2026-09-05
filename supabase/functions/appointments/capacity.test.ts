@@ -550,3 +550,66 @@ Deno.test("capacity_enforcement_pilot_businesses: the business's own owner can r
     throw new Error(`Expected exactly one row for Afrotouch (seeded by migration 137), got: ${JSON.stringify(rows)}`)
   }
 })
+
+// ── 139_owner_conflict_warn_confirm.sql: owner path warns, never blocks ────
+
+Deno.test("capacity: owner path — exceeding the limit returns 409 SEAT_CAPACITY_CONFIRM_REQUIRED, then succeeds with confirm_conflict, logged as 'overridden'", async () => {
+  if (!OWNER_TOKEN) return
+  await setCapacity(true, 1)
+  // Deliberately NOT pilot-enforced (no setEnforcement(true) here) — proves
+  // the owner-path warning is driven by seat_capacity_enabled alone,
+  // independent of seat_capacity_enforced/the pilot allowlist, which
+  // continue to govern only the public hard-block path.
+  const since = new Date().toISOString()
+
+  try {
+    const res1 = await callFn("POST", OWNER_TOKEN, bookingBody({
+      date: "2026-11-16", time: "09:00", staff_profile_id: STAFF_ID,
+    }))
+    assertEquals(res1.status, 201)
+    await res1.json()
+
+    const res2 = await callFn("POST", OWNER_TOKEN, bookingBody({
+      date: "2026-11-16", time: "09:00", staff_profile_id: STAFF_ID_2, client_id: CLIENT_ID_2,
+    }))
+    assertEquals(res2.status, 409)
+    const body2 = await res2.json()
+    assertEquals(body2.error.code, "SEAT_CAPACITY_CONFIRM_REQUIRED")
+    assertEquals(body2.error.details?.conflict_type, "seat_capacity")
+    assertEquals(body2.error.details?.configured_capacity, 1)
+    assertEquals(body2.error.details?.overlapping_count, 1)
+
+    const res3 = await callFn("POST", OWNER_TOKEN, bookingBody({
+      date: "2026-11-16", time: "09:00", staff_profile_id: STAFF_ID_2, client_id: CLIENT_ID_2,
+      confirm_conflict: true,
+    }))
+    assertEquals(res3.status, 201, `Expected 201 after confirming, got ${res3.status}: ${JSON.stringify(await res3.json().catch(() => null))}`)
+    await res3.json()
+
+    const rows = await shadowLogRowsSince(since)
+    assertEquals(rows.length, 1)
+    assertEquals(rows[0].outcome, "overridden")
+  } finally {
+    await setCapacity(false, null)
+  }
+})
+
+Deno.test("capacity: owner path — staff conflict is warned, not blocked, and confirming it does not also silently need a second seat-capacity confirm when capacity is fine", async () => {
+  if (!OWNER_TOKEN) return
+  // Capacity disabled entirely — isolates this test to the staff-conflict
+  // half of 139, proving it works independently of the capacity feature.
+  const slot = bookingBody({ date: "2026-11-17", time: "09:00", staff_profile_id: STAFF_ID })
+
+  const res1 = await callFn("POST", OWNER_TOKEN, slot)
+  assertEquals(res1.status, 201)
+  await res1.json()
+
+  const res2 = await callFn("POST", OWNER_TOKEN, { ...slot, client_id: CLIENT_ID_2 })
+  assertEquals(res2.status, 409)
+  const body2 = await res2.json()
+  assertEquals(body2.error.code, "STAFF_CONFLICT_CONFIRM_REQUIRED")
+
+  const res3 = await callFn("POST", OWNER_TOKEN, { ...slot, client_id: CLIENT_ID_2, confirm_conflict: true })
+  assertEquals(res3.status, 201, `Expected 201 after confirming, got ${res3.status}: ${JSON.stringify(await res3.json().catch(() => null))}`)
+  await res3.json()
+})

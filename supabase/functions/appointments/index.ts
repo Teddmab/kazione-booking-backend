@@ -3,8 +3,7 @@ import { corsHeadersFor, handleCors, jsonCors } from "../_shared/cors.ts";
 import { badRequest, conflict, forbidden, notFound, serverError } from "../_shared/errors.ts";
 import { withLogging } from "../_shared/logger.ts";
 import { requireOwnerOrManagerCtx, requireOwnerManagerOrSupervisorCtx, verifyAuth, verifyBusinessMember } from "../_shared/auth.ts";
-import { isSeatCapacityExceededError, isSlotTakenError } from "../_shared/slotConflict.ts";
-import { logSeatCapacityRejection } from "../_shared/seatCapacityLog.ts";
+import { buildConflictConfirmation } from "../_shared/slotConflict.ts";
 import {
   bookingCancellationEmail,
   bookingReceivedOwnerEmail,
@@ -791,16 +790,14 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
           p_notes: body.notes ?? null,
           p_internal_notes: body.internal_notes ?? null,
           p_status: body.staff_profile_id ? "confirmed" : "pending",
+          p_confirm_conflict: body.confirm_conflict === true,
         },
       );
 
       if (atomicErr) {
-        if (isSeatCapacityExceededError(atomicErr)) {
-          await logSeatCapacityRejection(atomicErr);
-          return conflict("SEAT_CAPACITY_EXCEEDED", "This time is fully booked — it would exceed this business's configured seat capacity");
-        }
-        if (isSlotTakenError(atomicErr)) {
-          return conflict("SLOT_TAKEN", "This staff member already has a conflicting appointment at that time");
+        const confirmation = buildConflictConfirmation(atomicErr);
+        if (confirmation) {
+          return conflict(confirmation.code, confirmation.message, confirmation.details);
         }
         console.error("create_manual_appointment_atomic error:", JSON.stringify(atomicErr));
         return serverError(atomicErr.message);
@@ -978,15 +975,13 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
         p_appointment_id: id,
         p_staff_id: staffProfileId,
         p_new_status: newStatus,
+        p_confirm_conflict: body.confirm_conflict === true,
       });
 
       if (assignErr) {
-        if (isSeatCapacityExceededError(assignErr)) {
-          await logSeatCapacityRejection(assignErr);
-          return conflict("SEAT_CAPACITY_EXCEEDED", "This time is fully booked — it would exceed this business's configured seat capacity");
-        }
-        if (isSlotTakenError(assignErr)) {
-          return conflict("SLOT_TAKEN", "This staff member already has a conflicting appointment at that time");
+        const confirmation = buildConflictConfirmation(assignErr);
+        if (confirmation) {
+          return conflict(confirmation.code, confirmation.message, confirmation.details);
         }
         console.error("assign_staff_atomic error:", JSON.stringify(assignErr));
         return serverError(assignErr.message);
@@ -1120,15 +1115,13 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
         p_appointment_id: id,
         p_staff_id_2: staffProfileId2,
         p_commission_split_pct: splitPct2,
+        p_confirm_conflict: body.confirm_conflict === true,
       });
 
       if (assign2Err) {
-        if (isSeatCapacityExceededError(assign2Err)) {
-          await logSeatCapacityRejection(assign2Err);
-          return conflict("SEAT_CAPACITY_EXCEEDED", "This time is fully booked — it would exceed this business's configured seat capacity");
-        }
-        if (isSlotTakenError(assign2Err)) {
-          return conflict("SLOT_TAKEN", "This staff member already has a conflicting appointment at that time");
+        const confirmation = buildConflictConfirmation(assign2Err);
+        if (confirmation) {
+          return conflict(confirmation.code, confirmation.message, confirmation.details);
         }
         console.error("assign_staff_2_atomic error:", JSON.stringify(assign2Err));
         return serverError(assign2Err.message);
@@ -1494,15 +1487,14 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
         p_new_starts_at: startsAt.toISOString(),
         p_new_ends_at: endsAt.toISOString(),
         p_new_staff_id: ex.staff_profile_id ?? null,
+        p_confirm_conflict: body.confirm_conflict === true,
+        p_allow_confirm: true,
       });
 
       if (updateErr) {
-        if (isSeatCapacityExceededError(updateErr)) {
-          await logSeatCapacityRejection(updateErr);
-          return conflict("SEAT_CAPACITY_EXCEEDED", "This time is fully booked — it would exceed this business's configured seat capacity");
-        }
-        if (isSlotTakenError(updateErr)) {
-          return conflict("SLOT_TAKEN", "The requested slot was just booked by someone else");
+        const confirmation = buildConflictConfirmation(updateErr);
+        if (confirmation) {
+          return conflict(confirmation.code, confirmation.message, confirmation.details);
         }
         return serverError(updateErr.message);
       }
@@ -1645,15 +1637,13 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
         p_new_duration_minutes: svc.duration_minutes,
         p_new_buffer_minutes: svc.buffer_minutes ?? 0,
         p_new_price: svc.price,
+        p_confirm_conflict: body.confirm_conflict === true,
       });
 
       if (changeErr) {
-        if (isSeatCapacityExceededError(changeErr)) {
-          await logSeatCapacityRejection(changeErr);
-          return conflict("SEAT_CAPACITY_EXCEEDED", "This time is fully booked — it would exceed this business's configured seat capacity");
-        }
-        if (isSlotTakenError(changeErr)) {
-          return conflict("SLOT_TAKEN", "The assigned staff member already has a conflicting appointment at the new service's duration");
+        const confirmation = buildConflictConfirmation(changeErr);
+        if (confirmation) {
+          return conflict(confirmation.code, confirmation.message, confirmation.details);
         }
         console.error("change_appointment_service_atomic error:", JSON.stringify(changeErr));
         return serverError(changeErr.message);

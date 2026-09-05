@@ -91,7 +91,11 @@ Deno.test("appointments: POST valid manual booking → 201", async () => {
   if (!body.id) throw new Error("Expected the created appointment's id in the response")
 })
 
-Deno.test("appointments: POST manual booking — same staff/slot conflict → 409", async () => {
+// 139_owner_conflict_warn_confirm.sql: the owner's own tools no longer
+// hard-block a staff conflict — they get a 409 asking for confirmation,
+// and the SAME request resubmitted with confirm_conflict:true succeeds
+// despite the overlap (an explicit, deliberate override, not a bug).
+Deno.test("appointments: POST manual booking — same staff/slot conflict → 409 STAFF_CONFLICT_CONFIRM_REQUIRED, then succeeds with confirm_conflict", async () => {
   if (!OWNER_TOKEN) return
   const slot = manualBookingBody({ date: "2026-10-05", time: "10:00" })
 
@@ -102,7 +106,12 @@ Deno.test("appointments: POST manual booking — same staff/slot conflict → 40
   const res2 = await callFn("POST", OWNER_TOKEN, { ...slot, client_id: CLIENT_ID_2 })
   assertEquals(res2.status, 409)
   const body2 = await res2.json()
-  assertEquals(body2.error.code, "SLOT_TAKEN")
+  assertEquals(body2.error.code, "STAFF_CONFLICT_CONFIRM_REQUIRED")
+  assertEquals(body2.error.details?.conflict_type, "staff")
+
+  const res3 = await callFn("POST", OWNER_TOKEN, { ...slot, client_id: CLIENT_ID_2, confirm_conflict: true })
+  assertEquals(res3.status, 201, `Expected 201 after confirming, got ${res3.status}: ${JSON.stringify(await res3.json().catch(() => null))}`)
+  await res3.json()
 })
 
 Deno.test("appointments: POST manual booking — concurrent same slot → exactly one 201, one 409", async () => {
@@ -151,7 +160,14 @@ Deno.test("appointments: PATCH assign-staff — target staff has a conflict → 
   })
   assertEquals(assignRes.status, 409)
   const assignBody = await assignRes.json()
-  assertEquals(assignBody.error.code, "SLOT_TAKEN")
+  assertEquals(assignBody.error.code, "STAFF_CONFLICT_CONFIRM_REQUIRED")
+
+  const confirmRes = await callFn("PATCH", OWNER_TOKEN, { staff_profile_id: STAFF_ID_2, confirm_conflict: true }, {
+    action: "assign-staff",
+    id: target.id,
+  })
+  assertEquals(confirmRes.status, 200, `Expected 200 after confirming, got ${confirmRes.status}: ${JSON.stringify(await confirmRes.json().catch(() => null))}`)
+  await confirmRes.json()
 })
 
 // ── S58: secondary (dual-staff) assignment re-checks the target's schedule ─
@@ -186,7 +202,14 @@ Deno.test("appointments: PATCH assign-staff-2 — target staff has a conflict �
   })
   assertEquals(assign2Res.status, 409)
   const assign2Body = await assign2Res.json()
-  assertEquals(assign2Body.error.code, "SLOT_TAKEN")
+  assertEquals(assign2Body.error.code, "STAFF_CONFLICT_CONFIRM_REQUIRED")
+
+  const confirm2Res = await callFn("PATCH", OWNER_TOKEN, { staff_profile_id_2: STAFF_ID_2, confirm_conflict: true }, {
+    action: "assign-staff-2",
+    id: target.id,
+  })
+  assertEquals(confirm2Res.status, 200, `Expected 200 after confirming, got ${confirm2Res.status}: ${JSON.stringify(await confirm2Res.json().catch(() => null))}`)
+  await confirm2Res.json()
 })
 
 Deno.test("appointments: PATCH assign-staff-2 — clearing the assignment never conflicts", async () => {
@@ -317,7 +340,7 @@ Deno.test("appointments: GET ?action=notification-log without business membershi
 // lock as reschedule-booking/create-booking (previously a plain .update()
 // with no re-check — a staff member could be silently double-booked).
 
-Deno.test("appointments: PATCH ?action=reschedule — target slot has a conflict → 409 SLOT_TAKEN", async () => {
+Deno.test("appointments: PATCH ?action=reschedule — target slot has a conflict → 409 STAFF_CONFLICT_CONFIRM_REQUIRED, then succeeds with confirm_conflict", async () => {
   if (!OWNER_TOKEN) return
 
   // Blocker: Fatima already booked at 10:00 on 2026-10-09.
@@ -344,7 +367,14 @@ Deno.test("appointments: PATCH ?action=reschedule — target slot has a conflict
   })
   assertEquals(rescheduleRes.status, 409)
   const body = await rescheduleRes.json()
-  assertEquals(body.error.code, "SLOT_TAKEN")
+  assertEquals(body.error.code, "STAFF_CONFLICT_CONFIRM_REQUIRED")
+
+  const confirmRes = await callFn("PATCH", OWNER_TOKEN, { date: "2026-10-09", time: "10:00", confirm_conflict: true }, {
+    action: "reschedule",
+    id: target.id,
+  })
+  assertEquals(confirmRes.status, 200, `Expected 200 after confirming, got ${confirmRes.status}: ${JSON.stringify(await confirmRes.json().catch(() => null))}`)
+  await confirmRes.json()
 })
 
 Deno.test("appointments: PATCH ?action=reschedule — concurrent reschedule into the same free slot → exactly one 200, one 409", async () => {

@@ -97,6 +97,49 @@ async function shadowLogCountSince(sinceIso: string): Promise<number> {
   return Array.isArray(rows) ? rows.length : 0
 }
 
+async function setEnforcement(enforced: boolean) {
+  const res = await fetch(`${REST_BASE}/business_settings?business_id=eq.${BUSINESS_ID}`, {
+    method: "PATCH",
+    headers: SERVICE_HEADERS,
+    body: JSON.stringify({ seat_capacity_enforced: enforced }),
+  })
+  if (res.status !== 200 && res.status !== 204) {
+    throw new Error(`Failed to set business_settings enforcement: ${res.status} ${await res.text()}`)
+  }
+  await res.body?.cancel().catch(() => {})
+}
+
+async function removeFromPilot(businessId: string) {
+  const res = await fetch(`${REST_BASE}/capacity_enforcement_pilot_businesses?business_id=eq.${businessId}`, {
+    method: "DELETE",
+    headers: SERVICE_HEADERS,
+  })
+  await res.body?.cancel().catch(() => {})
+}
+
+async function addToPilot(businessId: string) {
+  const res = await fetch(`${REST_BASE}/capacity_enforcement_pilot_businesses`, {
+    method: "POST",
+    headers: { ...SERVICE_HEADERS, Prefer: "return=representation,resolution=merge-duplicates" },
+    body: JSON.stringify({ business_id: businessId }),
+  })
+  if (res.status !== 201 && res.status !== 200) {
+    throw new Error(`Failed to add to pilot allowlist: ${res.status} ${await res.text()}`)
+  }
+  await res.body?.cancel().catch(() => {})
+}
+
+// Same isolation approach as shadowLogCountSince, but returns each row's
+// `outcome` so Stage 2 tests can distinguish 'logged_only' from 'rejected'.
+async function shadowLogRowsSince(sinceIso: string): Promise<{ id: string; outcome: string }[]> {
+  const res = await fetch(
+    `${REST_BASE}/appointment_capacity_shadow_log?business_id=eq.${BUSINESS_ID}&created_at=gte.${encodeURIComponent(sinceIso)}&select=id,outcome`,
+    { headers: { apikey: SERVICE_KEY, Authorization: `Bearer ${SERVICE_KEY}` } },
+  )
+  const rows = await res.json()
+  return Array.isArray(rows) ? rows : []
+}
+
 async function cancelAppointment(id: string) {
   const res = await fetch(`${REST_BASE}/appointments?id=eq.${id}`, {
     method: "PATCH",
@@ -307,4 +350,75 @@ Deno.test("capacity: two concurrent different-staff bookings for the last unit o
   assertEquals(await shadowLogCountSince(since), 1)
 
   await setCapacity(false, null)
+})
+
+// ── Stage 2 (137_seat_capacity_enforcement.sql): pilot-enforced businesses
+//    actually reject over-capacity bookings, gated by THREE independent
+//    conditions — seat_capacity_enabled, seat_capacity_enforced, and
+//    business_id present in capacity_enforcement_pilot_businesses. Afrotouch
+//    is seeded into the pilot table by migration 137 itself. ────────────────
+
+Deno.test("capacity: pilot-enforced business — 2nd overlapping appointment is rejected (409 SEAT_CAPACITY_EXCEEDED), not just logged", async () => {
+  if (!OWNER_TOKEN) return
+  await setCapacity(true, 1)
+  await setEnforcement(true)
+  const since = new Date().toISOString()
+
+  try {
+    const res1 = await callFn("POST", OWNER_TOKEN, bookingBody({
+      date: "2026-11-14", time: "09:00", staff_profile_id: STAFF_ID,
+    }))
+    assertEquals(res1.status, 201)
+    await res1.json()
+    assertEquals(await shadowLogCountSince(since), 0)
+
+    const res2 = await callFn("POST", OWNER_TOKEN, bookingBody({
+      date: "2026-11-14", time: "09:00", staff_profile_id: STAFF_ID_2, client_id: CLIENT_ID_2,
+    }))
+    assertEquals(res2.status, 409)
+    const body = await res2.json()
+    assertEquals(body.error?.code, "SEAT_CAPACITY_EXCEEDED")
+
+    const rows = await shadowLogRowsSince(since)
+    assertEquals(rows.length, 1)
+    assertEquals(rows[0].outcome, "rejected")
+  } finally {
+    await setEnforcement(false)
+    await setCapacity(false, null)
+  }
+})
+
+Deno.test("capacity: enforced=true but business NOT in the pilot allowlist — still only shadow-logs, never rejects", async () => {
+  if (!OWNER_TOKEN) return
+  await setCapacity(true, 1)
+  await setEnforcement(true)
+  await removeFromPilot(BUSINESS_ID)
+  const since = new Date().toISOString()
+
+  try {
+    const res1 = await callFn("POST", OWNER_TOKEN, bookingBody({
+      date: "2026-11-15", time: "09:00", staff_profile_id: STAFF_ID,
+    }))
+    assertEquals(res1.status, 201)
+    await res1.json()
+
+    const res2 = await callFn("POST", OWNER_TOKEN, bookingBody({
+      date: "2026-11-15", time: "09:00", staff_profile_id: STAFF_ID_2, client_id: CLIENT_ID_2,
+    }))
+    // Not pilot-enforced — succeeds exactly like Stage 1 shadow mode, even
+    // though seat_capacity_enforced is true, because the pilot allowlist
+    // gate is independent of that flag.
+    assertEquals(res2.status, 201)
+    await res2.json()
+
+    const rows = await shadowLogRowsSince(since)
+    assertEquals(rows.length, 1)
+    assertEquals(rows[0].outcome, "logged_only")
+  } finally {
+    // Restore pilot membership — migration 137 seeds this row and other
+    // tests in this file (and get-availability's capacity tests) assume it.
+    await addToPilot(BUSINESS_ID)
+    await setEnforcement(false)
+    await setCapacity(false, null)
+  }
 })

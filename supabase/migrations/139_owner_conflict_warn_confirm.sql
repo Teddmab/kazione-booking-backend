@@ -88,6 +88,15 @@ COMMENT ON COLUMN appointment_capacity_shadow_log.outcome IS
   'proceed anyway (139).';
 
 -- ── 2. check_and_reserve_slot: warn-then-confirm for owner-path callers ────
+-- CREATE OR REPLACE only replaces a function whose full argument-TYPE list
+-- is unchanged — adding parameters (even defaulted ones) makes Postgres
+-- create a second, distinct overload instead of replacing the original,
+-- which then makes every existing 7-arg call ambiguous between the two.
+-- This codebase already has this exact lesson learned repeatedly for
+-- get_available_slots (020/027/042/049/089) — drop every prior signature
+-- of each function this migration changes before redefining it.
+DROP FUNCTION IF EXISTS check_and_reserve_slot(uuid, uuid, timestamptz, timestamptz, int, uuid, text);
+
 CREATE OR REPLACE FUNCTION check_and_reserve_slot(
   p_business_id             uuid,
   p_staff_id                uuid,
@@ -248,6 +257,11 @@ $$;
 -- ── 3. create_manual_appointment_atomic: opt into warn-then-confirm ────────
 -- Only new parameter is p_confirm_conflict (trailing, defaulted) — every
 -- other parameter and the insert body below are unchanged from 137.
+DROP FUNCTION IF EXISTS create_manual_appointment_atomic(
+  uuid, uuid, uuid, uuid, timestamptz, timestamptz, int, int, numeric, numeric,
+  text, text, boolean, text, text, text
+);
+
 CREATE OR REPLACE FUNCTION create_manual_appointment_atomic(
   p_business_id       uuid,
   p_client_id         uuid,
@@ -296,6 +310,8 @@ END;
 $$;
 
 -- ── 4. assign_staff_atomic: opt into warn-then-confirm ──────────────────────
+DROP FUNCTION IF EXISTS assign_staff_atomic(uuid, uuid, text);
+
 CREATE OR REPLACE FUNCTION assign_staff_atomic(
   p_appointment_id    uuid,
   p_staff_id          uuid,
@@ -336,6 +352,8 @@ END;
 $$;
 
 -- ── 5. assign_staff_2_atomic: opt into warn-then-confirm ────────────────────
+DROP FUNCTION IF EXISTS assign_staff_2_atomic(uuid, uuid, numeric);
+
 CREATE OR REPLACE FUNCTION assign_staff_2_atomic(
   p_appointment_id        uuid,
   p_staff_id_2            uuid,
@@ -388,6 +406,8 @@ $$;
 -- Shared with the public reschedule-booking/index.ts caller — see the
 -- migration header. p_allow_confirm is a real parameter here (not
 -- hardcoded true) so that caller keeps hard-blocking by omitting it.
+DROP FUNCTION IF EXISTS reschedule_appointment_atomic(uuid, timestamptz, timestamptz, uuid);
+
 CREATE OR REPLACE FUNCTION reschedule_appointment_atomic(
   p_appointment_id    uuid,
   p_new_starts_at     timestamptz,
@@ -433,6 +453,8 @@ $$;
 -- Only caller is appointments/index.ts's PATCH ?action=change-service —
 -- owner/manager-only, same as the other four RPCs above, so this gets the
 -- same treatment for consistency.
+DROP FUNCTION IF EXISTS change_appointment_service_atomic(uuid, uuid, int, int, numeric);
+
 CREATE OR REPLACE FUNCTION change_appointment_service_atomic(
   p_appointment_id        uuid,
   p_new_service_id        uuid,

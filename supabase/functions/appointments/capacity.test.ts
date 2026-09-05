@@ -223,7 +223,13 @@ async function cancelAppointment(id: string) {
 // ── 141_cross_business_conflict_visibility.sql fixtures ────────────────────
 
 async function upsertBusinessMember(businessId: string, userId: string): Promise<string> {
-  const res = await fetch(`${REST_BASE}/business_members`, {
+  // on_conflict is required: business_members' primary key is `id` (auto-
+  // generated, omitted from the payload below), not (business_id, user_id) —
+  // without naming that unique constraint explicitly, PostgREST's
+  // merge-duplicates has nothing to match against and just 409s on a
+  // second call (e.g. this file's second cross-business test re-running
+  // the same upsert).
+  const res = await fetch(`${REST_BASE}/business_members?on_conflict=business_id,user_id`, {
     method: "POST",
     headers: { ...SERVICE_HEADERS, Prefer: "return=representation,resolution=merge-duplicates" },
     body: JSON.stringify({ business_id: businessId, user_id: userId, role: "staff", is_active: true }),

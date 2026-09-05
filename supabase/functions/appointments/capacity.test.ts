@@ -285,8 +285,8 @@ Deno.test("capacity: enabled, capacity=1 — 2nd overlapping staff appointment o
       date: "2026-11-12", time: "09:00", staff_profile_id: STAFF_ID_2, client_id: CLIENT_ID_2,
       confirm_conflict: true,
     }))
-    assertEquals(res3.status, 201, `Expected 201 after confirming, got ${res3.status}: ${JSON.stringify(await res3.json().catch(() => null))}`)
-    await res3.json()
+    const res3Body = await res3.json().catch(() => null)
+    assertEquals(res3.status, 201, `Expected 201 after confirming, got ${res3.status}: ${JSON.stringify(res3Body)}`)
 
     const rows = await shadowLogRowsSince(since)
     assertEquals(rows.length, 1)
@@ -391,8 +391,8 @@ Deno.test("capacity: rescheduling into an already-full interval requires confirm
     const confirmRes = await callFn("PATCH", OWNER_TOKEN, {
       date: "2026-11-11", time: "11:00", confirm_conflict: true,
     }, { action: "reschedule", id: booked.id })
-    assertEquals(confirmRes.status, 200, `Expected 200 after confirming, got ${confirmRes.status}: ${JSON.stringify(await confirmRes.json().catch(() => null))}`)
-    await confirmRes.json()
+    const confirmBody = await confirmRes.json().catch(() => null)
+    assertEquals(confirmRes.status, 200, `Expected 200 after confirming, got ${confirmRes.status}: ${JSON.stringify(confirmBody)}`)
 
     const rows = await shadowLogRowsSince(since)
     assertEquals(rows.length, 1)
@@ -487,10 +487,13 @@ Deno.test("capacity: pilot-enforced business — a 2nd overlapping PUBLIC-path c
     if (!String(checkBody.message ?? "").includes("SEAT_CAPACITY_EXCEEDED")) {
       throw new Error(`Expected SEAT_CAPACITY_EXCEEDED, got ${checkRes.status}: ${JSON.stringify(checkBody)}`)
     }
-
-    const rows = await shadowLogRowsSince(since)
-    assertEquals(rows.length, 1)
-    assertEquals(rows[0].outcome, "rejected")
+    // Not asserted here: the 'rejected' shadow-log row. check_and_reserve_slot
+    // no longer writes it directly — the INSERT would be rolled back along
+    // with the transaction its RAISE aborts (the same reason 137's
+    // seatCapacityLog.ts moved that write to the edge function layer, run
+    // AFTER the RPC call returns). Calling the RPC directly here bypasses
+    // that layer entirely, so there's nothing to assert on without
+    // reimplementing the edge function's own logging inline.
   } finally {
     await setEnforcement(false)
     await setCapacity(false, null)
@@ -672,8 +675,8 @@ Deno.test("capacity: owner path — exceeding the limit returns 409 SEAT_CAPACIT
       date: "2026-11-16", time: "09:00", staff_profile_id: STAFF_ID_2, client_id: CLIENT_ID_2,
       confirm_conflict: true,
     }))
-    assertEquals(res3.status, 201, `Expected 201 after confirming, got ${res3.status}: ${JSON.stringify(await res3.json().catch(() => null))}`)
-    await res3.json()
+    const res3Body = await res3.json().catch(() => null)
+    assertEquals(res3.status, 201, `Expected 201 after confirming, got ${res3.status}: ${JSON.stringify(res3Body)}`)
 
     const rows = await shadowLogRowsSince(since)
     assertEquals(rows.length, 1)
@@ -699,6 +702,6 @@ Deno.test("capacity: owner path — staff conflict is warned, not blocked, and c
   assertEquals(body2.error.code, "STAFF_CONFLICT_CONFIRM_REQUIRED")
 
   const res3 = await callFn("POST", OWNER_TOKEN, { ...slot, client_id: CLIENT_ID_2, confirm_conflict: true })
-  assertEquals(res3.status, 201, `Expected 201 after confirming, got ${res3.status}: ${JSON.stringify(await res3.json().catch(() => null))}`)
-  await res3.json()
+  const res3Body = await res3.json().catch(() => null)
+  assertEquals(res3.status, 201, `Expected 201 after confirming, got ${res3.status}: ${JSON.stringify(res3Body)}`)
 })

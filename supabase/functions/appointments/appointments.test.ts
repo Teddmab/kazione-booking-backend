@@ -110,8 +110,8 @@ Deno.test("appointments: POST manual booking — same staff/slot conflict → 40
   assertEquals(body2.error.details?.conflict_type, "staff")
 
   const res3 = await callFn("POST", OWNER_TOKEN, { ...slot, client_id: CLIENT_ID_2, confirm_conflict: true })
-  assertEquals(res3.status, 201, `Expected 201 after confirming, got ${res3.status}: ${JSON.stringify(await res3.json().catch(() => null))}`)
-  await res3.json()
+  const res3Body = await res3.json().catch(() => null)
+  assertEquals(res3.status, 201, `Expected 201 after confirming, got ${res3.status}: ${JSON.stringify(res3Body)}`)
 })
 
 Deno.test("appointments: POST manual booking — concurrent same slot → exactly one 201, one 409", async () => {
@@ -166,8 +166,8 @@ Deno.test("appointments: PATCH assign-staff — target staff has a conflict → 
     action: "assign-staff",
     id: target.id,
   })
-  assertEquals(confirmRes.status, 200, `Expected 200 after confirming, got ${confirmRes.status}: ${JSON.stringify(await confirmRes.json().catch(() => null))}`)
-  await confirmRes.json()
+  const confirmBody = await confirmRes.json().catch(() => null)
+  assertEquals(confirmRes.status, 200, `Expected 200 after confirming, got ${confirmRes.status}: ${JSON.stringify(confirmBody)}`)
 })
 
 // ── S58: secondary (dual-staff) assignment re-checks the target's schedule ─
@@ -208,8 +208,8 @@ Deno.test("appointments: PATCH assign-staff-2 — target staff has a conflict �
     action: "assign-staff-2",
     id: target.id,
   })
-  assertEquals(confirm2Res.status, 200, `Expected 200 after confirming, got ${confirm2Res.status}: ${JSON.stringify(await confirm2Res.json().catch(() => null))}`)
-  await confirm2Res.json()
+  const confirm2Body = await confirm2Res.json().catch(() => null)
+  assertEquals(confirm2Res.status, 200, `Expected 200 after confirming, got ${confirm2Res.status}: ${JSON.stringify(confirm2Body)}`)
 })
 
 Deno.test("appointments: PATCH assign-staff-2 — clearing the assignment never conflicts", async () => {
@@ -373,8 +373,8 @@ Deno.test("appointments: PATCH ?action=reschedule — target slot has a conflict
     action: "reschedule",
     id: target.id,
   })
-  assertEquals(confirmRes.status, 200, `Expected 200 after confirming, got ${confirmRes.status}: ${JSON.stringify(await confirmRes.json().catch(() => null))}`)
-  await confirmRes.json()
+  const confirmBody = await confirmRes.json().catch(() => null)
+  assertEquals(confirmRes.status, 200, `Expected 200 after confirming, got ${confirmRes.status}: ${JSON.stringify(confirmBody)}`)
 })
 
 Deno.test("appointments: PATCH ?action=reschedule — concurrent reschedule into the same free slot → exactly one 200, one 409", async () => {

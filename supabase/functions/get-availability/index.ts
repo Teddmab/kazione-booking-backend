@@ -35,15 +35,21 @@ interface SlotStaff {
   avatarUrl: string | null;
   price: number;
   // Only ever true for an owner/manager caller (144) — a public caller
-  // never receives a row where either of these is true, since those rows
-  // are excluded outright for them.
+  // never receives a row where this is true, since those rows are
+  // excluded outright for them.
   hasConflict?: boolean;
-  atCapacity?: boolean;
 }
 
 interface Slot {
   time: string;
   staff: SlotStaff[];
+  // Seat capacity is business-wide, not per staff — same two numbers for
+  // every staff entry at this instant. Only present for an owner/manager
+  // caller (145) with seat capacity actually tracked for this business;
+  // undefined otherwise (capacity not enabled/enforced, or a public
+  // caller who never sees an over-capacity slot in the first place).
+  seatsFree?: number;
+  seatsTotal?: number;
 }
 
 interface ServiceInfo {
@@ -291,6 +297,10 @@ Deno.serve(withLogging("get-availability", async (req: Request) => {
       // 5. Group by slot_time
       const hideNames = settings?.hide_staff_names === true;
       const slotMap = new Map<string, SlotStaff[]>();
+      // Seat capacity is business-wide, not per staff — every row at the
+      // same instant carries the identical seats_free/seats_total, so
+      // capture it once per time bucket rather than per staff entry.
+      const slotCapacity = new Map<string, { seatsFree?: number; seatsTotal?: number }>();
       for (const row of rawSlots ?? []) {
         const time = (row.slot_time as string).slice(0, 5); // "HH:MM"
         if (!slotMap.has(time)) slotMap.set(time, []);
@@ -299,13 +309,16 @@ Deno.serve(withLogging("get-availability", async (req: Request) => {
           name: hideNames ? "Professional" : row.staff_name,
           avatarUrl: hideNames ? null : (avatarMap[row.staff_profile_id] ?? null),
           price: +(row.custom_price ?? service.price),
-          ...(ownerOverride && { hasConflict: row.has_staff_conflict === true, atCapacity: row.at_capacity === true }),
+          ...(ownerOverride && { hasConflict: row.has_staff_conflict === true }),
         });
+        if (ownerOverride && !slotCapacity.has(time) && row.seats_total != null) {
+          slotCapacity.set(time, { seatsFree: row.seats_free, seatsTotal: row.seats_total });
+        }
       }
 
       slots = Array.from(slotMap.entries())
         .sort(([a], [b]) => a.localeCompare(b))
-        .map(([time, staff]) => ({ time, staff }));
+        .map(([time, staff]) => ({ time, staff, ...slotCapacity.get(time) }));
     } catch (rpcErr) {
       // Degraded-mode fallback (RPC missing/erroring) — does not implement
       // ownerOverride (144). An owner hitting this fallback still sees the

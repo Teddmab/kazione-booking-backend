@@ -42,16 +42,6 @@ function futureBusinessDate(minOffsetDays: number): string {
 
 const MULTI_STAFF_DATE = futureBusinessDate(40)
 
-// Stage 2 (137_seat_capacity_enforcement.sql): capacity is business-wide,
-// independent of service/staff — Regina's Loc Maintenance (120-min) is
-// unrelated to Fatima's Knotless Braids (180-min), but a pilot-enforced
-// business at seat_count=1 must still hide any Loc Maintenance start that
-// overlaps an existing Knotless Braids appointment. Afrotouch is seeded
-// into capacity_enforcement_pilot_businesses by migration 137 itself.
-const LOC_MAINTENANCE_SERVICE_ID = "c0000000-0000-4000-8000-000000000003"
-const CAPACITY_ENFORCED_DATE = futureBusinessDate(35)
-const CAPACITY_SHADOW_ONLY_DATE = futureBusinessDate(37)
-
 const SUPABASE_URL = "http://127.0.0.1:54321"
 const SERVICE_KEY =
   "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU"
@@ -87,38 +77,6 @@ async function revokeServiceOffer(staffId: string, serviceId: string) {
     { method: "DELETE", headers: SERVICE_HEADERS },
   )
   await res.body?.cancel().catch(() => {})
-}
-
-async function setCapacity(enabled: boolean, count: number | null) {
-  const res = await fetch(`${REST_BASE}/business_settings?business_id=eq.${BUSINESS_ID}`, {
-    method: "PATCH",
-    headers: SERVICE_HEADERS,
-    body: JSON.stringify({ seat_capacity_enabled: enabled, seat_count: count }),
-  })
-  if (res.status !== 200 && res.status !== 204) {
-    throw new Error(`Failed to set business_settings capacity: ${res.status} ${await res.text()}`)
-  }
-  await res.body?.cancel().catch(() => {})
-}
-
-async function setEnforcement(enforced: boolean) {
-  const res = await fetch(`${REST_BASE}/business_settings?business_id=eq.${BUSINESS_ID}`, {
-    method: "PATCH",
-    headers: SERVICE_HEADERS,
-    body: JSON.stringify({ seat_capacity_enforced: enforced }),
-  })
-  if (res.status !== 200 && res.status !== 204) {
-    throw new Error(`Failed to set business_settings enforcement: ${res.status} ${await res.text()}`)
-  }
-  await res.body?.cancel().catch(() => {})
-}
-
-function createBookingFn(body: unknown) {
-  return fetch(`${BASE}/create-booking`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", apikey: ANON_KEY },
-    body: JSON.stringify(body),
-  })
 }
 
 Deno.test("get-availability: missing business_id", async () => {
@@ -240,88 +198,12 @@ Deno.test("get-availability: aggregates both staff once they're genuinely both a
   }
 })
 
-// ── Stage 2 (137_seat_capacity_enforcement.sql) ─────────────────────────────
-
-Deno.test("get-availability: pilot-enforced capacity hides an over-capacity slot business-wide, independent of service/staff", async () => {
-  await setCapacity(true, 1)
-  await setEnforcement(true)
-  try {
-    // Fatima's Knotless Braids at 10:00 occupies 10:00-13:00 (180 min).
-    const bookRes = await createBookingFn({
-      business_id: BUSINESS_ID,
-      service_id: SERVICE_ID,
-      staff_profile_id: STAFF_FATIMA_ID,
-      date: CAPACITY_ENFORCED_DATE,
-      time: "10:00",
-      client: { name: "Capacity Fixture Client", email: "capacity-fixture-1@test.kazione.local" },
-      payment_method: "later",
-    })
-    assertEquals(bookRes.status, 201)
-    await bookRes.json()
-
-    // Regina's Loc Maintenance (120-min, unrelated service AND staff) — at
-    // seat_count=1 this single pre-existing appointment already occupies
-    // the business's only unit for any interval overlapping 10:00-13:00.
-    const res = await callFn({
-      business_id: BUSINESS_ID,
-      service_id: LOC_MAINTENANCE_SERVICE_ID,
-      date: CAPACITY_ENFORCED_DATE,
-    })
-    assertEquals(res.status, 200)
-    const body = await res.json()
-    if (!Array.isArray(body.slots)) throw new Error(`Expected a slots array, got: ${JSON.stringify(body)}`)
-
-    for (const slot of body.slots) {
-      if (slot.time < "13:00") {
-        throw new Error(
-          `Slot ${slot.time} should have been hidden by capacity enforcement (overlaps Fatima's 10:00-13:00 booking), got: ${
-            JSON.stringify(body.slots)
-          }`,
-        )
-      }
-    }
-    // Sanity: capacity filtering must not hide everything — later, non-overlapping slots remain.
-    if (!body.slots.some((s: { time: string }) => s.time >= "13:00")) {
-      throw new Error(`Expected at least one remaining slot at/after 13:00, got: ${JSON.stringify(body.slots)}`)
-    }
-  } finally {
-    await setEnforcement(false)
-    await setCapacity(false, null)
-  }
-})
-
-Deno.test("get-availability: shadow-only (not enforced) never hides slots, even over the configured seat_count", async () => {
-  await setCapacity(true, 1)
-  // seat_capacity_enforced intentionally left false (Stage 1 default) —
-  // get_available_slots must behave exactly as before 137: no filtering.
-  try {
-    const bookRes = await createBookingFn({
-      business_id: BUSINESS_ID,
-      service_id: SERVICE_ID,
-      staff_profile_id: STAFF_FATIMA_ID,
-      date: CAPACITY_SHADOW_ONLY_DATE,
-      time: "10:00",
-      client: { name: "Capacity Fixture Client 2", email: "capacity-fixture-2@test.kazione.local" },
-      payment_method: "later",
-    })
-    assertEquals(bookRes.status, 201)
-    await bookRes.json()
-
-    const res = await callFn({
-      business_id: BUSINESS_ID,
-      service_id: LOC_MAINTENANCE_SERVICE_ID,
-      date: CAPACITY_SHADOW_ONLY_DATE,
-    })
-    assertEquals(res.status, 200)
-    const body = await res.json()
-    if (!Array.isArray(body.slots) || body.slots.length === 0) {
-      throw new Error(`Expected Regina's Loc Maintenance slots to be unaffected by shadow-only mode, got: ${JSON.stringify(body)}`)
-    }
-    // The 10:00-13:00 window must still be offered — shadow mode never filters.
-    if (!body.slots.some((s: { time: string }) => s.time === "10:00")) {
-      throw new Error(`Expected 10:00 to still be offered in shadow-only mode, got: ${JSON.stringify(body.slots)}`)
-    }
-  } finally {
-    await setCapacity(false, null)
-  }
-})
+// Stage 2 (137_seat_capacity_enforcement.sql) capacity-filtering coverage for
+// get_available_slots lives in appointments/capacity.test.ts instead of here,
+// alongside every other test that mutates business_settings' shared capacity
+// columns for this same business — Deno runs separate test FILES in parallel
+// worker threads by default, so a test here mutating that row concurrently
+// with capacity.test.ts's own capacity tests raced and produced a spurious
+// SLOT_TAKEN/SEAT_CAPACITY_EXCEEDED on an unrelated fixture booking. Tests
+// within a single file still run sequentially, so co-locating them there
+// eliminates the race instead of requiring test-suite-wide `--jobs=1`.

@@ -31,8 +31,22 @@ const STAFF_ID_2 = "d0000000-0000-4000-8000-000000000002" // Regina M. — only 
 // faithful (not scaled-down-in-substance) test of the same logic.
 const CLIENT_ID = "c1000000-0000-4000-8000-000000000001" // Amara Diallo
 const CLIENT_ID_2 = "c1000000-0000-4000-8000-000000000002" // Sophie Martin
+const LOC_MAINTENANCE_SERVICE_ID = "c0000000-0000-4000-8000-000000000003" // Regina's service, 120-min
 
 const OWNER_TOKEN = Deno.env.get("TEST_OWNER_TOKEN") || ""
+
+// Afrotouch's business_settings.booking_future_days is only 60
+// (014_seed_data.sql), so the get-availability/create-booking tests below
+// (unlike the rest of this file, which goes through the owner-authoritative
+// `appointments` endpoint) need a date relative to "now" rather than a
+// hardcoded far-future one — see get-availability.test.ts's own copy of
+// this helper for the OUTSIDE_BOOKING_WINDOW failure mode this avoids.
+function futureBusinessDate(minOffsetDays: number): string {
+  const d = new Date()
+  d.setUTCDate(d.getUTCDate() + minOffsetDays)
+  while (d.getUTCDay() === 0) d.setUTCDate(d.getUTCDate() + 1)
+  return d.toISOString().slice(0, 10)
+}
 
 const REST_BASE = `${SUPABASE_URL}/rest/v1`
 const SERVICE_HEADERS = {
@@ -52,6 +66,20 @@ function callFn(method: string, token?: string, body?: unknown, params?: Record<
     url = u.toString()
   }
   return fetch(url, { method, headers, body: body ? JSON.stringify(body) : undefined })
+}
+
+function createBookingFn(body: unknown) {
+  return fetch(`${BASE}/create-booking`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", apikey: ANON_KEY },
+    body: JSON.stringify(body),
+  })
+}
+
+function getAvailabilityFn(params: Record<string, string>) {
+  const url = new URL(`${BASE}/get-availability`)
+  Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v))
+  return fetch(url.toString(), { method: "GET", headers: { apikey: ANON_KEY } })
 }
 
 // Manual bookings are owner-authoritative (no get-availability lookup
@@ -415,10 +443,95 @@ Deno.test("capacity: enforced=true but business NOT in the pilot allowlist — s
     assertEquals(rows.length, 1)
     assertEquals(rows[0].outcome, "logged_only")
   } finally {
-    // Restore pilot membership — migration 137 seeds this row and other
-    // tests in this file (and get-availability's capacity tests) assume it.
+    // Restore pilot membership — migration 137 seeds this row and every
+    // other test in this file assumes it.
     await addToPilot(BUSINESS_ID)
     await setEnforcement(false)
+    await setCapacity(false, null)
+  }
+})
+
+// ── Stage 2: get_available_slots stops offering over-capacity slots ────────
+// These two live here (not in get-availability.test.ts) deliberately: Deno
+// runs separate test FILES in parallel worker threads by default, and every
+// test above mutates the same business_settings capacity columns on this
+// same business — putting a capacity-mutating test in a different file
+// raced against these and produced a spurious SLOT_TAKEN/
+// SEAT_CAPACITY_EXCEEDED on an unrelated fixture booking. Tests within one
+// file still run sequentially, so co-locating them here removes the race.
+
+Deno.test("get-availability: pilot-enforced capacity hides an over-capacity slot business-wide, independent of service/staff", async () => {
+  await setCapacity(true, 1)
+  await setEnforcement(true)
+  const date = futureBusinessDate(45)
+  try {
+    // Fatima's Knotless Braids at 10:00 occupies 10:00-13:00 (180 min).
+    const bookRes = await createBookingFn({
+      business_id: BUSINESS_ID,
+      service_id: SERVICE_ID,
+      staff_profile_id: STAFF_ID,
+      date,
+      time: "10:00",
+      client: { name: "Capacity Fixture Client", email: "capacity-fixture-1@test.kazione.local" },
+      payment_method: "later",
+    })
+    assertEquals(bookRes.status, 201, `Expected 201, got ${bookRes.status}: ${JSON.stringify(await bookRes.json().catch(() => null))}`)
+
+    // Regina's Loc Maintenance (120-min, unrelated service AND staff) — at
+    // seat_count=1 this single pre-existing appointment already occupies
+    // the business's only unit for any interval overlapping 10:00-13:00.
+    const res = await getAvailabilityFn({ business_id: BUSINESS_ID, service_id: LOC_MAINTENANCE_SERVICE_ID, date })
+    assertEquals(res.status, 200)
+    const body = await res.json()
+    if (!Array.isArray(body.slots)) throw new Error(`Expected a slots array, got: ${JSON.stringify(body)}`)
+
+    for (const slot of body.slots) {
+      if (slot.time < "13:00") {
+        throw new Error(
+          `Slot ${slot.time} should have been hidden by capacity enforcement (overlaps Fatima's 10:00-13:00 booking), got: ${
+            JSON.stringify(body.slots)
+          }`,
+        )
+      }
+    }
+    // Sanity: capacity filtering must not hide everything — later, non-overlapping slots remain.
+    if (!body.slots.some((s: { time: string }) => s.time >= "13:00")) {
+      throw new Error(`Expected at least one remaining slot at/after 13:00, got: ${JSON.stringify(body.slots)}`)
+    }
+  } finally {
+    await setEnforcement(false)
+    await setCapacity(false, null)
+  }
+})
+
+Deno.test("get-availability: shadow-only (not enforced) never hides slots, even over the configured seat_count", async () => {
+  await setCapacity(true, 1)
+  // seat_capacity_enforced intentionally left false (Stage 1 default) —
+  // get_available_slots must behave exactly as before 137: no filtering.
+  const date = futureBusinessDate(47) // distinct date from the enforced test above
+  try {
+    const bookRes = await createBookingFn({
+      business_id: BUSINESS_ID,
+      service_id: SERVICE_ID,
+      staff_profile_id: STAFF_ID,
+      date,
+      time: "10:00",
+      client: { name: "Capacity Fixture Client 2", email: "capacity-fixture-2@test.kazione.local" },
+      payment_method: "later",
+    })
+    assertEquals(bookRes.status, 201, `Expected 201, got ${bookRes.status}: ${JSON.stringify(await bookRes.json().catch(() => null))}`)
+
+    const res = await getAvailabilityFn({ business_id: BUSINESS_ID, service_id: LOC_MAINTENANCE_SERVICE_ID, date })
+    assertEquals(res.status, 200)
+    const body = await res.json()
+    if (!Array.isArray(body.slots) || body.slots.length === 0) {
+      throw new Error(`Expected Regina's Loc Maintenance slots to be unaffected by shadow-only mode, got: ${JSON.stringify(body)}`)
+    }
+    // The 10:00-13:00 window must still be offered — shadow mode never filters.
+    if (!body.slots.some((s: { time: string }) => s.time === "10:00")) {
+      throw new Error(`Expected 10:00 to still be offered in shadow-only mode, got: ${JSON.stringify(body.slots)}`)
+    }
+  } finally {
     await setCapacity(false, null)
   }
 })

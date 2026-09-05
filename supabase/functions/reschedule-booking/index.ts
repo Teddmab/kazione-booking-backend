@@ -18,7 +18,8 @@ import {
 import { issueCancelToken } from "../_shared/bookingCancelToken.ts";
 import { sendSms } from "../_shared/messagebird.ts";
 import { sendWhatsApp } from "../_shared/meta-whatsapp.ts";
-import { isSlotTakenError } from "../_shared/slotConflict.ts";
+import { isSeatCapacityExceededError, isSlotTakenError } from "../_shared/slotConflict.ts";
+import { logSeatCapacityRejection } from "../_shared/seatCapacityLog.ts";
 import { localWallClockToUtcIso, utcIsoToLocalParts } from "../_shared/timezone.ts";
 
 // ---------------------------------------------------------------------------
@@ -255,6 +256,12 @@ Deno.serve(withLogging("reschedule-booking", async (req: Request) => {
     });
 
     if (updateErr) {
+      // Public interface — never mention seats/capacity, per the sprint's decision
+      // that only the owner-facing appointments endpoint gets the specific reason.
+      if (isSeatCapacityExceededError(updateErr)) {
+        await logSeatCapacityRejection(updateErr);
+        return conflict("SEAT_CAPACITY_EXCEEDED", "This time is no longer available");
+      }
       if (isSlotTakenError(updateErr)) {
         return conflict("SLOT_TAKEN", "The requested slot was just booked by someone else");
       }

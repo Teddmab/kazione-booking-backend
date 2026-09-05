@@ -197,3 +197,13 @@ Deno.test("get-availability: aggregates both staff once they're genuinely both a
     await revokeServiceOffer(STAFF_REGINA_ID, SERVICE_ID)
   }
 })
+
+// Stage 2 (137_seat_capacity_enforcement.sql) capacity-filtering coverage for
+// get_available_slots lives in appointments/capacity.test.ts instead of here,
+// alongside every other test that mutates business_settings' shared capacity
+// columns for this same business — Deno runs separate test FILES in parallel
+// worker threads by default, so a test here mutating that row concurrently
+// with capacity.test.ts's own capacity tests raced and produced a spurious
+// SLOT_TAKEN/SEAT_CAPACITY_EXCEEDED on an unrelated fixture booking. Tests
+// within a single file still run sequentially, so co-locating them there
+// eliminates the race instead of requiring test-suite-wide `--jobs=1`.

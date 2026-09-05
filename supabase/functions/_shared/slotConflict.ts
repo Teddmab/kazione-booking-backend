@@ -13,3 +13,17 @@ export function isSlotTakenError(err: unknown): boolean {
   const errStr = JSON.stringify(err).toUpperCase();
   return code === "P0001" || errStr.includes("SLOT_TAKEN");
 }
+
+/**
+ * Detects the SEAT_CAPACITY_EXCEEDED exception raised by check_and_reserve_slot
+ * for pilot-enforced businesses (see migration 137_seat_capacity_enforcement.sql).
+ * Same error-shape caveat as isSlotTakenError above — this is a distinct
+ * PostgreSQL exception from SLOT_TAKEN (both surface as code P0001), so check
+ * this FIRST when both are relevant, since the public-facing message must never
+ * mention seats/capacity even though the internal error code does.
+ */
+export function isSeatCapacityExceededError(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const errStr = JSON.stringify(err).toUpperCase();
+  return errStr.includes("SEAT_CAPACITY_EXCEEDED");
+}

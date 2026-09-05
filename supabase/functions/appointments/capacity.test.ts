@@ -13,6 +13,7 @@
 // dev sandbox has no Docker, so these only prove anything real in CI (or a
 // local run once TEST_OWNER_TOKEN is provisioned against `supabase start`).
 import { assertEquals } from "std/assert"
+import { localWallClockToUtcIso } from "../_shared/timezone.ts"
 
 const BASE = "http://127.0.0.1:54321/functions/v1"
 const ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9.CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0"
@@ -32,6 +33,17 @@ const STAFF_ID_2 = "d0000000-0000-4000-8000-000000000002" // Regina M. — only 
 const CLIENT_ID = "c1000000-0000-4000-8000-000000000001" // Amara Diallo
 const CLIENT_ID_2 = "c1000000-0000-4000-8000-000000000002" // Sophie Martin
 const LOC_MAINTENANCE_SERVICE_ID = "c0000000-0000-4000-8000-000000000003" // Regina's service, 120-min
+
+// 141_cross_business_conflict_visibility.sql fixtures. Foreign Test Salon
+// (S74) is deliberately minimal in seed.sql (no services/staff of its own)
+// until these tests add one. SHARED_PERSON_USER_ID reuses the seeded
+// customer account's real auth-backed user id purely as a valid FK target
+// for business_members.user_id — these tests never authenticate as that
+// person, they only need users.id -> auth.users.id to resolve.
+const FOREIGN_BUSINESS_ID = "b0000000-0000-4000-8000-000000000002"
+const SHARED_PERSON_USER_ID = "f0000000-0000-4000-8000-000000000002"
+const XBIZ_AFROTOUCH_STAFF_ID = "d0000000-0000-4000-8000-0000000000f1"
+const XBIZ_FOREIGN_STAFF_ID = "d0000000-0000-4000-8000-0000000000f2"
 
 const OWNER_TOKEN = Deno.env.get("TEST_OWNER_TOKEN") || ""
 
@@ -206,6 +218,85 @@ async function cancelAppointment(id: string) {
     throw new Error(`Failed to cancel fixture appointment: ${res.status} ${await res.text()}`)
   }
   await res.body?.cancel().catch(() => {})
+}
+
+// ── 141_cross_business_conflict_visibility.sql fixtures ────────────────────
+
+async function upsertBusinessMember(businessId: string, userId: string): Promise<string> {
+  const res = await fetch(`${REST_BASE}/business_members`, {
+    method: "POST",
+    headers: { ...SERVICE_HEADERS, Prefer: "return=representation,resolution=merge-duplicates" },
+    body: JSON.stringify({ business_id: businessId, user_id: userId, role: "staff", is_active: true }),
+  })
+  if (!res.ok) throw new Error(`Failed to upsert business_member (${businessId}): ${res.status} ${await res.text()}`)
+  const rows = await res.json()
+  // merge-duplicates on an existing row can return an empty representation
+  // depending on PostgREST version — fall back to a plain SELECT.
+  if (Array.isArray(rows) && rows[0]?.id) return rows[0].id
+  const selectRes = await fetch(
+    `${REST_BASE}/business_members?business_id=eq.${businessId}&user_id=eq.${userId}&select=id`,
+    { headers: { apikey: SERVICE_KEY, Authorization: `Bearer ${SERVICE_KEY}` } },
+  )
+  const selected = await selectRes.json()
+  if (!Array.isArray(selected) || !selected[0]?.id) {
+    throw new Error(`Could not resolve business_member id for (${businessId}, ${userId})`)
+  }
+  return selected[0].id
+}
+
+async function upsertStaffProfile(id: string, businessId: string, businessMemberId: string, displayName: string) {
+  const res = await fetch(`${REST_BASE}/staff_profiles`, {
+    method: "POST",
+    headers: { ...SERVICE_HEADERS, Prefer: "resolution=merge-duplicates" },
+    body: JSON.stringify({
+      id, business_id: businessId, business_member_id: businessMemberId,
+      display_name: displayName, is_active: true,
+    }),
+  })
+  if (!res.ok) throw new Error(`Failed to upsert staff_profile ${id}: ${res.status} ${await res.text()}`)
+  await res.body?.cancel().catch(() => {})
+}
+
+async function ensureCrossBusinessStaffFixtures(): Promise<void> {
+  const bmAfrotouchId = await upsertBusinessMember(BUSINESS_ID, SHARED_PERSON_USER_ID)
+  await upsertStaffProfile(XBIZ_AFROTOUCH_STAFF_ID, BUSINESS_ID, bmAfrotouchId, "Cross-Business Test Staff (Afrotouch)")
+
+  const bmForeignId = await upsertBusinessMember(FOREIGN_BUSINESS_ID, SHARED_PERSON_USER_ID)
+  await upsertStaffProfile(XBIZ_FOREIGN_STAFF_ID, FOREIGN_BUSINESS_ID, bmForeignId, "Cross-Business Test Staff (Foreign)")
+}
+
+async function insertForeignAppointment(startsAtIso: string, endsAtIso: string): Promise<string> {
+  const res = await fetch(`${REST_BASE}/appointments`, {
+    method: "POST",
+    headers: SERVICE_HEADERS,
+    body: JSON.stringify({
+      business_id: FOREIGN_BUSINESS_ID,
+      staff_profile_id: XBIZ_FOREIGN_STAFF_ID,
+      starts_at: startsAtIso,
+      ends_at: endsAtIso,
+      duration_minutes: Math.round((new Date(endsAtIso).getTime() - new Date(startsAtIso).getTime()) / 60000),
+      price: 50,
+      status: "confirmed",
+      booking_reference: `XBIZ-${crypto.randomUUID().slice(0, 8)}`,
+    }),
+  })
+  if (!res.ok) throw new Error(`Failed to insert foreign fixture appointment: ${res.status} ${await res.text()}`)
+  const [row] = await res.json()
+  return row.id
+}
+
+async function getAppointmentStatusAndConflict(
+  id: string,
+): Promise<{ status: string; cross_business_conflict_appointment_id: string | null }> {
+  const res = await fetch(
+    `${REST_BASE}/appointments?id=eq.${id}&select=status,cross_business_conflict_appointment_id`,
+    { headers: { apikey: SERVICE_KEY, Authorization: `Bearer ${SERVICE_KEY}` } },
+  )
+  const rows = await res.json()
+  if (!Array.isArray(rows) || rows.length !== 1) {
+    throw new Error(`Expected exactly one appointment row for ${id}, got: ${JSON.stringify(rows)}`)
+  }
+  return rows[0]
 }
 
 // ── Baseline: feature disabled preserves current behaviour ─────────────────
@@ -704,4 +795,93 @@ Deno.test("capacity: owner path — staff conflict is warned, not blocked, and c
   const res3 = await callFn("POST", OWNER_TOKEN, { ...slot, client_id: CLIENT_ID_2, confirm_conflict: true })
   const res3Body = await res3.json().catch(() => null)
   assertEquals(res3.status, 201, `Expected 201 after confirming, got ${res3.status}: ${JSON.stringify(res3Body)}`)
+})
+
+// ── 141_cross_business_conflict_visibility.sql ──────────────────────────────
+// Lives in this file (not a standalone one) for the same reason the
+// get-availability capacity tests do: Deno runs separate test FILES in
+// parallel by default, and creating Afrotouch appointments here would race
+// against every test above that toggles business_settings' shared capacity
+// columns on this same business. Co-locating keeps everything touching
+// Afrotouch's write path sequential.
+
+Deno.test("cross-business conflict: booking a staff member already busy at another business succeeds, forces 'offered', and flags the conflict", async () => {
+  if (!OWNER_TOKEN) return
+  await ensureCrossBusinessStaffFixtures()
+
+  const date = "2026-11-20"
+  const time = "10:00"
+  const durationMinutes = 180 // Knotless Braids
+  const startsAtIso = localWallClockToUtcIso(date, time, "Europe/Tallinn")
+  const endsAtIso = new Date(new Date(startsAtIso).getTime() + durationMinutes * 60_000).toISOString()
+
+  // The staff member already has a confirmed appointment at the OTHER
+  // business, at the exact interval we're about to book them into at
+  // Afrotouch.
+  const foreignApptId = await insertForeignAppointment(startsAtIso, endsAtIso)
+
+  const res = await callFn("POST", OWNER_TOKEN, {
+    business_id: BUSINESS_ID,
+    client_id: CLIENT_ID,
+    service_id: SERVICE_ID,
+    staff_profile_id: XBIZ_AFROTOUCH_STAFF_ID,
+    date, time,
+    duration_minutes: durationMinutes,
+    price: 120,
+    payment_method: "later",
+  })
+  // Not blocked — 140 removed the hard trigger-level guard.
+  const body = await res.json().catch(() => null)
+  assertEquals(res.status, 201, `Expected 201, got ${res.status}: ${JSON.stringify(body)}`)
+
+  const row = await getAppointmentStatusAndConflict(body.id)
+  assertEquals(row.status, "offered")
+  assertEquals(row.cross_business_conflict_appointment_id, foreignApptId)
+
+  // The owner of Afrotouch has no legitimate visibility into the Foreign
+  // Test Salon's schedule — the resolved conflict detail must be scrubbed
+  // from their view, even though the raw column is set.
+  const ownerViewRes = await callFn("GET", OWNER_TOKEN, undefined, { id: body.id })
+  assertEquals(ownerViewRes.status, 200)
+  const ownerView = await ownerViewRes.json()
+  assertEquals(ownerView.cross_business_conflict, null)
+})
+
+Deno.test("cross-business conflict: reassigning to a staff member with no conflict clears the flag", async () => {
+  if (!OWNER_TOKEN) return
+  await ensureCrossBusinessStaffFixtures()
+
+  const date = "2026-11-21"
+  const time = "10:00"
+  const durationMinutes = 180
+  const startsAtIso = localWallClockToUtcIso(date, time, "Europe/Tallinn")
+  const endsAtIso = new Date(new Date(startsAtIso).getTime() + durationMinutes * 60_000).toISOString()
+  await insertForeignAppointment(startsAtIso, endsAtIso)
+
+  const createRes = await callFn("POST", OWNER_TOKEN, {
+    business_id: BUSINESS_ID,
+    client_id: CLIENT_ID,
+    service_id: SERVICE_ID,
+    staff_profile_id: XBIZ_AFROTOUCH_STAFF_ID,
+    date, time,
+    duration_minutes: durationMinutes,
+    price: 120,
+    payment_method: "later",
+  })
+  const created = await createRes.json()
+  assertEquals(createRes.status, 201, `Expected 201, got ${createRes.status}: ${JSON.stringify(created)}`)
+  const beforeReassign = await getAppointmentStatusAndConflict(created.id)
+  assertEquals(beforeReassign.cross_business_conflict_appointment_id !== null, true)
+
+  // Reassign to Fatima (no cross-business link at all) — the stale conflict
+  // reference must be cleared, not just left dangling from the old assignment.
+  const assignRes = await callFn("PATCH", OWNER_TOKEN, { staff_profile_id: STAFF_ID }, {
+    action: "assign-staff",
+    id: created.id,
+  })
+  const assignBody = await assignRes.json().catch(() => null)
+  assertEquals(assignRes.status, 200, `Expected 200, got ${assignRes.status}: ${JSON.stringify(assignBody)}`)
+
+  const afterReassign = await getAppointmentStatusAndConflict(created.id)
+  assertEquals(afterReassign.cross_business_conflict_appointment_id, null)
 })

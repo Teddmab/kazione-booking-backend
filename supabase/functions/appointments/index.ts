@@ -35,8 +35,28 @@ const APPT_SELECT = `
   payment:payments(status, amount, method, paid_at, refund_amount, is_test),
   applied_offer:offer_redemptions!offer_redemption_id(id, status, offer:business_offers(id, type, title, discount_type, discount_value)),
   business:businesses(name, timezone),
-  commission_adjustments:appointment_commission_adjustments(id, staff_profile_id, previous_amount, new_amount, reason, created_at)
+  commission_adjustments:appointment_commission_adjustments(id, staff_profile_id, previous_amount, new_amount, reason, created_at),
+  cross_business_conflict:appointments!cross_business_conflict_appointment_id(id, business_id, starts_at, ends_at, business:businesses(name))
 `;
+
+/**
+ * cross_business_conflict (141_cross_business_conflict_visibility.sql) is
+ * only ever meaningful to the staff member it's actually about — an
+ * owner/manager of THIS business has no legitimate visibility into
+ * whichever OTHER business the conflict belongs to. Strips it from every
+ * row except the one this specific viewer is the assigned staff on.
+ * callerStaffProfileId is null for an owner/manager/supervisor viewer, so
+ * this scrubs it unconditionally for them.
+ */
+function scrubCrossBusinessConflict<T extends { staff_profile_id?: unknown; cross_business_conflict?: unknown }>(
+  row: T,
+  callerStaffProfileId: string | null,
+): T {
+  if (!callerStaffProfileId || row.staff_profile_id !== callerStaffProfileId) {
+    return { ...row, cross_business_conflict: null };
+  }
+  return row;
+}
 
 function normalizePayment(row: Record<string, unknown>) {
   const payment = row.payment as unknown[];
@@ -299,7 +319,20 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
         if (existingErr) return serverError(existingErr.message);
         if (!existing) return notFound("Appointment not found");
 
-        await verifyBusinessMember(user.id, (existing as { business_id: string }).business_id);
+        const viewerMember = await verifyBusinessMember(user.id, (existing as { business_id: string }).business_id);
+
+        // Only needed to gate cross_business_conflict below (scrubCrossBusinessConflict) —
+        // an owner/manager/supervisor viewer has no legitimate visibility into
+        // whichever OTHER business a conflict belongs to.
+        let viewerStaffProfileId: string | null = null;
+        if (viewerMember.role === "staff") {
+          const { data: viewerSp } = await supabaseAdmin
+            .from("staff_profiles")
+            .select("id")
+            .eq("business_member_id", viewerMember.memberId)
+            .maybeSingle();
+          viewerStaffProfileId = (viewerSp as { id: string } | null)?.id ?? null;
+        }
 
         const { data, error } = await supabaseAdmin
           .from("appointments")
@@ -341,7 +374,7 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
           .reduce((sum, p) => sum + (Number(p.amount) || 0) - (Number(p.refund_amount) || 0), 0);
 
         return jsonCors(req, {
-          ...normalizePayment(data),
+          ...normalizePayment(scrubCrossBusinessConflict(data as Record<string, unknown>, viewerStaffProfileId)),
           status_log: statusLog ?? [],
           previously_received: Math.round(previouslyReceived * 100) / 100,
           completion_draft: draftRow ?? null,
@@ -594,7 +627,7 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
       if (error) return serverError(error.message);
 
       const appointments = (data ?? []).map((row: Record<string, unknown>) => {
-        const normalized = normalizePayment(row as Record<string, unknown>);
+        const normalized = normalizePayment(scrubCrossBusinessConflict(row, callerStaffProfileId));
         if (!callerStaffProfileId) return normalized;
 
         // Calculate commission_earned for staff view

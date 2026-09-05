@@ -20,6 +20,26 @@ import { logServiceActivity } from "../_shared/serviceActivity.ts";
  * PATCH ?action=service-usage&id=            → update a service-product link's quantity
  * DELETE ?action=service-usage&id=           → remove service-product link
  */
+
+// Shapes a raw product_catalog row (with `supplier` and `usage` embeds) into
+// the flat ProductRow the frontend expects — shared by the list and
+// single-product GET handlers so both stay in sync.
+function normalizeProduct(row: Record<string, unknown>) {
+  const minAlert = row.min_stock_alert as number | null;
+  const currentStock = row.current_stock as number;
+  const isLowStock = minAlert !== null && currentStock <= minAlert;
+  const supplierRow = row.supplier as { id: string; name: string } | null;
+  const usageRow = row.usage as { count: number }[] | null;
+  const { supplier: _s, usage: _u, ...rest } = row;
+  return {
+    ...rest,
+    supplier_id: supplierRow?.id ?? null,
+    supplier_name: supplierRow?.name ?? null,
+    is_low_stock: isLowStock,
+    service_count: usageRow?.[0]?.count ?? 0,
+  };
+}
+
 Deno.serve(withLogging("products", async (req: Request) => {
   const corsResp = handleCors(req);
   if (corsResp) return corsResp;
@@ -116,7 +136,7 @@ Deno.serve(withLogging("products", async (req: Request) => {
       if (id) {
         const { data: product, error } = await supabaseAdmin
           .from("product_catalog")
-          .select(`*, supplier:suppliers(id, name)`)
+          .select(`*, supplier:suppliers(id, name), usage:service_product_usage(count)`)
           .eq("id", id)
           .single();
 
@@ -137,7 +157,7 @@ Deno.serve(withLogging("products", async (req: Request) => {
           .order("created_at", { ascending: false })
           .limit(20);
 
-        return jsonCors(req, { ...product, movements: movements ?? [] });
+        return jsonCors(req, { ...normalizeProduct(product as Record<string, unknown>), movements: movements ?? [] });
       }
 
       // GET /products?business_id=
@@ -162,21 +182,7 @@ Deno.serve(withLogging("products", async (req: Request) => {
 
       if (error) return serverError(error.message);
 
-      const products = (data ?? []).map((row: Record<string, unknown>) => {
-        const minAlert = row.min_stock_alert as number | null;
-        const currentStock = row.current_stock as number;
-        const isLowStock = minAlert !== null && currentStock <= minAlert;
-        const supplierRow = row.supplier as { id: string; name: string } | null;
-        const usageRow = row.usage as { count: number }[] | null;
-        const { supplier: _s, usage: _u, ...rest } = row;
-        return {
-          ...rest,
-          supplier_id: supplierRow?.id ?? null,
-          supplier_name: supplierRow?.name ?? null,
-          is_low_stock: isLowStock,
-          service_count: usageRow?.[0]?.count ?? 0,
-        };
-      });
+      const products = (data ?? []).map((row) => normalizeProduct(row as Record<string, unknown>));
 
       return jsonCors(req, { products, total: count ?? 0 });
     }

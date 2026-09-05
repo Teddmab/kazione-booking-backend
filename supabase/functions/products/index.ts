@@ -154,7 +154,7 @@ Deno.serve(withLogging("products", async (req: Request) => {
 
       const { data, error, count } = await supabaseAdmin
         .from("product_catalog")
-        .select(`*, supplier:suppliers(id, name)`, { count: "exact" })
+        .select(`*, supplier:suppliers(id, name), usage:service_product_usage(count)`, { count: "exact" })
         .eq("business_id", businessId)
         .eq("is_active", true)
         .order("category", { ascending: true })
@@ -167,12 +167,14 @@ Deno.serve(withLogging("products", async (req: Request) => {
         const currentStock = row.current_stock as number;
         const isLowStock = minAlert !== null && currentStock <= minAlert;
         const supplierRow = row.supplier as { id: string; name: string } | null;
-        const { supplier: _s, ...rest } = row;
+        const usageRow = row.usage as { count: number }[] | null;
+        const { supplier: _s, usage: _u, ...rest } = row;
         return {
           ...rest,
           supplier_id: supplierRow?.id ?? null,
           supplier_name: supplierRow?.name ?? null,
           is_low_stock: isLowStock,
+          service_count: usageRow?.[0]?.count ?? 0,
         };
       });
 

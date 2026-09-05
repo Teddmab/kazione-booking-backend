@@ -182,17 +182,34 @@ BEGIN
 
       v_enforce := v_seat_capacity_enforced IS TRUE AND v_is_pilot_business IS TRUE;
 
-      INSERT INTO appointment_capacity_shadow_log (
-        business_id, appointment_id, starts_at, ends_at,
-        configured_capacity, overlapping_count, would_exceed, source, outcome
-      ) VALUES (
-        p_business_id, p_exclude_appointment_id, p_starts_at, p_ends_at,
-        v_seat_count, v_overlapping_count, true, p_source,
-        CASE WHEN v_enforce THEN 'rejected' ELSE 'logged_only' END
-      );
-
       IF v_enforce THEN
-        RAISE EXCEPTION 'SEAT_CAPACITY_EXCEEDED: This time is no longer available';
+        -- Do NOT insert here: RAISE EXCEPTION aborts this entire
+        -- transaction, which would roll back that insert right along with
+        -- everything else (Postgres has no autonomous-transaction
+        -- primitive without dblink/pg_background, neither of which this
+        -- project uses). The structured detail a caller needs to log the
+        -- rejection AFTER this transaction has already aborted travels on
+        -- the exception itself — PostgREST surfaces Postgres's DETAIL as
+        -- err.details — and _shared/seatCapacityLog.ts writes the actual
+        -- 'rejected' row from the edge function, once the RPC call returns.
+        RAISE EXCEPTION 'SEAT_CAPACITY_EXCEEDED: This time is no longer available'
+          USING DETAIL = json_build_object(
+            'business_id', p_business_id,
+            'appointment_id', p_exclude_appointment_id,
+            'starts_at', p_starts_at,
+            'ends_at', p_ends_at,
+            'configured_capacity', v_seat_count,
+            'overlapping_count', v_overlapping_count,
+            'source', p_source
+          )::text;
+      ELSE
+        INSERT INTO appointment_capacity_shadow_log (
+          business_id, appointment_id, starts_at, ends_at,
+          configured_capacity, overlapping_count, would_exceed, source, outcome
+        ) VALUES (
+          p_business_id, p_exclude_appointment_id, p_starts_at, p_ends_at,
+          v_seat_count, v_overlapping_count, true, p_source, 'logged_only'
+        );
       END IF;
     END IF;
   END IF;

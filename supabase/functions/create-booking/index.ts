@@ -16,6 +16,7 @@ import { sendSms } from "../_shared/messagebird.ts";
 import { sendWhatsApp } from "../_shared/meta-whatsapp.ts";
 import { localWallClockToUtcIso, utcIsoToLocalParts } from "../_shared/timezone.ts";
 import { isSeatCapacityExceededError } from "../_shared/slotConflict.ts";
+import { logSeatCapacityRejection } from "../_shared/seatCapacityLog.ts";
 import { getBookingNotificationRecipients } from "../_shared/bookingNotificationRecipients.ts";
 import { notifyUserPush } from "../_shared/sendExpoPush.ts";
 
@@ -628,6 +629,7 @@ Deno.serve(withLogging("create-booking", async (req: Request) => {
       // decision that only the owner-facing appointments endpoint gets the
       // specific reason.
       if (isSeatCapacityExceededError(apptErr)) {
+        await logSeatCapacityRejection(apptErr);
         return conflict("SEAT_CAPACITY_EXCEEDED", "This time is no longer available");
       }
       const isSlotTaken = apptErr.code === "P0001" ||

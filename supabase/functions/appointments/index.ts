@@ -4,6 +4,7 @@ import { badRequest, conflict, forbidden, notFound, serverError } from "../_shar
 import { withLogging } from "../_shared/logger.ts";
 import { requireOwnerOrManagerCtx, requireOwnerManagerOrSupervisorCtx, verifyAuth, verifyBusinessMember } from "../_shared/auth.ts";
 import { isSeatCapacityExceededError, isSlotTakenError } from "../_shared/slotConflict.ts";
+import { logSeatCapacityRejection } from "../_shared/seatCapacityLog.ts";
 import {
   bookingCancellationEmail,
   bookingReceivedOwnerEmail,
@@ -795,6 +796,7 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
 
       if (atomicErr) {
         if (isSeatCapacityExceededError(atomicErr)) {
+          await logSeatCapacityRejection(atomicErr);
           return conflict("SEAT_CAPACITY_EXCEEDED", "This time is fully booked — it would exceed this business's configured seat capacity");
         }
         if (isSlotTakenError(atomicErr)) {
@@ -980,6 +982,7 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
 
       if (assignErr) {
         if (isSeatCapacityExceededError(assignErr)) {
+          await logSeatCapacityRejection(assignErr);
           return conflict("SEAT_CAPACITY_EXCEEDED", "This time is fully booked — it would exceed this business's configured seat capacity");
         }
         if (isSlotTakenError(assignErr)) {
@@ -1121,6 +1124,7 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
 
       if (assign2Err) {
         if (isSeatCapacityExceededError(assign2Err)) {
+          await logSeatCapacityRejection(assign2Err);
           return conflict("SEAT_CAPACITY_EXCEEDED", "This time is fully booked — it would exceed this business's configured seat capacity");
         }
         if (isSlotTakenError(assign2Err)) {
@@ -1494,6 +1498,7 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
 
       if (updateErr) {
         if (isSeatCapacityExceededError(updateErr)) {
+          await logSeatCapacityRejection(updateErr);
           return conflict("SEAT_CAPACITY_EXCEEDED", "This time is fully booked — it would exceed this business's configured seat capacity");
         }
         if (isSlotTakenError(updateErr)) {
@@ -1644,6 +1649,7 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
 
       if (changeErr) {
         if (isSeatCapacityExceededError(changeErr)) {
+          await logSeatCapacityRejection(changeErr);
           return conflict("SEAT_CAPACITY_EXCEEDED", "This time is fully booked — it would exceed this business's configured seat capacity");
         }
         if (isSlotTakenError(changeErr)) {

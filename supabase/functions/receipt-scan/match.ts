@@ -1,4 +1,5 @@
 import { supabaseAdmin } from "../_shared/supabaseAdmin.ts";
+import { amountScore, dateScore, merchantSubstringScore } from "../_shared/matchScoring.ts";
 
 export interface OcrData {
   amount: number | null;
@@ -58,10 +59,10 @@ export async function findCandidates(
     for (const appt of (appts ?? []) as Record<string, unknown>[]) {
       const price = appt.price as number;
       const startsAt = appt.starts_at as string;
-      const amountScore = 1 - Math.abs(price - ocr.amount) / ocr.amount;
-      const daysDiff = Math.abs(new Date(startsAt).getTime() - baseDate.getTime()) / 86_400_000;
-      const dateScore = Math.max(0, 1 - daysDiff / 2);
-      const score = Math.round((amountScore * 0.6 + dateScore * 0.4) * 100);
+      const score = Math.round((
+        amountScore(price, ocr.amount) * 0.6 +
+        dateScore(new Date(startsAt).getTime(), baseDate.getTime(), 2) * 0.4
+      ) * 100);
       candidates.push({ type: "appointment", id: appt.id as string, score, data: appt });
     }
 
@@ -80,14 +81,14 @@ export async function findCandidates(
       .limit(5);
 
     for (const tx of (bankCredits ?? []) as Record<string, unknown>[]) {
-      const txAmount      = tx.amount as number;
-      const txDate        = tx.date as string;
-      const txDesc        = (tx.description as string ?? "").toLowerCase();
-      const amountScore   = 1 - Math.abs(txAmount - ocr.amount!) / ocr.amount!;
-      const daysDiff      = Math.abs(new Date(txDate).getTime() - baseDate.getTime()) / 86_400_000;
-      const dateScore     = Math.max(0, 1 - daysDiff / 2);
-      const merchantScore = ocr.merchant_name && txDesc.includes(ocr.merchant_name.toLowerCase()) ? 1 : 0;
-      const score = Math.round((amountScore * 0.5 + dateScore * 0.3 + merchantScore * 0.2) * 100);
+      const txAmount = tx.amount as number;
+      const txDate   = tx.date as string;
+      const txDesc   = (tx.description as string ?? "");
+      const score = Math.round((
+        amountScore(txAmount, ocr.amount!) * 0.5 +
+        dateScore(new Date(txDate).getTime(), baseDate.getTime(), 2) * 0.3 +
+        merchantSubstringScore(txDesc, ocr.merchant_name) * 0.2
+      ) * 100);
       candidates.push({ type: "bank_transaction", id: tx.id as string, score, data: tx });
     }
   } else {
@@ -104,8 +105,7 @@ export async function findCandidates(
 
     for (const exp of (expenses ?? []) as Record<string, unknown>[]) {
       const amount = exp.amount as number;
-      const amountScore = 1 - Math.abs(amount - ocr.amount!) / ocr.amount!;
-      const score = Math.round(Math.min(80, amountScore * 80));
+      const score = Math.round(Math.min(80, amountScore(amount, ocr.amount!) * 80));
       candidates.push({ type: "expense", id: exp.id as string, score, data: exp });
     }
 
@@ -123,14 +123,14 @@ export async function findCandidates(
       .limit(5);
 
     for (const tx of (bankDebits ?? []) as Record<string, unknown>[]) {
-      const txAmount      = Math.abs(tx.amount as number);
-      const txDate        = tx.date as string;
-      const txDesc        = (tx.description as string ?? "").toLowerCase();
-      const amountScore   = 1 - Math.abs(txAmount - ocr.amount!) / ocr.amount!;
-      const daysDiff      = Math.abs(new Date(txDate).getTime() - baseDate.getTime()) / 86_400_000;
-      const dateScore     = Math.max(0, 1 - daysDiff / 2);
-      const merchantScore = ocr.merchant_name && txDesc.includes(ocr.merchant_name.toLowerCase()) ? 1 : 0;
-      const score = Math.round((amountScore * 0.5 + dateScore * 0.3 + merchantScore * 0.2) * 100);
+      const txAmount = Math.abs(tx.amount as number);
+      const txDate   = tx.date as string;
+      const txDesc   = (tx.description as string ?? "");
+      const score = Math.round((
+        amountScore(txAmount, ocr.amount!) * 0.5 +
+        dateScore(new Date(txDate).getTime(), baseDate.getTime(), 2) * 0.3 +
+        merchantSubstringScore(txDesc, ocr.merchant_name) * 0.2
+      ) * 100);
       // Normalise amount to positive so frontend display is consistent
       candidates.push({ type: "bank_transaction", id: tx.id as string, score, data: { ...tx, amount: txAmount } });
     }

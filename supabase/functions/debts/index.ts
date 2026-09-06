@@ -3,6 +3,7 @@ import { corsHeadersFor, handleCors, jsonCors } from "../_shared/cors.ts";
 import { badRequest, forbidden, notFound, serverError } from "../_shared/errors.ts";
 import { withLogging } from "../_shared/logger.ts";
 import { requireOwnerOrManagerCtx, verifyAuth, verifyBusinessMember } from "../_shared/auth.ts";
+import { checkMonthNotLocked } from "../_shared/financialPeriods.ts";
 
 const VALID_CATEGORIES = ["tax", "rent", "utilities", "bank_loan", "supplier", "equipment", "other"];
 const VALID_STATUSES   = ["active", "paid_off", "disputed", "restructured"];
@@ -306,6 +307,9 @@ Deno.serve(withLogging("debts", async (req: Request) => {
 
         const ctx = await requireOwnerOrManagerCtx(req, businessId);
         if (ctx instanceof Response) return ctx;
+
+        const lockCheck = await checkMonthNotLocked(req, ctx.businessId, payDate);
+        if (lockCheck) return lockCheck;
 
         // Verify debt belongs to this business
         const { data: debt, error: debtErr } = await supabaseAdmin

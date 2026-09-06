@@ -3,6 +3,7 @@ import { handleCors, jsonCors } from "../_shared/cors.ts";
 import { badRequest, serverError } from "../_shared/errors.ts";
 import { withLogging } from "../_shared/logger.ts";
 import { requireOwnerOrManagerCtx } from "../_shared/auth.ts";
+import { checkMonthNotLocked } from "../_shared/financialPeriods.ts";
 
 // "rent" -> "Rent", "internet_phone" -> "Internet phone" — used as a
 // fallback "source" label for fixed-cost rows in the bookkeeping feed,
@@ -572,6 +573,9 @@ Deno.serve(withLogging("finance", async (req: Request) => {
       const ctx = await requireOwnerOrManagerCtx(req, body.business_id as string);
       if (ctx instanceof Response) return ctx;
 
+      const lockCheck = await checkMonthNotLocked(req, ctx.businessId, String(body.date));
+      if (lockCheck) return lockCheck;
+
       const { data: expense, error } = await supabaseAdmin
         .from("expenses")
         .insert({
@@ -606,14 +610,22 @@ Deno.serve(withLogging("finance", async (req: Request) => {
       // Fetch expense to get business_id
       const { data: existing, error: fetchErr } = await supabaseAdmin
         .from("expenses")
-        .select("business_id")
+        .select("business_id, date")
         .eq("id", id)
         .single();
 
       if (fetchErr || !existing) return badRequest("Expense not found");
+      const existingExpense = existing as Record<string, unknown>;
 
-      const ctx = await requireOwnerOrManagerCtx(req, (existing as Record<string, unknown>).business_id as string);
+      const ctx = await requireOwnerOrManagerCtx(req, existingExpense.business_id as string);
       if (ctx instanceof Response) return ctx;
+
+      const lockCheck = await checkMonthNotLocked(req, ctx.businessId, existingExpense.date as string);
+      if (lockCheck) return lockCheck;
+      if (body.date !== undefined && body.date !== existingExpense.date) {
+        const newDateLockCheck = await checkMonthNotLocked(req, ctx.businessId, String(body.date));
+        if (newDateLockCheck) return newDateLockCheck;
+      }
 
       const receiptBase64 = body.receipt_base64 as string | undefined;
       const receiptMimeType = body.receipt_media_type as string | undefined;
@@ -645,14 +657,18 @@ Deno.serve(withLogging("finance", async (req: Request) => {
 
       const { data: existing, error: fetchErr } = await supabaseAdmin
         .from("expenses")
-        .select("business_id")
+        .select("business_id, date")
         .eq("id", id)
         .single();
 
       if (fetchErr || !existing) return badRequest("Expense not found");
+      const existingExpense = existing as Record<string, unknown>;
 
-      const ctx = await requireOwnerOrManagerCtx(req, (existing as Record<string, unknown>).business_id as string);
+      const ctx = await requireOwnerOrManagerCtx(req, existingExpense.business_id as string);
       if (ctx instanceof Response) return ctx;
+
+      const lockCheck = await checkMonthNotLocked(req, ctx.businessId, existingExpense.date as string);
+      if (lockCheck) return lockCheck;
 
       const { error } = await supabaseAdmin.from("expenses").delete().eq("id", id);
       if (error) return serverError(error.message);

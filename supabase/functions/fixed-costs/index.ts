@@ -3,6 +3,7 @@ import { handleCors, jsonCors } from "../_shared/cors.ts";
 import { badRequest, notFound, serverError } from "../_shared/errors.ts";
 import { withLogging } from "../_shared/logger.ts";
 import { requireOwnerOrManagerCtx, verifyAuth, verifyBusinessMember } from "../_shared/auth.ts";
+import { checkMonthNotLocked } from "../_shared/financialPeriods.ts";
 
 const VALID_CATEGORIES = ["rent", "electricity", "water", "internet_phone", "insurance", "maintenance", "other"];
 const VALID_FREQUENCIES = ["monthly", "quarterly", "annual", "one_off"];
@@ -118,6 +119,9 @@ Deno.serve(withLogging("fixed-costs", async (req: Request) => {
         return badRequest("cost_date must be YYYY-MM-DD");
       }
 
+      const lockCheck = await checkMonthNotLocked(req, ctx.businessId, costDate);
+      if (lockCheck) return lockCheck;
+
       const { data, error } = await supabaseAdmin
         .from("fixed_costs")
         .insert({
@@ -144,16 +148,25 @@ Deno.serve(withLogging("fixed-costs", async (req: Request) => {
 
       const { data: existing } = await supabaseAdmin
         .from("fixed_costs")
-        .select("business_id")
+        .select("business_id, cost_date")
         .eq("id", id)
         .single();
       if (!existing) return notFound("Fixed cost entry not found");
+      const existingCost = existing as Record<string, unknown>;
 
-      const ctx = await requireOwnerOrManagerCtx(req, (existing as Record<string, unknown>).business_id as string);
+      const ctx = await requireOwnerOrManagerCtx(req, existingCost.business_id as string);
       if (ctx instanceof Response) return ctx;
+
+      const lockCheck = await checkMonthNotLocked(req, ctx.businessId, existingCost.cost_date as string);
+      if (lockCheck) return lockCheck;
 
       const body = await req.json() as Record<string, unknown>;
       const updatePayload: Record<string, unknown> = {};
+
+      if (body.cost_date !== undefined && body.cost_date !== existingCost.cost_date) {
+        const newDateLockCheck = await checkMonthNotLocked(req, ctx.businessId, String(body.cost_date));
+        if (newDateLockCheck) return newDateLockCheck;
+      }
 
       if (body.name !== undefined) updatePayload.name = String(body.name).trim();
       if (body.category !== undefined) {
@@ -196,13 +209,17 @@ Deno.serve(withLogging("fixed-costs", async (req: Request) => {
 
       const { data: existing } = await supabaseAdmin
         .from("fixed_costs")
-        .select("business_id")
+        .select("business_id, cost_date")
         .eq("id", id)
         .single();
       if (!existing) return notFound("Fixed cost entry not found");
+      const existingCost = existing as Record<string, unknown>;
 
-      const ctx = await requireOwnerOrManagerCtx(req, (existing as Record<string, unknown>).business_id as string);
+      const ctx = await requireOwnerOrManagerCtx(req, existingCost.business_id as string);
       if (ctx instanceof Response) return ctx;
+
+      const lockCheck = await checkMonthNotLocked(req, ctx.businessId, existingCost.cost_date as string);
+      if (lockCheck) return lockCheck;
 
       const { error } = await supabaseAdmin
         .from("fixed_costs")

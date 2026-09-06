@@ -119,12 +119,27 @@ Deno.serve(withLogging("debts", async (req: Request) => {
 
         if (error) return serverError(error.message);
 
+        // Which of these payments were linked from a reconciled bank
+        // transaction (vs. entered by hand) — surfaced so the UI can flag
+        // possible duplicates more confidently for that origin, per a
+        // reported pattern of the same real-world payment getting both a
+        // manual entry and a separate bank-match entry.
+        const paymentIds = (payments ?? []).map((p) => (p as Record<string, unknown>).id as string);
+        const { data: bankMatches } = paymentIds.length > 0
+          ? await supabaseAdmin
+              .from("bank_transactions")
+              .select("reconciled_debt_payment_id")
+              .in("reconciled_debt_payment_id", paymentIds)
+          : { data: [] as { reconciled_debt_payment_id: string }[] };
+        const bankMatchedIds = new Set((bankMatches ?? []).map((r) => r.reconciled_debt_payment_id));
+
         const withUrls = await Promise.all((payments ?? []).map(async (row: Record<string, unknown>) => {
-          if (!row.receipt_url) return { ...row, receipt_url: null };
+          const from_bank_match = bankMatchedIds.has(row.id as string);
+          if (!row.receipt_url) return { ...row, receipt_url: null, from_bank_match };
           const { data: signed } = await supabaseAdmin.storage
             .from("debt-documents")
             .createSignedUrl(row.receipt_url as string, 3600);
-          return { ...row, receipt_url: signed?.signedUrl ? rewriteLocalUrl(signed.signedUrl) : null };
+          return { ...row, receipt_url: signed?.signedUrl ? rewriteLocalUrl(signed.signedUrl) : null, from_bank_match };
         }));
 
         return jsonCors(req, { payments: withUrls });

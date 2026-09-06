@@ -211,6 +211,7 @@ Deno.serve(withLogging("debts", async (req: Request) => {
         let total_owed = 0;
         let monthly_minimum_total = 0;
         let overdue_count = 0;
+        let overdue_total = 0;
         const by_category: Record<string, number> = {};
         const by_priority: Record<string, number> = {};
 
@@ -223,13 +224,14 @@ Deno.serve(withLogging("debts", async (req: Request) => {
           by_category[cat] = (by_category[cat] ?? 0) + balance;
           const pri = (row.priority as string) ?? "medium";
           by_priority[pri] = (by_priority[pri] ?? 0) + balance;
-          if (row.due_date && String(row.due_date) < today) overdue_count++;
+          if (row.due_date && String(row.due_date) < today) { overdue_count++; overdue_total += balance; }
         }
 
         return jsonCors(req, {
           total_owed,
           monthly_minimum_total,
           overdue_count,
+          overdue_total,
           active_count: active.length,
           by_category,
           by_priority,

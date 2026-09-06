@@ -3,6 +3,7 @@ import { corsHeadersFor, handleCors, jsonCors } from "../_shared/cors.ts";
 import { badRequest, conflict, notFound, serverError } from "../_shared/errors.ts";
 import { withLogging } from "../_shared/logger.ts";
 import { requireOwnerOrManagerCtx } from "../_shared/auth.ts";
+import { checkMonthNotLocked } from "../_shared/financialPeriods.ts";
 
 function csvResponse(req: Request, text: string): Response {
   return new Response(text, {
@@ -165,6 +166,14 @@ Deno.serve(withLogging("bank-statements", async (req: Request) => {
       const rows = body.rows as Array<Record<string, unknown>>;
       if (!Array.isArray(rows) || rows.length === 0) {
         return badRequest("rows must be a non-empty array");
+      }
+
+      // Fail the whole import (no partial imports) if any row falls in a
+      // closed month — check once per distinct month present in the batch.
+      const importMonths = [...new Set(rows.map((r) => String(r.date ?? "").slice(0, 7) + "-01"))];
+      for (const monthKey of importMonths) {
+        const lockCheck = await checkMonthNotLocked(req, ctx.businessId, monthKey);
+        if (lockCheck) return lockCheck;
       }
 
       // Create batch record first (row_count updated after dedup)
@@ -439,7 +448,7 @@ Deno.serve(withLogging("bank-statements", async (req: Request) => {
 
       const { data: existing, error: existErr } = await supabaseAdmin
         .from("bank_transactions")
-        .select("business_id, reconciled_payment_id, reconciled_expense_id, reconciled_fixed_cost_id, reconciled_debt_payment_id, reconciled_appointment_id, reconciled_stock_movement_id")
+        .select("business_id, date, reconciled_payment_id, reconciled_expense_id, reconciled_fixed_cost_id, reconciled_debt_payment_id, reconciled_appointment_id, reconciled_stock_movement_id")
         .eq("id", id)
         .maybeSingle();
 
@@ -449,6 +458,9 @@ Deno.serve(withLogging("bank-statements", async (req: Request) => {
       const ex = existing as Record<string, unknown>;
       const ctx = await requireOwnerOrManagerCtx(req, ex.business_id as string);
       if (ctx instanceof Response) return ctx;
+
+      const lockCheck = await checkMonthNotLocked(req, ctx.businessId, ex.date as string);
+      if (lockCheck) return lockCheck;
 
       const body = await req.json() as Record<string, unknown>;
       const update: Record<string, unknown> = {};
@@ -528,6 +540,16 @@ Deno.serve(withLogging("bank-statements", async (req: Request) => {
         const ctx = await requireOwnerOrManagerCtx(req, (existing as Record<string, unknown>).business_id as string);
         if (ctx instanceof Response) return ctx;
 
+        const { data: batchTxDates } = await supabaseAdmin
+          .from("bank_transactions")
+          .select("date")
+          .eq("import_batch_id", id);
+        const batchMonths = [...new Set((batchTxDates ?? []).map((r) => (r.date as string).slice(0, 7) + "-01"))];
+        for (const monthKey of batchMonths) {
+          const lockCheck = await checkMonthNotLocked(req, ctx.businessId, monthKey);
+          if (lockCheck) return lockCheck;
+        }
+
         // Cascade delete via FK (bank_transactions.import_batch_id ON DELETE CASCADE)
         const { error } = await supabaseAdmin.from("bank_import_batches").delete().eq("id", id);
         if (error) return serverError(error.message);
@@ -539,15 +561,19 @@ Deno.serve(withLogging("bank-statements", async (req: Request) => {
 
       const { data: existing, error: existErr } = await supabaseAdmin
         .from("bank_transactions")
-        .select("business_id")
+        .select("business_id, date")
         .eq("id", id)
         .maybeSingle();
 
       if (existErr) return serverError(existErr.message);
       if (!existing) return notFound("Transaction not found");
+      const existingTx = existing as Record<string, unknown>;
 
-      const ctx = await requireOwnerOrManagerCtx(req, (existing as Record<string, unknown>).business_id as string);
+      const ctx = await requireOwnerOrManagerCtx(req, existingTx.business_id as string);
       if (ctx instanceof Response) return ctx;
+
+      const lockCheck = await checkMonthNotLocked(req, ctx.businessId, existingTx.date as string);
+      if (lockCheck) return lockCheck;
 
       const { error } = await supabaseAdmin.from("bank_transactions").delete().eq("id", id);
       if (error) return serverError(error.message);

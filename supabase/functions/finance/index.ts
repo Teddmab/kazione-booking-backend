@@ -1,5 +1,5 @@
 import { supabaseAdmin } from "../_shared/supabaseAdmin.ts";
-import { handleCors, jsonCors } from "../_shared/cors.ts";
+import { corsHeadersFor, handleCors, jsonCors } from "../_shared/cors.ts";
 import { badRequest, serverError } from "../_shared/errors.ts";
 import { withLogging } from "../_shared/logger.ts";
 import { requireOwnerOrManagerCtx } from "../_shared/auth.ts";
@@ -672,7 +672,9 @@ Deno.serve(withLogging("finance", async (req: Request) => {
 
       const { error } = await supabaseAdmin.from("expenses").delete().eq("id", id);
       if (error) return serverError(error.message);
-      return jsonCors(req, null, 204);
+      // A 204 response must have a null body per the Fetch spec — jsonCors
+      // would JSON.stringify(null) into a non-empty body and throw.
+      return new Response(null, { status: 204, headers: corsHeadersFor(req) });
     }
 
     return badRequest("Method not allowed");

@@ -893,6 +893,84 @@ export function ownerAppointmentReminderEmail(
 }
 
 // ---------------------------------------------------------------------------
+// Owner debt payment reminder (internal — English only)
+// ---------------------------------------------------------------------------
+
+interface DebtReminderData {
+  salonName: string;
+  salonLogoUrl?: string;
+  creditorName: string;
+  debtName: string;
+  amount: string;
+  dueDate: string;
+  manageUrl: string;
+}
+
+export function debtPaymentReminderEmail(
+  data: DebtReminderData,
+): { subject: string; html: string } {
+  const subject = `Upcoming payment due: ${data.debtName}`;
+
+  return {
+    subject,
+    html: renderEmail({
+      salonLogoUrl: data.salonLogoUrl,
+      salonName: data.salonName,
+      subject,
+      body: `
+        ${heading("A debt payment is coming up")}
+        ${paragraph(`A scheduled payment for <strong style="color:${B.textDark};">${data.debtName}</strong> is due soon.`)}
+        ${detailTable([
+          ["Creditor", `<strong>${data.creditorName}</strong>`],
+          ["Amount",   data.amount],
+          ["Due date", data.dueDate],
+        ])}
+        ${ctaButton("View in Dashboard", data.manageUrl)}
+      `,
+    }),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Creditor payment notification (external — sent to the creditor's contact)
+// ---------------------------------------------------------------------------
+
+interface CreditorPaymentNotificationData {
+  salonName: string;
+  salonLogoUrl?: string;
+  creditorName: string;
+  amount: string;
+  date: string;
+  reference?: string;
+}
+
+export function creditorPaymentNotificationEmail(
+  data: CreditorPaymentNotificationData,
+): { subject: string; html: string } {
+  const subject = `Payment sent — ${data.salonName}`;
+  const rows: [string, string][] = [
+    ["Amount", `<strong>${data.amount}</strong>`],
+    ["Date",   data.date],
+  ];
+  if (data.reference) rows.push(["Reference", referenceChip(data.reference)]);
+
+  return {
+    subject,
+    html: renderEmail({
+      salonLogoUrl: data.salonLogoUrl,
+      salonName: data.salonName,
+      subject,
+      body: `
+        ${heading("Payment sent")}
+        ${paragraph(`${data.creditorName}, a payment has been recorded against your account with <strong style="color:${B.textDark};">${data.salonName}</strong>.`)}
+        ${detailTable(rows)}
+        ${paragraph("This is an automated notice — please contact us directly if you have any questions about this payment.")}
+      `,
+    }),
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Locale resolver
 // ---------------------------------------------------------------------------
 

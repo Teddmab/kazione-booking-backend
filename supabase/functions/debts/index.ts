@@ -7,6 +7,7 @@ import { requireOwnerOrManagerCtx, verifyAuth, verifyBusinessMember } from "../_
 const VALID_CATEGORIES = ["tax", "rent", "utilities", "bank_loan", "supplier", "equipment", "other"];
 const VALID_STATUSES   = ["active", "paid_off", "disputed", "restructured"];
 const VALID_PRIORITIES = ["critical", "high", "medium", "low"];
+const VALID_CREDITOR_TYPES = ["supplier", "business", "person"];
 
 // Local Supabase (Docker/kong) signs storage URLs with an internal hostname
 // the browser can't reach — rewrite to 127.0.0.1 outside of production.
@@ -35,6 +36,26 @@ async function uploadDebtFile(businessId: string, subfolder: string, base64: str
   if (error) throw new Error(error.message);
   return path;
 }
+
+// Fire-and-forget internal call to send-email — a delivery failure here must
+// never fail the payment recording itself, so callers just log and move on.
+const FUNCTIONS_URL = Deno.env.get("SUPABASE_URL") + "/functions/v1";
+const INTERNAL_KEY = Deno.env.get("INTERNAL_FUNCTION_KEY") ?? "";
+
+async function sendEmailInternal(to: string, template: string, data: Record<string, string>): Promise<void> {
+  try {
+    const res = await fetch(`${FUNCTIONS_URL}/send-email`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-internal-key": INTERNAL_KEY },
+      body: JSON.stringify({ to, template, data }),
+    });
+    if (!res.ok) console.error(`[debts] send-email failed for ${to}: ${res.status} ${await res.text()}`);
+  } catch (err) {
+    console.error(`[debts] send-email request failed for ${to}:`, err);
+  }
+}
+
+const SUPPLIER_SELECT = "supplier:suppliers(id, name, email, phone)";
 
 /**
  * /debts — business debt register + payment log
@@ -86,7 +107,7 @@ Deno.serve(withLogging("debts", async (req: Request) => {
 
         const { data: payments, error } = await supabaseAdmin
           .from("debt_payments")
-          .select("id, debt_id, amount, payment_date, payment_method, reference, receipt_url, notes, created_at, recorded_by:users!debt_payments_created_by_fkey(id, first_name, last_name)")
+          .select("id, debt_id, amount, fee, payment_date, payment_method, reference, receipt_url, notes, created_at, recorded_by:users!debt_payments_created_by_fkey(id, first_name, last_name)")
           .eq("debt_id", debtId)
           .order("payment_date", { ascending: false });
 
@@ -146,7 +167,7 @@ Deno.serve(withLogging("debts", async (req: Request) => {
 
         const { data: debt, error } = await supabaseAdmin
           .from("business_debts")
-          .select("*")
+          .select(`*, ${SUPPLIER_SELECT}`)
           .eq("id", id)
           .maybeSingle();
 
@@ -214,7 +235,7 @@ Deno.serve(withLogging("debts", async (req: Request) => {
       const includeArchived = url.searchParams.get("include_archived") === "true";
       let query = supabaseAdmin
         .from("business_debts")
-        .select("*")
+        .select(`*, ${SUPPLIER_SELECT}`)
         .eq("business_id", businessId);
 
       if (!includeArchived) query = query.eq("is_archived", false);
@@ -245,6 +266,7 @@ Deno.serve(withLogging("debts", async (req: Request) => {
       if (action === "record-payment") {
         const debtId    = body.debt_id as string | undefined;
         const amount    = Number(body.amount ?? 0);
+        const fee       = Number(body.fee ?? 0);
         const payDate   = (body.payment_date as string) ?? new Date().toISOString().slice(0, 10);
         const notes     = (body.notes as string | null) ?? null;
         const businessId = body.business_id as string | undefined;
@@ -252,10 +274,12 @@ Deno.serve(withLogging("debts", async (req: Request) => {
         const reference   = (body.reference as string | null) ?? null;
         const receiptBase64 = body.receipt_base64 as string | undefined;
         const receiptMimeType = (body.receipt_mime_type as string) ?? "image/jpeg";
+        const notifyCreditor = Boolean(body.notify_creditor ?? false);
 
         if (!debtId)    return badRequest("debt_id is required");
         if (!businessId) return badRequest("business_id is required");
         if (amount <= 0) return badRequest("amount must be positive");
+        if (fee < 0) return badRequest("fee cannot be negative");
 
         const ctx = await requireOwnerOrManagerCtx(req, businessId);
         if (ctx instanceof Response) return ctx;
@@ -263,7 +287,7 @@ Deno.serve(withLogging("debts", async (req: Request) => {
         // Verify debt belongs to this business
         const { data: debt, error: debtErr } = await supabaseAdmin
           .from("business_debts")
-          .select("id, current_balance, status, business_id")
+          .select("id, current_balance, status, business_id, creditor_name, creditor_contact, currency_code")
           .eq("id", debtId)
           .eq("business_id", businessId)
           .maybeSingle();
@@ -283,13 +307,14 @@ Deno.serve(withLogging("debts", async (req: Request) => {
           }
         }
 
-        // Insert payment — DB trigger reduces current_balance automatically
+        // Insert payment — DB trigger reduces current_balance (amount + fee) automatically
         const { data: newPayment, error: payErr } = await supabaseAdmin
           .from("debt_payments")
           .insert({
             debt_id: debtId,
             business_id: businessId,
             amount,
+            fee,
             payment_date: payDate,
             payment_method: paymentMethod,
             reference,
@@ -297,7 +322,7 @@ Deno.serve(withLogging("debts", async (req: Request) => {
             notes,
             created_by: ctx.userId,
           })
-          .select("id, debt_id, amount, payment_date, payment_method, reference, receipt_url, notes, created_at")
+          .select("id, debt_id, amount, fee, payment_date, payment_method, reference, receipt_url, notes, created_at")
           .single();
 
         if (payErr) return serverError(payErr.message);
@@ -310,6 +335,19 @@ Deno.serve(withLogging("debts", async (req: Request) => {
           .single();
 
         if (refetchErr) return serverError(refetchErr.message);
+
+        const creditorContact = d.creditor_contact as string | null;
+        if (notifyCreditor && creditorContact?.includes("@")) {
+          const { data: business } = await supabaseAdmin.from("businesses").select("name").eq("id", businessId).maybeSingle();
+          await sendEmailInternal(creditorContact, "creditor_payment_notification", {
+            salonName: (business as Record<string, unknown> | null)?.name as string ?? "",
+            creditorName: d.creditor_name as string,
+            amount: `${d.currency_code} ${amount.toFixed(2)}`,
+            date: payDate,
+            reference: reference ?? "",
+          });
+        }
+
         return jsonCors(req, { debt: updated, payment: newPayment });
       }
 
@@ -372,41 +410,68 @@ Deno.serve(withLogging("debts", async (req: Request) => {
       const ctx = await requireOwnerOrManagerCtx(req, businessId);
       if (ctx instanceof Response) return ctx;
 
-      const creditorName   = String(body.creditor_name ?? "").trim();
       const category       = String(body.category ?? "other");
       const originalAmount = Number(body.original_amount ?? 0);
       const currentBalance = body.current_balance !== undefined ? Number(body.current_balance) : originalAmount;
+      const creditorType   = String(body.creditor_type ?? "business");
+      const supplierId     = (body.supplier_id as string | null) ?? null;
 
-      if (!creditorName)                         return badRequest("creditor_name is required");
       if (!VALID_CATEGORIES.includes(category))  return badRequest("Invalid category");
+      if (!VALID_CREDITOR_TYPES.includes(creditorType)) return badRequest("Invalid creditor_type");
       if (originalAmount <= 0)                   return badRequest("original_amount must be positive");
       if (currentBalance < 0)                    return badRequest("current_balance cannot be negative");
 
       const priority = String(body.priority ?? "medium");
       if (!VALID_PRIORITIES.includes(priority))  return badRequest("Invalid priority");
 
+      let creditorName = String(body.creditor_name ?? "").trim();
+      let creditorContact = (body.creditor_contact as string | null) ?? null;
+
+      // Linking an existing supplier auto-fills the creditor fields when the
+      // caller didn't already provide them explicitly.
+      if (supplierId) {
+        const { data: supplier } = await supabaseAdmin
+          .from("suppliers")
+          .select("name, email, phone")
+          .eq("id", supplierId)
+          .eq("business_id", businessId)
+          .maybeSingle();
+        if (supplier) {
+          const s = supplier as Record<string, unknown>;
+          if (!creditorName) creditorName = s.name as string;
+          if (!creditorContact) creditorContact = (s.email as string | null) ?? (s.phone as string | null) ?? null;
+        }
+      }
+
+      if (!creditorName) return badRequest("creditor_name is required");
+
       const { data: created, error: createErr } = await supabaseAdmin
         .from("business_debts")
         .insert({
-          business_id:            businessId,
-          creditor_name:          creditorName,
+          business_id:              businessId,
+          name:                     (body.name as string | null) ?? null,
+          creditor_type:            creditorType,
+          supplier_id:              supplierId,
+          creditor_name:            creditorName,
           category,
-          description:            (body.description as string | null) ?? null,
-          reference:              (body.reference as string | null) ?? null,
-          original_amount:        originalAmount,
-          current_balance:        currentBalance,
-          currency_code:          (body.currency_code as string) ?? "EUR",
-          interest_rate:          body.interest_rate != null ? Number(body.interest_rate) : null,
-          monthly_minimum:        body.monthly_minimum != null ? Number(body.monthly_minimum) : null,
-          due_date:               (body.due_date as string | null) ?? null,
-          start_date:             (body.start_date as string) ?? new Date().toISOString().slice(0, 10),
-          status:                 "active",
+          description:              (body.description as string | null) ?? null,
+          reference:                (body.reference as string | null) ?? null,
+          original_amount:          originalAmount,
+          current_balance:          currentBalance,
+          currency_code:            (body.currency_code as string) ?? "EUR",
+          interest_rate:            body.interest_rate != null ? Number(body.interest_rate) : null,
+          monthly_minimum:          body.monthly_minimum != null ? Number(body.monthly_minimum) : null,
+          preferred_payment_method: (body.preferred_payment_method as string | null) ?? null,
+          reminder_days_before:     body.reminder_days_before != null ? Number(body.reminder_days_before) : null,
+          due_date:                 (body.due_date as string | null) ?? null,
+          start_date:               (body.start_date as string) ?? new Date().toISOString().slice(0, 10),
+          status:                   body.status === "disputed" ? "disputed" : "active",
           priority,
-          creditor_contact:       (body.creditor_contact as string | null) ?? null,
-          notes:                  (body.notes as string | null) ?? null,
-          is_interest_deductible: Boolean(body.is_interest_deductible ?? false),
+          creditor_contact:         creditorContact,
+          notes:                    (body.notes as string | null) ?? null,
+          is_interest_deductible:   Boolean(body.is_interest_deductible ?? false),
         })
-        .select()
+        .select(`*, ${SUPPLIER_SELECT}`)
         .single();
 
       if (createErr) return serverError(createErr.message);
@@ -436,6 +501,9 @@ Deno.serve(withLogging("debts", async (req: Request) => {
 
       const update: Record<string, unknown> = {};
 
+      if (body.name !== undefined)                  update.name = body.name ?? null;
+      if (body.creditor_type !== undefined && VALID_CREDITOR_TYPES.includes(body.creditor_type as string)) update.creditor_type = body.creditor_type;
+      if (body.supplier_id !== undefined)           update.supplier_id = body.supplier_id ?? null;
       if (body.creditor_name !== undefined)         update.creditor_name = String(body.creditor_name).trim();
       if (body.category !== undefined)              update.category = body.category;
       if (body.description !== undefined)           update.description = body.description ?? null;
@@ -449,6 +517,8 @@ Deno.serve(withLogging("debts", async (req: Request) => {
       if (body.currency_code !== undefined)         update.currency_code = body.currency_code;
       if (body.interest_rate !== undefined)         update.interest_rate = body.interest_rate != null ? Number(body.interest_rate) : null;
       if (body.monthly_minimum !== undefined)       update.monthly_minimum = body.monthly_minimum != null ? Number(body.monthly_minimum) : null;
+      if (body.preferred_payment_method !== undefined) update.preferred_payment_method = body.preferred_payment_method ?? null;
+      if (body.reminder_days_before !== undefined)  update.reminder_days_before = body.reminder_days_before != null ? Number(body.reminder_days_before) : null;
       if (body.due_date !== undefined)              update.due_date = body.due_date ?? null;
       if (body.start_date !== undefined)            update.start_date = body.start_date;
       if (body.status !== undefined && VALID_STATUSES.includes(body.status as string)) update.status = body.status;
@@ -464,7 +534,7 @@ Deno.serve(withLogging("debts", async (req: Request) => {
         .from("business_debts")
         .update(update)
         .eq("id", id)
-        .select()
+        .select(`*, ${SUPPLIER_SELECT}`)
         .single();
 
       if (upErr) return serverError(upErr.message);

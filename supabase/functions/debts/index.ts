@@ -18,6 +18,12 @@ function rewriteLocalUrl(u: string): string {
   return u.replace(/^https?:\/\/[^/]+(?=\/storage\/)/, "http://127.0.0.1:54321");
 }
 
+function dayOffset(dateStr: string, days: number): string {
+  const d = new Date(dateStr + "T12:00:00Z");
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
 function extFromMime(mime: string | null | undefined): string {
   if (!mime) return "bin";
   if (mime.includes("pdf")) return "pdf";
@@ -297,6 +303,28 @@ Deno.serve(withLogging("debts", async (req: Request) => {
 
         const d = debt as Record<string, unknown>;
         if (d.status === "paid_off") return badRequest("This debt is already paid off");
+
+        // Duplicate-payment guard: the same real-world payment can otherwise be
+        // recorded twice (once from /owner/expenses, once from Bookkeeping, or
+        // from two near-duplicate imported bank rows). Warn instead of blocking
+        // outright, since recurring debts legitimately have repeated
+        // same-amount payments — the caller can pass confirm_duplicate to proceed.
+        const confirmDuplicate = Boolean(body.confirm_duplicate ?? false);
+        if (!confirmDuplicate) {
+          const windowStart = dayOffset(payDate, -3);
+          const windowEnd   = dayOffset(payDate, 3);
+          const { data: dupCandidates } = await supabaseAdmin
+            .from("debt_payments")
+            .select("id, amount, fee, payment_date, payment_method, reference, notes, created_at")
+            .eq("debt_id", debtId)
+            .gte("payment_date", windowStart)
+            .lte("payment_date", windowEnd);
+
+          const dup = (dupCandidates ?? []).find((p) => Math.abs(Number(p.amount) - amount) < 0.01);
+          if (dup) {
+            return jsonCors(req, { duplicate_warning: true, existing_payment: dup });
+          }
+        }
 
         let receiptPath: string | null = null;
         if (receiptBase64) {

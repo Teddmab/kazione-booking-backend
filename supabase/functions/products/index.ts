@@ -560,7 +560,7 @@ Deno.serve(withLogging("products", async (req: Request) => {
           ? Math.abs(rawQty)
           : -Math.abs(rawQty);
 
-        const { error: movErr } = await supabaseAdmin
+        const { data: movRow, error: movErr } = await supabaseAdmin
           .from("stock_movements")
           .insert({
             business_id: ctx.businessId,
@@ -568,10 +568,17 @@ Deno.serve(withLogging("products", async (req: Request) => {
             movement_type: movementType,
             quantity: signedQty,
             unit_cost: body.unit_cost ?? null,
+            vat_rate: movementType === "purchase" ? (body.vat_rate ?? null) : null,
+            movement_date: body.movement_date ?? new Date().toISOString().slice(0, 10),
+            receipt_url: body.receipt_base64
+              ? `data:${body.receipt_media_type ?? "image/jpeg"};base64,${body.receipt_base64}`
+              : null,
             reference_type: "manual",
             notes: body.notes ?? null,
             created_by: ctx.userId,
-          });
+          })
+          .select("id")
+          .single();
 
         if (movErr) return serverError(movErr.message);
 
@@ -584,7 +591,7 @@ Deno.serve(withLogging("products", async (req: Request) => {
           .single();
 
         if (updErr) return serverError(updErr.message);
-        return jsonCors(req, updated);
+        return jsonCors(req, { ...updated, movement_id: (movRow as Record<string, unknown>).id });
       }
 
       // PATCH /products?action=service-usage&id=  — update linked quantity

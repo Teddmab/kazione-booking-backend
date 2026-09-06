@@ -22,6 +22,15 @@ function dayOffset(dateStr: string, days: number): string {
   return d.toISOString().slice(0, 10);
 }
 
+// Collapses whitespace and lowercases before hashing for the import dedup
+// key — a re-exported statement with slightly reformatted descriptions
+// (extra spaces, different casing) would otherwise slip past the exact
+// string-match dedup and create a second row for the same real bank line,
+// which then gets reconciled independently and shows up as a duplicate.
+function normalizeDesc(s: string): string {
+  return s.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
 /**
  * /bank-statements — bank statement import and reconciliation
  *
@@ -38,7 +47,7 @@ function dayOffset(dateStr: string, days: number): string {
  * PATCH ?action=transaction&id=
  *       body: { category?, notes?, reconciled_payment_id?, reconciled_expense_id?,
  *               reconciled_fixed_cost_id?, reconciled_debt_payment_id?,
- *               reconciled_appointment_id? }
+ *               reconciled_appointment_id?, reconciled_stock_movement_id? }
  * DELETE ?id=                                     → delete single transaction
  * DELETE ?action=delete-batch&id=                 → delete entire batch + its transactions
  */
@@ -116,7 +125,8 @@ Deno.serve(withLogging("bank-statements", async (req: Request) => {
           "reconciled_expense_id.not.is.null," +
           "reconciled_fixed_cost_id.not.is.null," +
           "reconciled_debt_payment_id.not.is.null," +
-          "reconciled_appointment_id.not.is.null"
+          "reconciled_appointment_id.not.is.null," +
+          "reconciled_stock_movement_id.not.is.null"
         );
       } else if (status === "unreconciled") {
         q = q
@@ -124,7 +134,8 @@ Deno.serve(withLogging("bank-statements", async (req: Request) => {
           .is("reconciled_expense_id", null)
           .is("reconciled_fixed_cost_id", null)
           .is("reconciled_debt_payment_id", null)
-          .is("reconciled_appointment_id", null);
+          .is("reconciled_appointment_id", null)
+          .is("reconciled_stock_movement_id", null);
       }
 
       const { data, error, count } = await q;
@@ -133,6 +144,7 @@ Deno.serve(withLogging("bank-statements", async (req: Request) => {
       const transactions = (data ?? []).map((t: Record<string, unknown>) => ({
         ...t,
         is_reconciled: (
+          t.reconciled_stock_movement_id !== null ||
           t.reconciled_payment_id      !== null ||
           t.reconciled_expense_id      !== null ||
           t.reconciled_fixed_cost_id   !== null ||
@@ -178,7 +190,7 @@ Deno.serve(withLogging("bank-statements", async (req: Request) => {
 
       const existingKeys = new Set(
         (existingTxs ?? []).map((t: Record<string, unknown>) =>
-          `${t.date}|${Number(t.amount).toFixed(2)}|${String(t.description ?? "").trim()}`
+          `${t.date}|${Number(t.amount).toFixed(2)}|${normalizeDesc(String(t.description ?? ""))}`
         )
       );
 
@@ -186,7 +198,7 @@ Deno.serve(withLogging("bank-statements", async (req: Request) => {
       const uniqueRows: Array<Record<string, unknown>> = [];
       let skippedCount = 0;
       for (const row of rows) {
-        const key = `${row.date}|${Number(row.amount ?? 0).toFixed(2)}|${String(row.description ?? "").trim()}`;
+        const key = `${row.date}|${Number(row.amount ?? 0).toFixed(2)}|${normalizeDesc(String(row.description ?? ""))}`;
         if (existingKeys.has(key)) {
           skippedCount++;
         } else {
@@ -201,17 +213,19 @@ Deno.serve(withLogging("bank-statements", async (req: Request) => {
       }
 
       // Gather already-reconciled IDs from existing bank_transactions
-      const [pIds, eIds, fcIds, dpIds] = await Promise.all([
+      const [pIds, eIds, fcIds, dpIds, smIds] = await Promise.all([
         supabaseAdmin.from("bank_transactions").select("reconciled_payment_id").eq("business_id", ctx.businessId).not("reconciled_payment_id", "is", null),
         supabaseAdmin.from("bank_transactions").select("reconciled_expense_id").eq("business_id", ctx.businessId).not("reconciled_expense_id", "is", null),
         supabaseAdmin.from("bank_transactions").select("reconciled_fixed_cost_id").eq("business_id", ctx.businessId).not("reconciled_fixed_cost_id", "is", null),
         supabaseAdmin.from("bank_transactions").select("reconciled_debt_payment_id").eq("business_id", ctx.businessId).not("reconciled_debt_payment_id", "is", null),
+        supabaseAdmin.from("bank_transactions").select("reconciled_stock_movement_id").eq("business_id", ctx.businessId).not("reconciled_stock_movement_id", "is", null),
       ]);
 
       const usedPaymentIds  = new Set((pIds.data  ?? []).map((r) => r.reconciled_payment_id  as string));
       const usedExpenseIds  = new Set((eIds.data  ?? []).map((r) => r.reconciled_expense_id  as string));
       const usedFcIds       = new Set((fcIds.data ?? []).map((r) => r.reconciled_fixed_cost_id as string));
       const usedDpIds       = new Set((dpIds.data ?? []).map((r) => r.reconciled_debt_payment_id as string));
+      const usedSmIds       = new Set((smIds.data ?? []).map((r) => r.reconciled_stock_movement_id as string));
 
       // Process unique rows and auto-reconcile
       const insertRows: Record<string, unknown>[] = [];
@@ -223,10 +237,11 @@ Deno.serve(withLogging("bank-statements", async (req: Request) => {
         const dayBefore = dayOffset(dateStr, -1);
         const dayAfter  = dayOffset(dateStr, 1);
 
-        let reconciled_payment_id:      string | null = null;
-        let reconciled_expense_id:      string | null = null;
-        let reconciled_fixed_cost_id:   string | null = null;
-        let reconciled_debt_payment_id: string | null = null;
+        let reconciled_payment_id:        string | null = null;
+        let reconciled_expense_id:        string | null = null;
+        let reconciled_fixed_cost_id:     string | null = null;
+        let reconciled_debt_payment_id:   string | null = null;
+        let reconciled_stock_movement_id: string | null = null;
 
         if (amount > 0) {
           // Credit → match payments
@@ -298,6 +313,26 @@ Deno.serve(withLogging("bank-statements", async (req: Request) => {
                 reconciled_debt_payment_id = dpMatch.id;
                 usedDpIds.add(dpMatch.id);
                 autoReconciledCount++;
+              } else {
+                // 4. Try stock_movements (purchases), matching quantity * unit_cost
+                const { data: smMatches } = await supabaseAdmin
+                  .from("stock_movements")
+                  .select("id, quantity, unit_cost")
+                  .eq("business_id", ctx.businessId)
+                  .eq("movement_type", "purchase")
+                  .not("unit_cost", "is", null)
+                  .gte("movement_date", dayBefore)
+                  .lte("movement_date", dayAfter);
+
+                const smMatch = (smMatches ?? []).find((m) =>
+                  Math.abs(Math.abs(Number(m.quantity)) * Number(m.unit_cost) - absAmt) < 0.01 &&
+                  !usedSmIds.has(m.id)
+                );
+                if (smMatch) {
+                  reconciled_stock_movement_id = smMatch.id;
+                  usedSmIds.add(smMatch.id);
+                  autoReconciledCount++;
+                }
               }
             }
           }
@@ -315,6 +350,7 @@ Deno.serve(withLogging("bank-statements", async (req: Request) => {
           reconciled_expense_id,
           reconciled_fixed_cost_id,
           reconciled_debt_payment_id,
+          reconciled_stock_movement_id,
         });
       }
 
@@ -359,7 +395,8 @@ Deno.serve(withLogging("bank-statements", async (req: Request) => {
         .is("reconciled_payment_id", null)
         .is("reconciled_expense_id", null)
         .is("reconciled_fixed_cost_id", null)
-        .is("reconciled_debt_payment_id", null);
+        .is("reconciled_debt_payment_id", null)
+        .is("reconciled_stock_movement_id", null);
 
       if (txErr) return serverError(txErr.message);
 
@@ -402,7 +439,7 @@ Deno.serve(withLogging("bank-statements", async (req: Request) => {
 
       const { data: existing, error: existErr } = await supabaseAdmin
         .from("bank_transactions")
-        .select("business_id, reconciled_payment_id, reconciled_expense_id, reconciled_fixed_cost_id, reconciled_debt_payment_id, reconciled_appointment_id")
+        .select("business_id, reconciled_payment_id, reconciled_expense_id, reconciled_fixed_cost_id, reconciled_debt_payment_id, reconciled_appointment_id, reconciled_stock_movement_id")
         .eq("id", id)
         .maybeSingle();
 
@@ -418,30 +455,33 @@ Deno.serve(withLogging("bank-statements", async (req: Request) => {
 
       if (body.category  !== undefined) update.category  = body.category  ?? null;
       if (body.notes     !== undefined) update.notes     = body.notes     ?? null;
-      if (body.reconciled_payment_id       !== undefined) update.reconciled_payment_id       = body.reconciled_payment_id       ?? null;
-      if (body.reconciled_expense_id       !== undefined) update.reconciled_expense_id       = body.reconciled_expense_id       ?? null;
-      if (body.reconciled_fixed_cost_id    !== undefined) update.reconciled_fixed_cost_id    = body.reconciled_fixed_cost_id    ?? null;
-      if (body.reconciled_debt_payment_id  !== undefined) update.reconciled_debt_payment_id  = body.reconciled_debt_payment_id  ?? null;
-      if (body.reconciled_appointment_id   !== undefined) update.reconciled_appointment_id   = body.reconciled_appointment_id   ?? null;
+      if (body.reconciled_payment_id        !== undefined) update.reconciled_payment_id        = body.reconciled_payment_id        ?? null;
+      if (body.reconciled_expense_id        !== undefined) update.reconciled_expense_id        = body.reconciled_expense_id        ?? null;
+      if (body.reconciled_fixed_cost_id     !== undefined) update.reconciled_fixed_cost_id     = body.reconciled_fixed_cost_id     ?? null;
+      if (body.reconciled_debt_payment_id   !== undefined) update.reconciled_debt_payment_id   = body.reconciled_debt_payment_id   ?? null;
+      if (body.reconciled_appointment_id    !== undefined) update.reconciled_appointment_id    = body.reconciled_appointment_id    ?? null;
+      if (body.reconciled_stock_movement_id !== undefined) update.reconciled_stock_movement_id = body.reconciled_stock_movement_id ?? null;
 
       if (Object.keys(update).length === 0) return badRequest("No valid fields to update");
 
       // Guard: reject if trying to set a reconcile link on an already-reconciled transaction.
       // Setting any reconcile field to null (unlink) is always allowed.
       const settingReconcileLink =
-        (update.reconciled_payment_id      != null) ||
-        (update.reconciled_expense_id      != null) ||
-        (update.reconciled_fixed_cost_id   != null) ||
-        (update.reconciled_debt_payment_id != null) ||
-        (update.reconciled_appointment_id  != null);
+        (update.reconciled_payment_id        != null) ||
+        (update.reconciled_expense_id        != null) ||
+        (update.reconciled_fixed_cost_id     != null) ||
+        (update.reconciled_debt_payment_id   != null) ||
+        (update.reconciled_appointment_id    != null) ||
+        (update.reconciled_stock_movement_id != null);
 
       if (settingReconcileLink) {
         const alreadyReconciled =
-          ex.reconciled_payment_id      != null ||
-          ex.reconciled_expense_id      != null ||
-          ex.reconciled_fixed_cost_id   != null ||
-          ex.reconciled_debt_payment_id != null ||
-          ex.reconciled_appointment_id  != null;
+          ex.reconciled_payment_id        != null ||
+          ex.reconciled_expense_id        != null ||
+          ex.reconciled_fixed_cost_id     != null ||
+          ex.reconciled_debt_payment_id   != null ||
+          ex.reconciled_appointment_id    != null ||
+          ex.reconciled_stock_movement_id != null;
         if (alreadyReconciled) {
           return conflict("Transaction is already reconciled — unlink it before linking to a different record");
         }
@@ -460,11 +500,12 @@ Deno.serve(withLogging("bank-statements", async (req: Request) => {
       return jsonCors(req, {
         ...t,
         is_reconciled: (
-          t.reconciled_payment_id      !== null ||
-          t.reconciled_expense_id      !== null ||
-          t.reconciled_fixed_cost_id   !== null ||
-          t.reconciled_debt_payment_id !== null ||
-          t.reconciled_appointment_id  !== null
+          t.reconciled_payment_id        !== null ||
+          t.reconciled_expense_id        !== null ||
+          t.reconciled_fixed_cost_id     !== null ||
+          t.reconciled_debt_payment_id   !== null ||
+          t.reconciled_appointment_id    !== null ||
+          t.reconciled_stock_movement_id !== null
         ),
       });
     }

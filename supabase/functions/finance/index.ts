@@ -12,6 +12,29 @@ function humanize(s: string): string {
   return words.charAt(0).toUpperCase() + words.slice(1);
 }
 
+function extFromMime(mime: string | null | undefined): string {
+  if (!mime) return "bin";
+  if (mime.includes("pdf")) return "pdf";
+  if (mime.includes("png")) return "png";
+  if (mime.includes("webp")) return "webp";
+  if (mime.includes("heic")) return "heic";
+  return "jpg";
+}
+
+// Attaching a receipt to an expense AFTER it's already been created (e.g.
+// from the Transactions tab's detail panel) — same bucket/path pattern as
+// receipt-scan/index.ts's upload, just invoked from a plain PATCH instead
+// of the OCR flow.
+async function uploadExpenseReceipt(businessId: string, base64: string, mimeType: string): Promise<string> {
+  const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
+  const path = `${businessId}/${crypto.randomUUID()}.${extFromMime(mimeType)}`;
+  const { error } = await supabaseAdmin.storage
+    .from("receipts")
+    .upload(path, bytes, { contentType: mimeType || "application/octet-stream" });
+  if (error) throw new Error(error.message);
+  return path;
+}
+
 /**
  * /finance — finance analytics, expense CRUD, bookkeeping
  *
@@ -171,6 +194,8 @@ Deno.serve(withLogging("finance", async (req: Request) => {
           const appt = p.appointment as Record<string, unknown> | null;
           const svc = appt?.service as Record<string, unknown> | null;
           return {
+            id: p.id,
+            record_type: "payment" as const,
             date: p.paid_at,
             type: "income" as const,
             description: `Payment – ${svc?.name ?? "Service"} (${appt?.booking_reference ?? ""})`,
@@ -185,6 +210,8 @@ Deno.serve(withLogging("finance", async (req: Request) => {
         const expenseRows = (expensesResult.data ?? []).map((e: Record<string, unknown>) => {
           const supplier = e.supplier as Record<string, unknown> | null;
           return {
+            id: e.id,
+            record_type: "expense" as const,
             date: e.date,
             type: "expense" as const,
             description: e.description,
@@ -197,6 +224,8 @@ Deno.serve(withLogging("finance", async (req: Request) => {
         });
 
         const fixedCostRows = (fixedCostsResult.data ?? []).map((fc: Record<string, unknown>) => ({
+          id: fc.id,
+          record_type: "fixed_cost" as const,
           date: fc.cost_date,
           type: "expense" as const,
           description: fc.name ?? "Fixed cost",
@@ -210,6 +239,8 @@ Deno.serve(withLogging("finance", async (req: Request) => {
         const debtPaymentRows = (debtPaymentsResult.data ?? []).map((dp: Record<string, unknown>) => {
           const debt = dp.debt as Record<string, unknown> | null;
           return {
+            id: dp.id,
+            record_type: "debt_payment" as const,
             date: dp.payment_date,
             type: "expense" as const,
             description: `Debt repayment – ${debt?.creditor_name ?? "Creditor"}`,
@@ -583,6 +614,18 @@ Deno.serve(withLogging("finance", async (req: Request) => {
 
       const ctx = await requireOwnerOrManagerCtx(req, (existing as Record<string, unknown>).business_id as string);
       if (ctx instanceof Response) return ctx;
+
+      const receiptBase64 = body.receipt_base64 as string | undefined;
+      const receiptMimeType = body.receipt_media_type as string | undefined;
+      delete body.receipt_base64;
+      delete body.receipt_media_type;
+      if (receiptBase64) {
+        try {
+          body.receipt_url = await uploadExpenseReceipt(ctx.businessId, receiptBase64, receiptMimeType ?? "image/jpeg");
+        } catch (e) {
+          return serverError(e instanceof Error ? e.message : "Failed to upload receipt");
+        }
+      }
 
       const { data: expense, error } = await supabaseAdmin
         .from("expenses")

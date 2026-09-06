@@ -10,6 +10,8 @@ import {
   staffInviteEmail,
   staffAppointmentReminderEmail,
   ownerAppointmentReminderEmail,
+  debtPaymentReminderEmail,
+  creditorPaymentNotificationEmail,
 } from "../_shared/resend.ts";
 import { withLogging } from "../_shared/logger.ts";
 
@@ -56,7 +58,9 @@ type TemplateName =
   | "staff_invite"
   | "review_request"
   | "staff_appointment_reminder"
-  | "owner_appointment_reminder";
+  | "owner_appointment_reminder"
+  | "debt_payment_reminder"
+  | "creditor_payment_notification";
 
 interface SendEmailBody {
   to: string;
@@ -74,6 +78,8 @@ const VALID_TEMPLATES: TemplateName[] = [
   "review_request",
   "staff_appointment_reminder",
   "owner_appointment_reminder",
+  "debt_payment_reminder",
+  "creditor_payment_notification",
 ];
 
 // ---------------------------------------------------------------------------
@@ -259,6 +265,35 @@ Deno.serve(withLogging("send-email", async (req: Request) => {
           time: body.data.time ?? "",
           reference: body.data.reference ?? "",
           manageUrl: body.data.manageUrl ?? "",
+        });
+        subject = result.subject;
+        html = result.html;
+        break;
+      }
+
+      case "debt_payment_reminder": {
+        const result = debtPaymentReminderEmail({
+          salonName: body.data.salonName ?? "",
+          salonLogoUrl: body.data.salonLogoUrl || undefined,
+          creditorName: body.data.creditorName ?? "",
+          debtName: body.data.debtName ?? "",
+          amount: body.data.amount ?? "",
+          dueDate: body.data.dueDate ?? "",
+          manageUrl: body.data.manageUrl ?? "",
+        });
+        subject = result.subject;
+        html = result.html;
+        break;
+      }
+
+      case "creditor_payment_notification": {
+        const result = creditorPaymentNotificationEmail({
+          salonName: body.data.salonName ?? "",
+          salonLogoUrl: body.data.salonLogoUrl || undefined,
+          creditorName: body.data.creditorName ?? "",
+          amount: body.data.amount ?? "",
+          date: body.data.date ?? "",
+          reference: body.data.reference || undefined,
         });
         subject = result.subject;
         html = result.html;

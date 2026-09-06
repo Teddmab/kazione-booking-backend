@@ -637,6 +637,112 @@ async function createPendingStatusTasks(
 }
 
 // ---------------------------------------------------------------------------
+// TASK C — Send debt payment reminders
+//
+// Debts have a single due_date + optional monthly_minimum, not a stored
+// per-installment schedule — the "next payment" is due_date rolled forward
+// by whole months until it lands on or after today (mirrors the frontend's
+// getNextPaymentDate in debtShared.tsx). A reminder fires once per occurrence
+// of that recurring date, gated by reminder_days_before and deduped via
+// last_reminder_sent_for (the next-payment date the last reminder covered) —
+// next month's occurrence has a different date, so the reminder fires again.
+// ---------------------------------------------------------------------------
+
+function addMonthsUTC(d: Date, months: number): Date {
+  const nd = new Date(d);
+  nd.setUTCMonth(nd.getUTCMonth() + months);
+  return nd;
+}
+
+function getNextDebtPaymentDate(dueDate: string, today: Date): Date {
+  let d = new Date(dueDate + "T00:00:00Z");
+  let guard = 0;
+  while (d < today && guard < 1200) {
+    d = addMonthsUTC(d, 1);
+    guard++;
+  }
+  return d;
+}
+
+async function sendDebtPaymentReminders(businessId?: string): Promise<{ sent: number; errors: number }> {
+  let query = supabaseAdmin
+    .from("business_debts")
+    .select("id, business_id, name, creditor_name, currency_code, due_date, monthly_minimum, reminder_days_before, last_reminder_sent_for")
+    .eq("status", "active")
+    .eq("is_archived", false)
+    .not("reminder_days_before", "is", null)
+    .not("due_date", "is", null)
+    .not("monthly_minimum", "is", null);
+  if (businessId) query = query.eq("business_id", businessId);
+
+  const { data: debts, error } = await query;
+  if (error) {
+    console.error("[send-reminders] debt query failed:", error.message);
+    return { sent: 0, errors: 1 };
+  }
+
+  const siteUrl = Deno.env.get("SITE_URL") ?? "https://kazionebooking.com";
+  const today = new Date();
+  today.setUTCHours(0, 0, 0, 0);
+  const todayStr = today.toISOString().slice(0, 10);
+
+  let sent = 0, errors = 0;
+
+  for (const row of debts ?? []) {
+    const debt = row as Record<string, unknown>;
+    try {
+      const next = getNextDebtPaymentDate(debt.due_date as string, today);
+      const nextStr = next.toISOString().slice(0, 10);
+      if (debt.last_reminder_sent_for === nextStr) continue; // already reminded for this occurrence
+
+      const reminderFrom = addMonthsUTC(next, 0);
+      reminderFrom.setUTCDate(reminderFrom.getUTCDate() - Number(debt.reminder_days_before));
+      const reminderFromStr = reminderFrom.toISOString().slice(0, 10);
+      if (todayStr < reminderFromStr || todayStr > nextStr) continue; // not yet in the reminder window
+
+      const { data: business } = await supabaseAdmin
+        .from("businesses")
+        .select("name")
+        .eq("id", debt.business_id as string)
+        .maybeSingle();
+
+      const { data: ownerMember } = await supabaseAdmin
+        .from("business_members")
+        .select("users(email)")
+        .eq("business_id", debt.business_id as string)
+        .eq("role", "owner")
+        .eq("is_active", true)
+        .limit(1)
+        .maybeSingle();
+
+      const ownerEmail = (ownerMember as Record<string, unknown> | null)?.users as { email?: string } | undefined;
+      if (!ownerEmail?.email) { errors++; continue; }
+
+      const result = await sendEmailInternal(ownerEmail.email, "debt_payment_reminder", {
+        salonName: (business as Record<string, unknown> | null)?.name as string ?? "",
+        creditorName: debt.creditor_name as string,
+        debtName: (debt.name as string | null) ?? (debt.creditor_name as string),
+        amount: `${debt.currency_code} ${Number(debt.monthly_minimum).toFixed(2)}`,
+        dueDate: nextStr,
+        manageUrl: `${siteUrl}/owner/expenses?tab=debt`,
+      });
+
+      if (result.ok) {
+        sent++;
+        await supabaseAdmin.from("business_debts").update({ last_reminder_sent_for: nextStr }).eq("id", debt.id as string);
+      } else {
+        errors++;
+      }
+    } catch (err) {
+      console.error(`Debt reminder error for debt ${debt.id}:`, err);
+      errors++;
+    }
+  }
+
+  return { sent, errors };
+}
+
+// ---------------------------------------------------------------------------
 // Handler
 // ---------------------------------------------------------------------------
 
@@ -651,11 +757,12 @@ Deno.serve(withLogging("send-reminders", async (req: Request) => {
   // ── Path 1: CRON_SECRET — runs across all businesses ──────────────────
   if (verifyCronAuth(req)) {
     try {
-      const [reminders, tasks] = await Promise.all([
+      const [reminders, tasks, debtReminders] = await Promise.all([
         sendReminders(),
         createPendingStatusTasks(),
+        sendDebtPaymentReminders(),
       ]);
-      const result = { ok: true, timestamp: new Date().toISOString(), reminders, tasks };
+      const result = { ok: true, timestamp: new Date().toISOString(), reminders, tasks, debtReminders };
       console.log("send-reminders (cron) completed:", JSON.stringify(result));
       return new Response(JSON.stringify(result), {
         status: 200,
@@ -688,11 +795,15 @@ Deno.serve(withLogging("send-reminders", async (req: Request) => {
     const tasks = body.appointment_id
       ? { created: 0, skipped: 0, errors: 0 }
       : await createPendingStatusTasks(ctx.businessId);
+    const debtReminders = body.appointment_id
+      ? { sent: 0, errors: 0 }
+      : await sendDebtPaymentReminders(ctx.businessId);
     const result = {
       ok: true,
       timestamp: new Date().toISOString(),
       reminders,
       tasks,
+      debtReminders,
       triggered_by: ctx.userId,
     };
     console.log("send-reminders (manual) completed:", JSON.stringify(result));

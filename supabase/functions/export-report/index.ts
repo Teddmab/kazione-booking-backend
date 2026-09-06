@@ -14,7 +14,8 @@ type ReportType =
   | "expenses"
   | "tax_summary"
   | "staff_payroll"
-  | "supplier_spend";
+  | "supplier_spend"
+  | "bank_transactions";
 
 type DirectReportType = "appointments" | "revenue" | "clients";
 
@@ -32,6 +33,7 @@ const VALID_REPORT_TYPES: ReportType[] = [
   "tax_summary",
   "staff_payroll",
   "supplier_spend",
+  "bank_transactions",
 ];
 
 const VALID_DIRECT_TYPES: DirectReportType[] = ["appointments", "revenue", "clients"];
@@ -328,6 +330,45 @@ async function generateSupplierSpendReport(
   };
 }
 
+async function generateBankTransactionsReport(
+  businessId: string,
+  from: string,
+  to: string,
+): Promise<{ headers: string[]; rows: Record<string, unknown>[] }> {
+  const { data, error } = await supabaseAdmin
+    .from("bank_transactions")
+    .select(`
+      date, description, amount, currency_code, category, reference,
+      reconciled_payment_id, reconciled_expense_id, reconciled_fixed_cost_id,
+      reconciled_debt_payment_id, reconciled_appointment_id, reconciled_stock_movement_id
+    `)
+    .eq("business_id", businessId)
+    .gte("date", from)
+    .lte("date", to)
+    .order("date", { ascending: true });
+
+  if (error) throw error;
+
+  // deno-lint-ignore no-explicit-any
+  const rows = (data ?? []).map((t: any) => ({
+    date: t.date ?? "",
+    description: t.description ?? "",
+    amount: Number(t.amount),
+    currency: t.currency_code ?? "EUR",
+    category: t.category ?? "Uncategorized",
+    reference: t.reference ?? "",
+    reconciled: [
+      t.reconciled_payment_id, t.reconciled_expense_id, t.reconciled_fixed_cost_id,
+      t.reconciled_debt_payment_id, t.reconciled_appointment_id, t.reconciled_stock_movement_id,
+    ].some((v) => v !== null) ? "yes" : "no",
+  }));
+
+  return {
+    headers: ["date", "description", "amount", "currency", "category", "reference", "reconciled"],
+    rows,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Direct download report generators (GET — no Storage upload)
 // ---------------------------------------------------------------------------
@@ -531,6 +572,7 @@ const GENERATORS: Record<
   tax_summary: generateTaxSummaryReport,
   staff_payroll: generateStaffPayrollReport,
   supplier_spend: generateSupplierSpendReport,
+  bank_transactions: generateBankTransactionsReport,
 };
 
 // ---------------------------------------------------------------------------

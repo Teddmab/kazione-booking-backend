@@ -4,6 +4,7 @@ import { badRequest, conflict, notFound, serverError } from "../_shared/errors.t
 import { withLogging } from "../_shared/logger.ts";
 import { requireOwnerOrManagerCtx } from "../_shared/auth.ts";
 import { checkMonthNotLocked } from "../_shared/financialPeriods.ts";
+import { findRecordCandidates, loadUsedRecordIds } from "./suggestMatches.ts";
 
 function csvResponse(req: Request, text: string): Response {
   return new Response(text, {
@@ -37,9 +38,13 @@ function normalizeDesc(s: string): string {
  *
  * GET  ?action=template                           → CSV template (no auth required)
  * GET  ?action=batches&business_id=               → list import batches
+ * GET  ?action=category-summary&business_id=&from=&to=  → grouped totals by category
+ * GET  ?action=suggested-matches&business_id=
+ *       [&batch_id=|from=&to=][&limit=25, max 50] → candidate record suggestions for unreconciled transactions
  * GET  ?action=transactions&business_id=&from=&to=
  *       [&status=all|reconciled|unreconciled]
  *       [&type=all|credit|debit]
+ *       [&category=][&uncategorized=true]
  *       [&batch_id=]
  *       [&page=1&limit=50]                        → paginated transaction list
  * POST ?action=import
@@ -94,12 +99,85 @@ Deno.serve(withLogging("bank-statements", async (req: Request) => {
         return jsonCors(req, { batches: data ?? [] });
       }
 
+      // Category summary — grouped totals by the freeform `category` column
+      // for the given date range. Supabase's client has no GROUP BY, so this
+      // fetches once and aggregates in JS, mirroring fixed-costs' ?action=summary.
+      if (action === "category-summary") {
+        const from = url.searchParams.get("from");
+        const to   = url.searchParams.get("to");
+        if (!from || !to) return badRequest("from and to are required");
+
+        const { data, error } = await supabaseAdmin
+          .from("bank_transactions")
+          .select("category, amount")
+          .eq("business_id", ctx.businessId)
+          .gte("date", from).lte("date", to);
+        if (error) return serverError(error.message);
+
+        const byCategory = new Map<string, { income: number; expense: number; count: number }>();
+        for (const row of (data ?? []) as { category: string | null; amount: number }[]) {
+          const key = row.category?.trim() || "Uncategorized";
+          const bucket = byCategory.get(key) ?? { income: 0, expense: 0, count: 0 };
+          if (Number(row.amount) >= 0) bucket.income += Number(row.amount);
+          else bucket.expense += Math.abs(Number(row.amount));
+          bucket.count += 1;
+          byCategory.set(key, bucket);
+        }
+        const categories = [...byCategory.entries()]
+          .map(([category, v]) => ({ category, ...v }))
+          .sort((a, b) => (b.income + b.expense) - (a.income + a.expense));
+
+        return jsonCors(req, { categories });
+      }
+
+      // Suggested matches — for currently-unreconciled transactions, propose
+      // likely payments/expenses/fixed_costs/debt_payments to link. Manually
+      // triggered from the frontend (a button), not auto-fetched, and
+      // server-clamped to a bounded number of transactions per call so the
+      // per-transaction candidate queries can't blow up.
+      if (action === "suggested-matches") {
+        const batchId = url.searchParams.get("batch_id");
+        const from = url.searchParams.get("from");
+        const to   = url.searchParams.get("to");
+        const suggestLimit = Math.min(50, Math.max(1, parseInt(url.searchParams.get("limit") ?? "25", 10)));
+
+        // deno-lint-ignore no-explicit-any
+        let sq: any = supabaseAdmin.from("bank_transactions")
+          .select("id, date, description, amount")
+          .eq("business_id", ctx.businessId)
+          .is("reconciled_payment_id", null).is("reconciled_expense_id", null)
+          .is("reconciled_fixed_cost_id", null).is("reconciled_debt_payment_id", null)
+          .is("reconciled_appointment_id", null).is("reconciled_stock_movement_id", null)
+          .order("date", { ascending: false })
+          .limit(suggestLimit);
+        if (batchId) sq = sq.eq("import_batch_id", batchId);
+        if (from) sq = sq.gte("date", from);
+        if (to) sq = sq.lte("date", to);
+
+        const { data: unmatchedTxs, error: txErr } = await sq;
+        if (txErr) return serverError(txErr.message);
+
+        const excludeIds = await loadUsedRecordIds(ctx.businessId);
+        const suggestions = await Promise.all((unmatchedTxs ?? []).map(async (t: Record<string, unknown>) => {
+          const candidates = await findRecordCandidates(
+            ctx.businessId,
+            { amount: Number(t.amount), date: t.date as string, description: t.description as string },
+            excludeIds,
+          );
+          return { transaction_id: t.id, best_match: candidates[0] ?? null, candidates };
+        }));
+
+        return jsonCors(req, { suggestions, scanned_count: (unmatchedTxs ?? []).length });
+      }
+
       // Transactions list
       const from    = url.searchParams.get("from");
       const to      = url.searchParams.get("to");
       const status  = url.searchParams.get("status") ?? "all";
       const type    = url.searchParams.get("type")   ?? "all";
       const batchId = url.searchParams.get("batch_id");
+      const category = url.searchParams.get("category");
+      const uncategorized = url.searchParams.get("uncategorized") === "true";
       const page    = Math.max(1, parseInt(url.searchParams.get("page") ?? "1", 10));
       const limit   = Math.min(200, Math.max(1, parseInt(url.searchParams.get("limit") ?? "50", 10)));
       const offset  = (page - 1) * limit;
@@ -116,6 +194,8 @@ Deno.serve(withLogging("bank-statements", async (req: Request) => {
       if (from)    q = q.gte("date", from);
       if (to)      q = q.lte("date", to);
       if (batchId) q = q.eq("import_batch_id", batchId);
+      if (category) q = q.eq("category", category);
+      if (uncategorized) q = q.is("category", null);
 
       if (type === "credit") q = q.gt("amount", 0);
       if (type === "debit")  q = q.lt("amount", 0);

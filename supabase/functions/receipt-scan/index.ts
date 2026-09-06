@@ -3,21 +3,38 @@ import { handleCors, jsonCors } from "../_shared/cors.ts";
 import { badRequest, notFound, serverError } from "../_shared/errors.ts";
 import { withLogging } from "../_shared/logger.ts";
 import { requireOwnerOrManagerCtx } from "../_shared/auth.ts";
+import { extFromMime, rewriteLocalUrl } from "../_shared/storage.ts";
 import { findCandidates, type OcrData } from "./match.ts";
 
 /**
- * /receipt-scan — Claude Vision OCR + smart matching
+ * /receipt-scan — Claude Vision OCR + smart matching, plus a generic
+ * documents inbox (any filed document, not necessarily OCR-matched)
  *
  * POST   body: { business_id, image_base64, image_type?, receipt_type? }
  *   receipt_type: "income" (default) | "expense"
  *   → Uploads to storage, calls Claude Vision, runs matching
  *   → Returns { receipt_id, ocr, candidates, receipt_type }
  *
+ * POST   body: { business_id, document_type: "document", file_base64, file_type?, original_filename? }
+ *   → Uploads the raw file with no OCR/matching — just a filed document awaiting linking
+ *   → Returns { receipt_id, document_type: "document" }
+ *
  * PATCH  ?id=&action=confirm
  *   body: { matched_to, matched_id?, expense?, receipt_type? }
  *   income receipts: matching an appointment just stores the link — no expense created
  *   expense receipts: creates/updates an expense record (original behaviour)
  *   → Returns { success: true, expense_id? }
+ *
+ * PATCH  ?id=&action=link
+ *   body: { matched_to, matched_id? }
+ *   → Plain attach-to-record — does NOT create an expense as a side effect
+ *   → Returns the updated receipt row
+ *
+ * GET    ?action=list&business_id=
+ *   [&document_type=all|receipt|document]
+ *   [&matched_to=all|unmatched|appointment|expense|bank_transaction]
+ *   [&from=&to=][&page=1&limit=50]
+ *   → { documents: [...with signed_url], total }
  */
 Deno.serve(withLogging("receipt-scan", async (req: Request) => {
   const corsResp = handleCors(req);
@@ -29,9 +46,85 @@ Deno.serve(withLogging("receipt-scan", async (req: Request) => {
   const id     = url.searchParams.get("id");
 
   try {
-    // ── POST — scan image ──────────────────────────────────────────────────
+    // ── GET ?action=list — documents inbox ──────────────────────────────────
+    if (method === "GET" && action === "list") {
+      const businessId = url.searchParams.get("business_id");
+      if (!businessId) return badRequest("business_id is required");
+      const ctx = await requireOwnerOrManagerCtx(req, businessId);
+      if (ctx instanceof Response) return ctx;
+
+      const documentType = url.searchParams.get("document_type") ?? "all";
+      const matchedTo    = url.searchParams.get("matched_to") ?? "all";
+      const from = url.searchParams.get("from");
+      const to   = url.searchParams.get("to");
+      const page  = Math.max(1, parseInt(url.searchParams.get("page") ?? "1", 10));
+      const listLimit = Math.min(100, Math.max(1, parseInt(url.searchParams.get("limit") ?? "50", 10)));
+
+      // deno-lint-ignore no-explicit-any
+      let lq: any = supabaseAdmin.from("receipts").select("*", { count: "exact" })
+        .eq("business_id", ctx.businessId)
+        .order("created_at", { ascending: false })
+        .range((page - 1) * listLimit, (page - 1) * listLimit + listLimit - 1);
+      if (documentType !== "all") lq = lq.eq("document_type", documentType);
+      if (matchedTo === "unmatched") lq = lq.is("matched_to", null);
+      else if (matchedTo !== "all") lq = lq.eq("matched_to", matchedTo);
+      if (from) lq = lq.gte("created_at", from);
+      if (to) lq = lq.lte("created_at", to);
+
+      const { data, error, count } = await lq;
+      if (error) return serverError(error.message);
+
+      const documents = await Promise.all((data ?? []).map(async (row: Record<string, unknown>) => {
+        const { data: signed } = await supabaseAdmin.storage.from("receipts")
+          .createSignedUrl(row.storage_path as string, 3600);
+        return { ...row, signed_url: signed?.signedUrl ? rewriteLocalUrl(signed.signedUrl) : null };
+      }));
+
+      return jsonCors(req, { documents, total: count ?? 0 });
+    }
+
+    // ── POST — scan image, or file a generic document ───────────────────────
     if (method === "POST") {
       const body = await req.json() as Record<string, unknown>;
+      const documentType = (body.document_type as string | undefined) === "document" ? "document" : "receipt";
+
+      // Generic document — no OCR, no candidate matching, just filed for
+      // later linking (e.g. a supplier invoice PDF).
+      if (documentType === "document") {
+        const fileBase64 = body.file_base64 as string | undefined;
+        const fileType    = (body.file_type as string | undefined) ?? "application/octet-stream";
+        const originalFilename = (body.original_filename as string | undefined) ?? null;
+        if (!fileBase64) return badRequest("file_base64 is required");
+
+        const ctx = await requireOwnerOrManagerCtx(req, body.business_id as string | undefined);
+        if (ctx instanceof Response) return ctx;
+
+        const storagePath = `${ctx.businessId}/${crypto.randomUUID()}.${extFromMime(fileType)}`;
+        const fileBytes = Uint8Array.from(atob(fileBase64), (c) => c.charCodeAt(0));
+
+        const { error: uploadErr } = await supabaseAdmin.storage
+          .from("receipts")
+          .upload(storagePath, fileBytes, { contentType: fileType, upsert: false });
+        if (uploadErr) {
+          console.warn("document upload error:", uploadErr.message);
+          return serverError("Failed to upload document");
+        }
+
+        const { data: row, error: insertErr } = await supabaseAdmin.from("receipts").insert({
+          business_id: ctx.businessId,
+          owner_id: ctx.userId,
+          storage_path: storagePath,
+          document_type: "document",
+          original_filename: originalFilename,
+          mime_type: fileType,
+          file_size_bytes: fileBytes.byteLength,
+          ocr_data: {},
+        }).select("id").single();
+        if (insertErr) return serverError("Failed to save document record");
+
+        return jsonCors(req, { receipt_id: (row as { id: string }).id, document_type: "document" });
+      }
+
       const imageBase64   = body.image_base64 as string | undefined;
       const imageType     = (body.image_type as string | undefined) ?? "image/jpeg";
       const receiptType   = (body.receipt_type as string | undefined) === "expense" ? "expense" : "income";
@@ -296,6 +389,35 @@ If a field cannot be determined, use null. If no line items, use [].`,
         .eq("id", id);
 
       return jsonCors(req, { success: true, expense_id: expenseId });
+    }
+
+    // ── PATCH ?action=link — plain attach-to-record ──────────────────────────
+    // Unlike ?action=confirm (which is OCR-flow-specific and creates an
+    // expense as a side effect), this just records which record a document
+    // belongs to — used by the documents inbox for generic documents and for
+    // re-linking a receipt without spawning a duplicate expense.
+    if (method === "PATCH" && action === "link") {
+      if (!id) return badRequest("id is required");
+      const body = await req.json() as Record<string, unknown>;
+      const matchedTo = body.matched_to as string | undefined;
+      const matchedId = body.matched_id as string | undefined;
+      if (!matchedTo || !["appointment", "expense", "bank_transaction", "unknown"].includes(matchedTo)) {
+        return badRequest("matched_to must be 'appointment', 'expense', 'bank_transaction', or 'unknown'");
+      }
+
+      const { data: existing } = await supabaseAdmin.from("receipts").select("business_id").eq("id", id).maybeSingle();
+      if (!existing) return notFound("Document not found");
+      const ctx = await requireOwnerOrManagerCtx(req, (existing as Record<string, unknown>).business_id as string);
+      if (ctx instanceof Response) return ctx;
+
+      const { data, error } = await supabaseAdmin
+        .from("receipts")
+        .update({ matched_to: matchedTo, matched_id: matchedId ?? null })
+        .eq("id", id)
+        .select()
+        .single();
+      if (error) return serverError(error.message);
+      return jsonCors(req, data);
     }
 
     return badRequest("Method not allowed");

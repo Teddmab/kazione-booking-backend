@@ -1200,7 +1200,7 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
       if (ctx instanceof Response) return ctx;
 
       const status = existingRow.status as string;
-      if (!["confirmed", "in_progress", "pending", "offered", "pending_completion"].includes(status)) {
+      if (!["confirmed", "arrived", "in_progress", "pending", "offered", "pending_completion"].includes(status)) {
         return badRequest(`Cannot adjust price for an appointment with status '${status}'`);
       }
 
@@ -1310,7 +1310,7 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
         ctx = ownerResult;
       }
 
-      if (!["confirmed", "in_progress", "pending", "offered", "pending_completion"].includes(existingRow.status)) {
+      if (!["confirmed", "arrived", "in_progress", "pending", "offered", "pending_completion"].includes(existingRow.status)) {
         return badRequest(`Cannot draft completion for an appointment with status '${existingRow.status}'`);
       }
 
@@ -1469,6 +1469,178 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
         } catch (e) { console.warn("respond-offer owner email error:", e); }
       })();
 
+      return jsonCors(req, normalizePayment(updated as Record<string, unknown>));
+    }
+
+    // ── PATCH ?action=mark-arrived ──────────────────────────────────────────
+    // Staff member (or owner/manager) marks a confirmed appointment as
+    // arrived — the client has physically checked in but the service hasn't
+    // started yet. Gated by business_settings.enable_arrival_tracking: a
+    // business that hasn't opted into arrival tracking has no legitimate
+    // reason to reach this action, so a stale client or direct API call is
+    // rejected rather than silently accepted.
+    if (method === "PATCH" && action === "mark-arrived") {
+      if (!id) return badRequest("id is required");
+
+      const { data: existing, error: fetchErr } = await supabaseAdmin
+        .from("appointments")
+        .select("business_id, status, staff_profile_id, staff_profile_id_2")
+        .eq("id", id)
+        .maybeSingle();
+
+      if (fetchErr || !existing) return notFound("Appointment not found");
+
+      const ex = existing as {
+        business_id: string;
+        status: string;
+        staff_profile_id: string | null;
+        staff_profile_id_2: string | null;
+      };
+
+      const { data: settingsRow } = await supabaseAdmin
+        .from("business_settings")
+        .select("enable_arrival_tracking")
+        .eq("business_id", ex.business_id)
+        .maybeSingle();
+      if ((settingsRow as { enable_arrival_tracking: boolean | null } | null)?.enable_arrival_tracking !== true) {
+        return badRequest("Arrival tracking is not enabled for this business");
+      }
+
+      if (ex.status !== "confirmed") {
+        return badRequest(`Cannot mark arrived — appointment is '${ex.status}', not 'confirmed'`);
+      }
+
+      const ownerResult = await requireOwnerOrManagerCtx(req, ex.business_id);
+      if (ownerResult instanceof Response) {
+        try {
+          const user = await verifyAuth(req);
+          const { data: memberRow } = await supabaseAdmin
+            .from("business_members")
+            .select("id, role")
+            .eq("user_id", user.id)
+            .eq("business_id", ex.business_id)
+            .eq("is_active", true)
+            .maybeSingle();
+
+          if (!memberRow || (memberRow as { role: string }).role !== "staff") {
+            return ownerResult;
+          }
+
+          const { data: sp } = await supabaseAdmin
+            .from("staff_profiles")
+            .select("id")
+            .eq("business_member_id", (memberRow as { id: string }).id)
+            .eq("business_id", ex.business_id)
+            .maybeSingle();
+
+          const callerStaffId = (sp as { id: string } | null)?.id ?? null;
+          const isPrimary   = callerStaffId === ex.staff_profile_id;
+          const isSecondary = callerStaffId === ex.staff_profile_id_2;
+
+          if (!callerStaffId || (!isPrimary && !isSecondary)) {
+            return forbidden(req, "You can only mark arrival on your own appointment");
+          }
+        } catch (e) {
+          if (e instanceof Response) return e;
+          return ownerResult;
+        }
+      }
+
+      const { data: updated, error: updateErr } = await supabaseAdmin
+        .from("appointments")
+        .update({ status: "arrived" })
+        .eq("id", id)
+        .eq("status", "confirmed")
+        .select(APPT_SELECT)
+        .single();
+
+      if (updateErr) {
+        if (updateErr.code === "PGRST116") {
+          return conflict(req, "ALREADY_TRANSITIONED", "This appointment's status was already changed by another request.");
+        }
+        return serverError(updateErr.message);
+      }
+
+      await supabaseAdmin.from("appointment_status_log").insert({
+        appointment_id: id,
+        old_status: "confirmed",
+        new_status: "arrived",
+        reason: "Client arrived",
+      });
+
+      return jsonCors(req, normalizePayment(updated as Record<string, unknown>));
+    }
+
+    // ── PATCH ?action=mark-notes-reviewed ───────────────────────────────────
+    // Stamps notes_reviewed_at on this specific appointment. Independent of
+    // enable_arrival_tracking (client-prep review is a separate feature) and
+    // not gated by status beyond excluding cancelled — a staff member may
+    // review prep notes ahead of an upcoming appointment, not just once it
+    // starts.
+    if (method === "PATCH" && action === "mark-notes-reviewed") {
+      if (!id) return badRequest("id is required");
+
+      const { data: existing, error: fetchErr } = await supabaseAdmin
+        .from("appointments")
+        .select("business_id, status, staff_profile_id, staff_profile_id_2")
+        .eq("id", id)
+        .maybeSingle();
+
+      if (fetchErr || !existing) return notFound("Appointment not found");
+
+      const ex = existing as {
+        business_id: string;
+        status: string;
+        staff_profile_id: string | null;
+        staff_profile_id_2: string | null;
+      };
+
+      if (ex.status === "cancelled") return badRequest("Cannot review notes on a cancelled appointment");
+
+      const ownerResult = await requireOwnerOrManagerCtx(req, ex.business_id);
+      if (ownerResult instanceof Response) {
+        try {
+          const user = await verifyAuth(req);
+          const { data: memberRow } = await supabaseAdmin
+            .from("business_members")
+            .select("id, role")
+            .eq("user_id", user.id)
+            .eq("business_id", ex.business_id)
+            .eq("is_active", true)
+            .maybeSingle();
+
+          if (!memberRow || (memberRow as { role: string }).role !== "staff") {
+            return ownerResult;
+          }
+
+          const { data: sp } = await supabaseAdmin
+            .from("staff_profiles")
+            .select("id")
+            .eq("business_member_id", (memberRow as { id: string }).id)
+            .eq("business_id", ex.business_id)
+            .maybeSingle();
+
+          const callerStaffId = (sp as { id: string } | null)?.id ?? null;
+          const isPrimary   = callerStaffId === ex.staff_profile_id;
+          const isSecondary = callerStaffId === ex.staff_profile_id_2;
+
+          if (!callerStaffId || (!isPrimary && !isSecondary)) {
+            return forbidden(req, "You can only review notes on your own appointment");
+          }
+        } catch (e) {
+          if (e instanceof Response) return e;
+          return ownerResult;
+        }
+      }
+
+      const { data: updated, error: updateErr } = await supabaseAdmin
+        .from("appointments")
+        .update({ notes_reviewed_at: new Date().toISOString() })
+        .eq("id", id)
+        .select(APPT_SELECT)
+        .single();
+
+      if (updateErr) return serverError(updateErr.message);
       return jsonCors(req, normalizePayment(updated as Record<string, unknown>));
     }
 
@@ -1939,7 +2111,7 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
       if (status === "pending_completion" && ctx.role !== "staff") {
         return badRequest("Only staff may submit pending_completion");
       }
-      const allowedFromStatuses: string[] = ["confirmed", "in_progress", "pending", "offered", "pending_completion"];
+      const allowedFromStatuses: string[] = ["confirmed", "arrived", "in_progress", "pending", "offered", "pending_completion"];
       if (!allowedFromStatuses.includes(existingRow.status)) {
         return badRequest(`Cannot transition from '${existingRow.status}' to '${status}'`);
       }

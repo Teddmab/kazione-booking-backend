@@ -4,6 +4,14 @@ import { badRequest, serverError } from "../_shared/errors.ts";
 import { withLogging } from "../_shared/logger.ts";
 import { requireOwnerOrManagerCtx } from "../_shared/auth.ts";
 
+// "rent" -> "Rent", "internet_phone" -> "Internet phone" — used as a
+// fallback "source" label for fixed-cost rows in the bookkeeping feed,
+// which has no per-row payee field.
+function humanize(s: string): string {
+  const words = s.replace(/_/g, " ");
+  return words.charAt(0).toUpperCase() + words.slice(1);
+}
+
 /**
  * /finance — finance analytics, expense CRUD, bookkeeping
  *
@@ -136,7 +144,7 @@ Deno.serve(withLogging("finance", async (req: Request) => {
             .lte("paid_at", to),
           supabaseAdmin
             .from("expenses")
-            .select("id, amount, tax_amount, date, description, category")
+            .select("id, amount, tax_amount, date, description, category, receipt_url, supplier:suppliers(name)")
             .eq("business_id", businessId)
             .gte("date", from)
             .lte("date", to),
@@ -169,17 +177,24 @@ Deno.serve(withLogging("finance", async (req: Request) => {
             category: p.method ?? "card",
             amount: Number(p.amount),
             tax_amount: Number(p.tax_amount ?? 0),
+            source: "Bookings",
+            needs_receipt: false,
           };
         });
 
-        const expenseRows = (expensesResult.data ?? []).map((e: Record<string, unknown>) => ({
-          date: e.date,
-          type: "expense" as const,
-          description: e.description,
-          category: e.category,
-          amount: Number(e.amount),
-          tax_amount: Number(e.tax_amount ?? 0),
-        }));
+        const expenseRows = (expensesResult.data ?? []).map((e: Record<string, unknown>) => {
+          const supplier = e.supplier as Record<string, unknown> | null;
+          return {
+            date: e.date,
+            type: "expense" as const,
+            description: e.description,
+            category: e.category,
+            amount: Number(e.amount),
+            tax_amount: Number(e.tax_amount ?? 0),
+            source: (supplier?.name as string) ?? "Manual expense",
+            needs_receipt: !e.receipt_url,
+          };
+        });
 
         const fixedCostRows = (fixedCostsResult.data ?? []).map((fc: Record<string, unknown>) => ({
           date: fc.cost_date,
@@ -188,6 +203,8 @@ Deno.serve(withLogging("finance", async (req: Request) => {
           category: fc.category ?? "fixed_cost",
           amount: Number(fc.amount),
           tax_amount: 0,
+          source: humanize((fc.category as string) ?? "fixed_cost"),
+          needs_receipt: false,
         }));
 
         const debtPaymentRows = (debtPaymentsResult.data ?? []).map((dp: Record<string, unknown>) => {
@@ -199,6 +216,8 @@ Deno.serve(withLogging("finance", async (req: Request) => {
             category: "debt_payment",
             amount: Number(dp.amount),
             tax_amount: 0,
+            source: (debt?.creditor_name as string) ?? "Creditor",
+            needs_receipt: false,
           };
         });
 

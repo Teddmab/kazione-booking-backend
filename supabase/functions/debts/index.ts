@@ -8,16 +8,48 @@ const VALID_CATEGORIES = ["tax", "rent", "utilities", "bank_loan", "supplier", "
 const VALID_STATUSES   = ["active", "paid_off", "disputed", "restructured"];
 const VALID_PRIORITIES = ["critical", "high", "medium", "low"];
 
+// Local Supabase (Docker/kong) signs storage URLs with an internal hostname
+// the browser can't reach — rewrite to 127.0.0.1 outside of production.
+function rewriteLocalUrl(u: string): string {
+  const internalUrl = Deno.env.get("SUPABASE_URL") ?? "";
+  const isLocal = internalUrl.includes("kong") || internalUrl.includes("supabase_");
+  if (!isLocal) return u;
+  return u.replace(/^https?:\/\/[^/]+(?=\/storage\/)/, "http://127.0.0.1:54321");
+}
+
+function extFromMime(mime: string | null | undefined): string {
+  if (!mime) return "bin";
+  if (mime.includes("pdf")) return "pdf";
+  if (mime.includes("png")) return "png";
+  if (mime.includes("webp")) return "webp";
+  if (mime.includes("heic")) return "heic";
+  return "jpg";
+}
+
+async function uploadDebtFile(businessId: string, subfolder: string, base64: string, mimeType: string): Promise<string> {
+  const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
+  const path = `${businessId}/${subfolder}/${crypto.randomUUID()}.${extFromMime(mimeType)}`;
+  const { error } = await supabaseAdmin.storage
+    .from("debt-documents")
+    .upload(path, bytes, { contentType: mimeType || "application/octet-stream" });
+  if (error) throw new Error(error.message);
+  return path;
+}
+
 /**
  * /debts — business debt register + payment log
  *
- * GET  ?business_id=[&status=active]        → list debts (priority order: critical first)
- * GET  ?action=summary&business_id=         → totals, counts, overdue
- * GET  ?action=payments&debt_id=            → payment history for one debt
- * POST body={business_id,...}               → create debt
- * POST ?action=record-payment body={...}    → log payment, reduce balance
- * PATCH ?id= body={...fields}               → update debt
- * DELETE ?id=                               → delete debt (cascades payments)
+ * GET  ?business_id=[&status=active][&include_archived=true] → list debts (priority order: critical first)
+ * GET  ?id=                                       → single debt
+ * GET  ?action=summary&business_id=               → totals, counts, overdue
+ * GET  ?action=payments&debt_id=                  → payment history for one debt
+ * GET  ?action=documents&debt_id=                 → debt's documents & notes
+ * POST body={business_id,...}                     → create debt
+ * POST ?action=record-payment body={...}          → log payment, reduce balance
+ * POST ?action=document body={business_id,debt_id,kind,...} → add a document or note
+ * PATCH ?id= body={...fields}                     → update debt (incl. reference, is_archived)
+ * DELETE ?id=                                     → delete debt (cascades payments)
+ * DELETE ?action=document&id=                     → delete a document or note
  */
 Deno.serve(withLogging("debts", async (req: Request) => {
   const corsResp = handleCors(req);
@@ -54,12 +86,77 @@ Deno.serve(withLogging("debts", async (req: Request) => {
 
         const { data: payments, error } = await supabaseAdmin
           .from("debt_payments")
-          .select("id, debt_id, amount, payment_date, notes, created_at")
+          .select("id, debt_id, amount, payment_date, payment_method, reference, receipt_url, notes, created_at, recorded_by:users!debt_payments_created_by_fkey(id, first_name, last_name)")
           .eq("debt_id", debtId)
           .order("payment_date", { ascending: false });
 
         if (error) return serverError(error.message);
-        return jsonCors(req, { payments: payments ?? [] });
+
+        const withUrls = await Promise.all((payments ?? []).map(async (row: Record<string, unknown>) => {
+          if (!row.receipt_url) return { ...row, receipt_url: null };
+          const { data: signed } = await supabaseAdmin.storage
+            .from("debt-documents")
+            .createSignedUrl(row.receipt_url as string, 3600);
+          return { ...row, receipt_url: signed?.signedUrl ? rewriteLocalUrl(signed.signedUrl) : null };
+        }));
+
+        return jsonCors(req, { payments: withUrls });
+      }
+
+      // GET documents & notes for a specific debt
+      if (action === "documents") {
+        if (!debtId) return badRequest("debt_id is required");
+
+        let user;
+        try { user = await verifyAuth(req); } catch (e) { return e instanceof Response ? e : forbidden("Auth required"); }
+
+        const { data: debt } = await supabaseAdmin
+          .from("business_debts")
+          .select("business_id")
+          .eq("id", debtId)
+          .maybeSingle();
+        if (!debt) return notFound("Debt not found");
+
+        try { await verifyBusinessMember(user.id, (debt as Record<string,unknown>).business_id as string); }
+        catch (e) { return e instanceof Response ? e : forbidden("Access denied"); }
+
+        const { data, error } = await supabaseAdmin
+          .from("debt_documents")
+          .select("*, author:users!debt_documents_created_by_fkey(id, first_name, last_name)")
+          .eq("debt_id", debtId)
+          .order("created_at", { ascending: false });
+
+        if (error) return serverError(error.message);
+
+        const documents = await Promise.all((data ?? []).map(async (row: Record<string, unknown>) => {
+          if (!row.file_path) return { ...row, file_url: null };
+          const { data: signed } = await supabaseAdmin.storage
+            .from("debt-documents")
+            .createSignedUrl(row.file_path as string, 3600);
+          return { ...row, file_url: signed?.signedUrl ? rewriteLocalUrl(signed.signedUrl) : null };
+        }));
+
+        return jsonCors(req, { documents });
+      }
+
+      // GET single debt
+      if (id) {
+        let user;
+        try { user = await verifyAuth(req); } catch (e) { return e instanceof Response ? e : forbidden("Auth required"); }
+
+        const { data: debt, error } = await supabaseAdmin
+          .from("business_debts")
+          .select("*")
+          .eq("id", id)
+          .maybeSingle();
+
+        if (error) return serverError(error.message);
+        if (!debt) return notFound("Debt not found");
+
+        try { await verifyBusinessMember(user.id, (debt as Record<string,unknown>).business_id as string); }
+        catch (e) { return e instanceof Response ? e : forbidden("Access denied"); }
+
+        return jsonCors(req, debt);
       }
 
       if (!businessId) return badRequest("business_id is required");
@@ -71,12 +168,13 @@ Deno.serve(withLogging("debts", async (req: Request) => {
         return e instanceof Response ? e : forbidden("Auth required");
       }
 
-      // GET summary (totals + overdue count)
+      // GET summary (totals + overdue count) — archived debts are excluded
       if (action === "summary") {
         const { data: debts, error } = await supabaseAdmin
           .from("business_debts")
           .select("current_balance, monthly_minimum, category, priority, due_date, status")
-          .eq("business_id", businessId);
+          .eq("business_id", businessId)
+          .eq("is_archived", false);
 
         if (error) return serverError(error.message);
 
@@ -111,13 +209,15 @@ Deno.serve(withLogging("debts", async (req: Request) => {
         });
       }
 
-      // GET list of debts
+      // GET list of debts — archived debts are excluded unless requested
       const statusFilter = url.searchParams.get("status");
+      const includeArchived = url.searchParams.get("include_archived") === "true";
       let query = supabaseAdmin
         .from("business_debts")
         .select("*")
         .eq("business_id", businessId);
 
+      if (!includeArchived) query = query.eq("is_archived", false);
       if (statusFilter && VALID_STATUSES.includes(statusFilter)) {
         query = query.eq("status", statusFilter);
       }
@@ -148,6 +248,10 @@ Deno.serve(withLogging("debts", async (req: Request) => {
         const payDate   = (body.payment_date as string) ?? new Date().toISOString().slice(0, 10);
         const notes     = (body.notes as string | null) ?? null;
         const businessId = body.business_id as string | undefined;
+        const paymentMethod = (body.payment_method as string | null) ?? null;
+        const reference   = (body.reference as string | null) ?? null;
+        const receiptBase64 = body.receipt_base64 as string | undefined;
+        const receiptMimeType = (body.receipt_mime_type as string) ?? "image/jpeg";
 
         if (!debtId)    return badRequest("debt_id is required");
         if (!businessId) return badRequest("business_id is required");
@@ -170,11 +274,30 @@ Deno.serve(withLogging("debts", async (req: Request) => {
         const d = debt as Record<string, unknown>;
         if (d.status === "paid_off") return badRequest("This debt is already paid off");
 
+        let receiptPath: string | null = null;
+        if (receiptBase64) {
+          try {
+            receiptPath = await uploadDebtFile(businessId, "payments", receiptBase64, receiptMimeType);
+          } catch (e) {
+            return serverError(e instanceof Error ? e.message : "Failed to upload receipt");
+          }
+        }
+
         // Insert payment — DB trigger reduces current_balance automatically
         const { data: newPayment, error: payErr } = await supabaseAdmin
           .from("debt_payments")
-          .insert({ debt_id: debtId, business_id: businessId, amount, payment_date: payDate, notes })
-          .select("id, debt_id, amount, payment_date, notes, created_at")
+          .insert({
+            debt_id: debtId,
+            business_id: businessId,
+            amount,
+            payment_date: payDate,
+            payment_method: paymentMethod,
+            reference,
+            receipt_url: receiptPath,
+            notes,
+            created_by: ctx.userId,
+          })
+          .select("id, debt_id, amount, payment_date, payment_method, reference, receipt_url, notes, created_at")
           .single();
 
         if (payErr) return serverError(payErr.message);
@@ -188,6 +311,58 @@ Deno.serve(withLogging("debts", async (req: Request) => {
 
         if (refetchErr) return serverError(refetchErr.message);
         return jsonCors(req, { debt: updated, payment: newPayment });
+      }
+
+      // Add a document or note
+      if (action === "document") {
+        const businessId = body.business_id as string | undefined;
+        const debtId     = body.debt_id as string | undefined;
+        const kind       = body.kind as string | undefined;
+
+        if (!businessId) return badRequest("business_id is required");
+        if (!debtId)     return badRequest("debt_id is required");
+        if (kind !== "document" && kind !== "note") return badRequest("kind must be 'document' or 'note'");
+
+        const ctx = await requireOwnerOrManagerCtx(req, businessId);
+        if (ctx instanceof Response) return ctx;
+
+        const { data: debt } = await supabaseAdmin
+          .from("business_debts")
+          .select("id")
+          .eq("id", debtId)
+          .eq("business_id", businessId)
+          .maybeSingle();
+        if (!debt) return notFound("Debt not found");
+
+        let filePath: string | null = null;
+        if (kind === "document") {
+          const fileBase64 = body.file_base64 as string | undefined;
+          if (!fileBase64) return badRequest("file_base64 is required for a document");
+          const mimeType = (body.mime_type as string) ?? "application/octet-stream";
+          try {
+            filePath = await uploadDebtFile(businessId, "documents", fileBase64, mimeType);
+          } catch (e) {
+            return serverError(e instanceof Error ? e.message : "Failed to upload file");
+          }
+        }
+
+        const { data: created, error } = await supabaseAdmin
+          .from("debt_documents")
+          .insert({
+            business_id: businessId,
+            debt_id: debtId,
+            kind,
+            body: (body.body as string | null) ?? null,
+            file_path: filePath,
+            file_size: body.file_size != null ? Number(body.file_size) : null,
+            mime_type: (body.mime_type as string | null) ?? null,
+            created_by: ctx.userId,
+          })
+          .select("*, author:users!debt_documents_created_by_fkey(id, first_name, last_name)")
+          .single();
+
+        if (error) return serverError(error.message);
+        return jsonCors(req, created, 201);
       }
 
       // Create debt
@@ -217,6 +392,7 @@ Deno.serve(withLogging("debts", async (req: Request) => {
           creditor_name:          creditorName,
           category,
           description:            (body.description as string | null) ?? null,
+          reference:              (body.reference as string | null) ?? null,
           original_amount:        originalAmount,
           current_balance:        currentBalance,
           currency_code:          (body.currency_code as string) ?? "EUR",
@@ -263,6 +439,7 @@ Deno.serve(withLogging("debts", async (req: Request) => {
       if (body.creditor_name !== undefined)         update.creditor_name = String(body.creditor_name).trim();
       if (body.category !== undefined)              update.category = body.category;
       if (body.description !== undefined)           update.description = body.description ?? null;
+      if (body.reference !== undefined)             update.reference = body.reference ?? null;
       if (body.original_amount !== undefined)       update.original_amount = Number(body.original_amount);
       if (body.current_balance !== undefined) {
         const newBal = Number(body.current_balance);
@@ -279,6 +456,7 @@ Deno.serve(withLogging("debts", async (req: Request) => {
       if (body.creditor_contact !== undefined)      update.creditor_contact = body.creditor_contact ?? null;
       if (body.notes !== undefined)                 update.notes = body.notes ?? null;
       if (body.is_interest_deductible !== undefined) update.is_interest_deductible = Boolean(body.is_interest_deductible);
+      if (body.is_archived !== undefined)           update.is_archived = Boolean(body.is_archived);
 
       if (Object.keys(update).length === 0) return badRequest("No valid fields to update");
 
@@ -295,6 +473,29 @@ Deno.serve(withLogging("debts", async (req: Request) => {
 
     // ── DELETE ────────────────────────────────────────────────────────────────
     if (method === "DELETE") {
+      if (action === "document") {
+        if (!id) return badRequest("id is required");
+
+        const { data: doc } = await supabaseAdmin
+          .from("debt_documents")
+          .select("business_id, file_path")
+          .eq("id", id)
+          .maybeSingle();
+        if (!doc) return notFound("Document not found");
+
+        const d = doc as Record<string, unknown>;
+        const ctx = await requireOwnerOrManagerCtx(req, d.business_id as string);
+        if (ctx instanceof Response) return ctx;
+
+        if (d.file_path) {
+          await supabaseAdmin.storage.from("debt-documents").remove([d.file_path as string]);
+        }
+
+        const { error } = await supabaseAdmin.from("debt_documents").delete().eq("id", id);
+        if (error) return serverError(error.message);
+        return jsonCors(req, { success: true });
+      }
+
       if (!id) return badRequest("id query param is required");
 
       const { data: existing, error: existErr } = await supabaseAdmin

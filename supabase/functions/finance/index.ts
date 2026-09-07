@@ -54,6 +54,7 @@ async function uploadExpenseReceipt(businessId: string, base64: string, mimeType
  * GET  ?action=vat-summary&business_id=&month=YYYY-MM
  * GET  ?action=vat-ledger&business_id=&month=YYYY-MM
  * GET  ?action=tsd-summary&business_id=&month=YYYY-MM
+ * GET  ?action=inventory-value&business_id=
  * GET  ?action=tax-profile&business_id=
  * GET  ?action=tax-filings&business_id=&[year=]
  * GET  ?action=reminders&business_id=
@@ -748,11 +749,26 @@ Deno.serve(withLogging("finance", async (req: Request) => {
         });
       }
 
+      if (action === "inventory-value") {
+        // Live stock valuation snapshot for the Annual Report's "Inventory
+        // closing value" year-end check — a running current-stock total,
+        // not a true point-in-time year-end value (no historical stock
+        // reconstruction exists), so the frontend treats this as
+        // informational rather than a pass/fail check.
+        const { data, error } = await supabaseAdmin
+          .from("product_catalog")
+          .select("current_stock, unit_cost")
+          .eq("business_id", businessId);
+        if (error) return serverError(error.message);
+        const value = (data ?? []).reduce((sum, p) => sum + Number(p.current_stock ?? 0) * Number(p.unit_cost ?? 0), 0);
+        return jsonCors(req, { value: Math.round(value * 100) / 100 });
+      }
+
       if (action === "tax-profile") {
         const [settingsResult, bizResult] = await Promise.all([
           supabaseAdmin
             .from("business_settings")
-            .select("vat_registered, vat_number, tax_reporting_frequency, tax_profile_confirmed_at, tax_enabled, tax_rate, tax_label, tax_number")
+            .select("vat_registered, vat_number, tax_reporting_frequency, tax_profile_confirmed_at, tax_enabled, tax_rate, tax_label, tax_number, fiscal_year_start_month")
             .eq("business_id", businessId)
             .maybeSingle(),
           supabaseAdmin.from("businesses").select("country, legal_form").eq("id", businessId).maybeSingle(),
@@ -908,6 +924,11 @@ Deno.serve(withLogging("finance", async (req: Request) => {
       if (body.vat_registered !== undefined) update.vat_registered = body.vat_registered;
       if (body.vat_number !== undefined) update.vat_number = body.vat_number;
       if (body.tax_reporting_frequency !== undefined) update.tax_reporting_frequency = body.tax_reporting_frequency;
+      if (body.fiscal_year_start_month !== undefined) {
+        const m = Number(body.fiscal_year_start_month);
+        if (!Number.isInteger(m) || m < 1 || m > 12) return badRequest("fiscal_year_start_month must be 1-12");
+        update.fiscal_year_start_month = m;
+      }
       if (body.confirm === true) update.tax_profile_confirmed_at = new Date().toISOString();
 
       let settingsData: Record<string, unknown> = {};
@@ -916,7 +937,7 @@ Deno.serve(withLogging("finance", async (req: Request) => {
           .from("business_settings")
           .update(update)
           .eq("business_id", ctx.businessId)
-          .select("vat_registered, vat_number, tax_reporting_frequency, tax_profile_confirmed_at")
+          .select("vat_registered, vat_number, tax_reporting_frequency, tax_profile_confirmed_at, fiscal_year_start_month")
           .single();
         if (error) return serverError(error.message);
         settingsData = data;

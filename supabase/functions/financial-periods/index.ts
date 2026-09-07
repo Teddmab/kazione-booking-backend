@@ -17,7 +17,7 @@ function monthBounds(month: string): { from: string; to: string } {
  * /financial-periods — per-business-per-month bookkeeping lock + live-computed readiness
  *
  * GET  ?action=status&business_id=&month=YYYY-MM  → lock status + checklist counts
- * GET  ?action=year-status&business_id=&year=YYYY → per-month readiness across a year
+ * GET  ?action=year-status&business_id=&year=YYYY&[start_month=1-12] → per-month readiness across a 12-month window (defaults to Jan-Dec, start_month lets it begin anywhere for a non-calendar fiscal year)
  * POST ?action=close  body={business_id, month, note?}    → close the month
  * POST ?action=reopen body={business_id, month, reason?}  → reopen the month
  */
@@ -104,51 +104,82 @@ Deno.serve(withLogging("financial-periods", async (req: Request) => {
     if (req.method === "GET" && action === "year-status") {
       const businessId = url.searchParams.get("business_id");
       const year = parseInt(url.searchParams.get("year") ?? "", 10);
+      const startMonthParam = parseInt(url.searchParams.get("start_month") ?? "1", 10);
+      const startMonth = startMonthParam >= 1 && startMonthParam <= 12 ? startMonthParam : 1;
       if (!businessId) return badRequest(req, "business_id is required");
       if (!year) return badRequest(req, "year is required");
 
       const ctx = await requireOwnerOrManagerCtx(req, businessId);
       if (ctx instanceof Response) return ctx;
 
-      const yearStart = `${year}-01-01`;
-      const yearEnd = `${year + 1}-01-01`;
+      // A 12-month window starting at start_month/year — may span into
+      // year+1 for a non-January fiscal year start.
+      const windowStart = new Date(Date.UTC(year, startMonth - 1, 1));
+      const windowEnd = new Date(Date.UTC(year, startMonth - 1 + 12, 1));
+      const windowStartStr = windowStart.toISOString().slice(0, 10);
+      const windowEndStr = windowEnd.toISOString().slice(0, 10);
+      const windowStartIndex = windowStart.getUTCFullYear() * 12 + windowStart.getUTCMonth();
 
-      const [bankRes, expenseRes] = await Promise.all([
+      const [bankRes, expenseRes, periodsRes] = await Promise.all([
         supabaseAdmin.from("bank_transactions")
           .select("date, category, reconciled_payment_id, reconciled_expense_id, reconciled_fixed_cost_id, reconciled_debt_payment_id, reconciled_appointment_id, reconciled_stock_movement_id")
-          .eq("business_id", ctx.businessId).gte("date", yearStart).lt("date", yearEnd),
+          .eq("business_id", ctx.businessId).gte("date", windowStartStr).lt("date", windowEndStr),
         supabaseAdmin.from("expenses")
           .select("date, receipt_url")
-          .eq("business_id", ctx.businessId).gte("date", yearStart).lt("date", yearEnd),
+          .eq("business_id", ctx.businessId).gte("date", windowStartStr).lt("date", windowEndStr),
+        supabaseAdmin.from("financial_periods")
+          .select("period_month, status")
+          .eq("business_id", ctx.businessId).gte("period_month", windowStartStr).lt("period_month", windowEndStr),
       ]);
       if (bankRes.error) return serverError(req, bankRes.error.message);
       if (expenseRes.error) return serverError(req, expenseRes.error.message);
+      if (periodsRes.error) return serverError(req, periodsRes.error.message);
 
+      // Bucket by absolute month index (yearNum*12 + monthNum) so the window
+      // can span a calendar-year boundary without wrapping incorrectly.
       const buckets: Record<number, { unreconciled: number; uncategorized: number; missingReceipt: number }> = {};
-      for (let m = 1; m <= 12; m++) buckets[m] = { unreconciled: 0, uncategorized: 0, missingReceipt: 0 };
+      for (let i = 0; i < 12; i++) buckets[windowStartIndex + i] = { unreconciled: 0, uncategorized: 0, missingReceipt: 0 };
+      const absIndexOf = (dateStr: string) => {
+        const d = new Date(dateStr);
+        return d.getUTCFullYear() * 12 + d.getUTCMonth();
+      };
 
       for (const tx of bankRes.data ?? []) {
         const t = tx as Record<string, unknown>;
-        const m = new Date(t.date as string).getUTCMonth() + 1;
+        const idx = absIndexOf(t.date as string);
         const isUnreconciled = !t.reconciled_payment_id && !t.reconciled_expense_id && !t.reconciled_fixed_cost_id &&
           !t.reconciled_debt_payment_id && !t.reconciled_appointment_id && !t.reconciled_stock_movement_id;
-        if (isUnreconciled) buckets[m].unreconciled += 1;
-        if (t.category == null) buckets[m].uncategorized += 1;
+        if (isUnreconciled) buckets[idx].unreconciled += 1;
+        if (t.category == null) buckets[idx].uncategorized += 1;
       }
       for (const e of expenseRes.data ?? []) {
         const t = e as Record<string, unknown>;
-        const m = new Date(t.date as string).getUTCMonth() + 1;
-        if (t.receipt_url == null) buckets[m].missingReceipt += 1;
+        const idx = absIndexOf(t.date as string);
+        if (t.receipt_url == null) buckets[idx].missingReceipt += 1;
+      }
+
+      const statusByIndex: Record<number, string> = {};
+      for (const p of periodsRes.data ?? []) {
+        const row = p as Record<string, unknown>;
+        statusByIndex[absIndexOf(row.period_month as string)] = (row.status as string) ?? "open";
       }
 
       const now = new Date();
       const currentMonthIndex = now.getUTCFullYear() * 12 + now.getUTCMonth();
       const months = Array.from({ length: 12 }, (_, i) => {
-        const m = i + 1;
-        const b = buckets[m];
-        const isPast = year * 12 + (m - 1) < currentMonthIndex;
+        const idx = windowStartIndex + i;
+        const b = buckets[idx];
+        const isPast = idx < currentMonthIndex;
         const clean = b.unreconciled === 0 && b.uncategorized === 0 && b.missingReceipt === 0;
-        return { month: `${year}-${String(m).padStart(2, "0")}`, is_past: isPast, clean, ready: isPast && clean };
+        const y = Math.floor(idx / 12);
+        const m = (idx % 12) + 1;
+        return {
+          month: `${y}-${String(m).padStart(2, "0")}`,
+          is_past: isPast,
+          clean,
+          ready: isPast && clean,
+          status: statusByIndex[idx] ?? "open",
+        };
       });
 
       return jsonCors(req, {

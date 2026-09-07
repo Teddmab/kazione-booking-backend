@@ -3,6 +3,7 @@ import { corsHeadersFor, handleCors } from "../_shared/cors.ts";
 import { badRequest, serverError } from "../_shared/errors.ts";
 import { requireOwnerOrManagerCtx } from "../_shared/auth.ts";
 import { withLogging } from "../_shared/logger.ts";
+import { rewriteLocalUrl } from "../_shared/storage.ts";
 import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
 
 // ---------------------------------------------------------------------------
@@ -838,7 +839,7 @@ Deno.serve(withLogging("export-report", async (req: Request) => {
 
     return new Response(
       JSON.stringify({
-        download_url: signedData.signedUrl,
+        download_url: rewriteLocalUrl(signedData.signedUrl),
         filename,
         expires_at: expiresAt,
       }),

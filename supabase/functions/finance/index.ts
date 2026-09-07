@@ -619,25 +619,31 @@ Deno.serve(withLogging("finance", async (req: Request) => {
             .select("vat_registered, vat_number, tax_reporting_frequency, tax_profile_confirmed_at, tax_enabled, tax_rate, tax_label, tax_number")
             .eq("business_id", businessId)
             .maybeSingle(),
-          supabaseAdmin.from("businesses").select("country").eq("id", businessId).maybeSingle(),
+          supabaseAdmin.from("businesses").select("country, legal_form").eq("id", businessId).maybeSingle(),
         ]);
         if (settingsResult.error) return serverError(settingsResult.error.message);
         if (bizResult.error) return serverError(bizResult.error.message);
+        const biz = bizResult.data as Record<string, unknown> | null;
         return jsonCors(req, {
           ...(settingsResult.data ?? {}),
-          country: (bizResult.data as Record<string, unknown> | null)?.country ?? null,
+          country: biz?.country ?? null,
+          legal_form: biz?.legal_form ?? null,
         });
       }
 
       if (action === "tax-filings") {
         const year = url.searchParams.get("year");
+        const obligationType = url.searchParams.get("obligation_type");
         // deno-lint-ignore no-explicit-any
         let filingsQuery: any = supabaseAdmin
           .from("tax_filings")
-          .select("period, filed_at")
+          .select("period, filed_at, obligation_type")
           .eq("business_id", businessId);
         if (year) filingsQuery = filingsQuery.like("period", `${year}-%`);
-        const { data, error } = await filingsQuery.order("period", { ascending: false });
+        if (obligationType) filingsQuery = filingsQuery.eq("obligation_type", obligationType);
+        const { data, error } = await filingsQuery
+          .order("period", { ascending: false })
+          .order("filed_at", { ascending: false });
         if (error) return serverError(error.message);
         return jsonCors(req, data ?? []);
       }
@@ -768,14 +774,31 @@ Deno.serve(withLogging("finance", async (req: Request) => {
       if (body.tax_reporting_frequency !== undefined) update.tax_reporting_frequency = body.tax_reporting_frequency;
       if (body.confirm === true) update.tax_profile_confirmed_at = new Date().toISOString();
 
-      const { data, error } = await supabaseAdmin
-        .from("business_settings")
-        .update(update)
-        .eq("business_id", ctx.businessId)
-        .select("vat_registered, vat_number, tax_reporting_frequency, tax_profile_confirmed_at")
-        .single();
-      if (error) return serverError(error.message);
-      return jsonCors(req, data);
+      let settingsData: Record<string, unknown> = {};
+      if (Object.keys(update).length > 0) {
+        const { data, error } = await supabaseAdmin
+          .from("business_settings")
+          .update(update)
+          .eq("business_id", ctx.businessId)
+          .select("vat_registered, vat_number, tax_reporting_frequency, tax_profile_confirmed_at")
+          .single();
+        if (error) return serverError(error.message);
+        settingsData = data;
+      }
+
+      let legalForm: string | null | undefined;
+      if (body.legal_form !== undefined) {
+        const { data, error } = await supabaseAdmin
+          .from("businesses")
+          .update({ legal_form: body.legal_form })
+          .eq("id", ctx.businessId)
+          .select("legal_form")
+          .single();
+        if (error) return serverError(error.message);
+        legalForm = (data as Record<string, unknown>).legal_form as string | null;
+      }
+
+      return jsonCors(req, { ...settingsData, ...(legalForm !== undefined ? { legal_form: legalForm } : {}) });
     }
 
     // ── POST tax-filings — mark a month filed (idempotent re-file) ──────────
@@ -785,12 +808,22 @@ Deno.serve(withLogging("finance", async (req: Request) => {
       if (ctx instanceof Response) return ctx;
       const period = body.period as string;
       if (!period) return badRequest("period is required");
+      const obligationType = (body.obligation_type as string) ?? "vat_return";
+      if (!["vat_return", "income_social_tax", "annual_report"].includes(obligationType)) {
+        return badRequest("obligation_type must be vat_return, income_social_tax, or annual_report");
+      }
 
       const { data, error } = await supabaseAdmin
         .from("tax_filings")
         .upsert(
-          { business_id: ctx.businessId, period, filed_at: new Date().toISOString(), filed_by: ctx.userId },
-          { onConflict: "business_id,period" },
+          {
+            business_id: ctx.businessId,
+            period,
+            obligation_type: obligationType,
+            filed_at: new Date().toISOString(),
+            filed_by: ctx.userId,
+          },
+          { onConflict: "business_id,period,obligation_type" },
         )
         .select()
         .single();

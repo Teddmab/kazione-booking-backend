@@ -137,8 +137,11 @@ Deno.serve(withLogging("financial-periods", async (req: Request) => {
 
       // Bucket by absolute month index (yearNum*12 + monthNum) so the window
       // can span a calendar-year boundary without wrapping incorrectly.
-      const buckets: Record<number, { unreconciled: number; uncategorized: number; missingReceipt: number }> = {};
-      for (let i = 0; i < 12; i++) buckets[windowStartIndex + i] = { unreconciled: 0, uncategorized: 0, missingReceipt: 0 };
+      // needingAttention is a DISTINCT count (unreconciled OR uncategorized)
+      // — summing the two separately would double-count a transaction that
+      // is both, same fix already applied to the single-month status action.
+      const buckets: Record<number, { unreconciled: number; uncategorized: number; needingAttention: number; missingReceipt: number }> = {};
+      for (let i = 0; i < 12; i++) buckets[windowStartIndex + i] = { unreconciled: 0, uncategorized: 0, needingAttention: 0, missingReceipt: 0 };
       const absIndexOf = (dateStr: string) => {
         const d = new Date(dateStr);
         return d.getUTCFullYear() * 12 + d.getUTCMonth();
@@ -149,8 +152,10 @@ Deno.serve(withLogging("financial-periods", async (req: Request) => {
         const idx = absIndexOf(t.date as string);
         const isUnreconciled = !t.reconciled_payment_id && !t.reconciled_expense_id && !t.reconciled_fixed_cost_id &&
           !t.reconciled_debt_payment_id && !t.reconciled_appointment_id && !t.reconciled_stock_movement_id;
+        const isUncategorized = t.category == null;
         if (isUnreconciled) buckets[idx].unreconciled += 1;
-        if (t.category == null) buckets[idx].uncategorized += 1;
+        if (isUncategorized) buckets[idx].uncategorized += 1;
+        if (isUnreconciled || isUncategorized) buckets[idx].needingAttention += 1;
       }
       for (const e of expenseRes.data ?? []) {
         const t = e as Record<string, unknown>;
@@ -179,6 +184,7 @@ Deno.serve(withLogging("financial-periods", async (req: Request) => {
           clean,
           ready: isPast && clean,
           status: statusByIndex[idx] ?? "open",
+          issue_count: b.needingAttention + b.missingReceipt,
         };
       });
 

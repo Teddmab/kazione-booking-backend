@@ -3,6 +3,7 @@ import { corsHeadersFor, handleCors } from "../_shared/cors.ts";
 import { badRequest, serverError } from "../_shared/errors.ts";
 import { requireOwnerOrManagerCtx } from "../_shared/auth.ts";
 import { withLogging } from "../_shared/logger.ts";
+import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -15,7 +16,9 @@ type ReportType =
   | "tax_summary"
   | "staff_payroll"
   | "supplier_spend"
-  | "bank_transactions";
+  | "bank_transactions"
+  | "cash_flow"
+  | "inventory_movement";
 
 type DirectReportType = "appointments" | "revenue" | "clients";
 
@@ -23,7 +26,7 @@ interface ExportBody {
   business_id: string;
   report_type: ReportType;
   date_range: { from: string; to: string };
-  format: "csv";
+  format: "csv" | "pdf";
 }
 
 const VALID_REPORT_TYPES: ReportType[] = [
@@ -34,7 +37,21 @@ const VALID_REPORT_TYPES: ReportType[] = [
   "staff_payroll",
   "supplier_spend",
   "bank_transactions",
+  "cash_flow",
+  "inventory_movement",
 ];
+
+const REPORT_TITLES: Record<ReportType, string> = {
+  accountant: "Accountant Export",
+  income: "Income by Service",
+  expenses: "Operating Costs by Category",
+  tax_summary: "Profit & Loss",
+  staff_payroll: "Staff Commission Summary",
+  supplier_spend: "Supplier Spend",
+  bank_transactions: "Bank Transactions",
+  cash_flow: "Cash-Flow Statement",
+  inventory_movement: "Product Cost & Inventory Movement",
+};
 
 const VALID_DIRECT_TYPES: DirectReportType[] = ["appointments", "revenue", "clients"];
 
@@ -60,6 +77,73 @@ function toCsv(headers: string[], rows: Record<string, unknown>[]): string {
 }
 
 // ---------------------------------------------------------------------------
+// PDF helper — one shared fixed-width table renderer for every report type,
+// rather than a bespoke layout per report. Good enough for the tabular
+// headers/rows shape every generator already produces for CSV; not a
+// general-purpose PDF layout engine.
+// ---------------------------------------------------------------------------
+
+async function renderPdf(title: string, headers: string[], rows: Record<string, unknown>[]): Promise<Uint8Array> {
+  const PAGE_WIDTH = 595.28; // A4 portrait, points
+  const PAGE_HEIGHT = 841.89;
+  const MARGIN = 40;
+  const ROW_HEIGHT = 16;
+
+  const doc = await PDFDocument.create();
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+  const boldFont = await doc.embedFont(StandardFonts.HelveticaBold);
+  const colWidth = (PAGE_WIDTH - MARGIN * 2) / Math.max(headers.length, 1);
+  const maxChars = Math.max(6, Math.floor(colWidth / 5));
+
+  let page = doc.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
+  let y = PAGE_HEIGHT - MARGIN;
+
+  function truncate(text: string): string {
+    return text.length > maxChars ? `${text.slice(0, maxChars - 1)}…` : text;
+  }
+
+  function drawTableHeader() {
+    page.drawText(title, { x: MARGIN, y, size: 14, font: boldFont });
+    y -= 18;
+    page.drawText(`Generated ${new Date().toISOString().slice(0, 10)}`, {
+      x: MARGIN, y, size: 8, font, color: rgb(0.45, 0.45, 0.45),
+    });
+    y -= 22;
+    headers.forEach((h, i) => {
+      page.drawText(truncate(String(h)), { x: MARGIN + i * colWidth, y, size: 9, font: boldFont });
+    });
+    y -= 6;
+    page.drawLine({
+      start: { x: MARGIN, y }, end: { x: PAGE_WIDTH - MARGIN, y },
+      thickness: 0.5, color: rgb(0.75, 0.75, 0.75),
+    });
+    y -= ROW_HEIGHT;
+  }
+
+  drawTableHeader();
+
+  for (const row of rows) {
+    if (y < MARGIN + ROW_HEIGHT) {
+      page = doc.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
+      y = PAGE_HEIGHT - MARGIN;
+      drawTableHeader();
+    }
+    headers.forEach((h, i) => {
+      const val = row[h];
+      const text = val === null || val === undefined ? "" : String(val);
+      page.drawText(truncate(text), { x: MARGIN + i * colWidth, y, size: 8, font });
+    });
+    y -= ROW_HEIGHT;
+  }
+
+  if (rows.length === 0) {
+    page.drawText("No data for this period.", { x: MARGIN, y, size: 9, font, color: rgb(0.5, 0.5, 0.5) });
+  }
+
+  return doc.save();
+}
+
+// ---------------------------------------------------------------------------
 // Report generators
 // ---------------------------------------------------------------------------
 
@@ -68,7 +152,7 @@ async function generateAccountantReport(
   from: string,
   to: string,
 ): Promise<{ headers: string[]; rows: Record<string, unknown>[] }> {
-  // Income rows — payments with succeeded status
+  // Income rows — paid payments
   const { data: payments, error: payErr } = await supabaseAdmin
     .from("payments")
     .select(`
@@ -79,7 +163,7 @@ async function generateAccountantReport(
       )
     `)
     .eq("business_id", businessId)
-    .eq("status", "succeeded")
+    .eq("status", "paid")
     .gte("paid_at", from)
     .lte("paid_at", to);
 
@@ -161,7 +245,7 @@ async function generateIncomeReport(
       )
     `)
     .eq("business_id", businessId)
-    .eq("status", "succeeded")
+    .eq("status", "paid")
     .gte("paid_at", from)
     .lte("paid_at", to)
     .order("paid_at", { ascending: true });
@@ -365,6 +449,93 @@ async function generateBankTransactionsReport(
 
   return {
     headers: ["date", "description", "amount", "currency", "category", "reference", "reconciled"],
+    rows,
+  };
+}
+
+async function generateCashFlowReport(
+  businessId: string,
+  from: string,
+  to: string,
+): Promise<{ headers: string[]; rows: Record<string, unknown>[] }> {
+  const { data, error } = await supabaseAdmin
+    .from("bank_transactions")
+    .select("date, amount")
+    .eq("business_id", businessId)
+    .gte("date", from)
+    .lte("date", to)
+    .order("date", { ascending: true });
+
+  if (error) throw error;
+
+  const byMonth: Record<string, { in: number; out: number }> = {};
+  for (const t of data ?? []) {
+    const row = t as { date: string; amount: unknown };
+    const month = row.date.slice(0, 7);
+    if (!byMonth[month]) byMonth[month] = { in: 0, out: 0 };
+    const amt = Number(row.amount ?? 0);
+    if (amt > 0) byMonth[month].in += amt;
+    else byMonth[month].out += Math.abs(amt);
+  }
+
+  const rows = Object.entries(byMonth)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([month, v]) => ({
+      period: month,
+      money_in: Math.round(v.in * 100) / 100,
+      money_out: Math.round(v.out * 100) / 100,
+      net_cash_flow: Math.round((v.in - v.out) * 100) / 100,
+    }));
+
+  return {
+    headers: ["period", "money_in", "money_out", "net_cash_flow"],
+    rows,
+  };
+}
+
+async function generateInventoryMovementReport(
+  businessId: string,
+  from: string,
+  to: string,
+): Promise<{ headers: string[]; rows: Record<string, unknown>[] }> {
+  const { data, error } = await supabaseAdmin
+    .from("stock_movements")
+    .select("movement_type, quantity, unit_cost, product:product_catalog(name, unit)")
+    .eq("business_id", businessId)
+    .gte("movement_date", from)
+    .lte("movement_date", to);
+
+  if (error) throw error;
+
+  const IN_TYPES = new Set(["purchase", "manual_in"]);
+
+  const byProduct: Record<string, { name: string; unit: string; qtyIn: number; qtyOut: number; cost: number }> = {};
+  // deno-lint-ignore no-explicit-any
+  for (const m of (data ?? []) as any[]) {
+    const name = m.product?.name ?? "Unknown product";
+    const key = name;
+    if (!byProduct[key]) byProduct[key] = { name, unit: m.product?.unit ?? "unit", qtyIn: 0, qtyOut: 0, cost: 0 };
+    const qty = Math.abs(Number(m.quantity ?? 0));
+    if (IN_TYPES.has(m.movement_type)) {
+      byProduct[key].qtyIn += qty;
+      byProduct[key].cost += qty * Number(m.unit_cost ?? 0);
+    } else {
+      byProduct[key].qtyOut += qty;
+    }
+  }
+
+  const rows = Object.values(byProduct)
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .map((p) => ({
+      product: p.name,
+      unit: p.unit,
+      quantity_in: p.qtyIn,
+      quantity_out: p.qtyOut,
+      cost_of_goods: Math.round(p.cost * 100) / 100,
+    }));
+
+  return {
+    headers: ["product", "unit", "quantity_in", "quantity_out", "cost_of_goods"],
     rows,
   };
 }
@@ -573,6 +744,8 @@ const GENERATORS: Record<
   staff_payroll: generateStaffPayrollReport,
   supplier_spend: generateSupplierSpendReport,
   bank_transactions: generateBankTransactionsReport,
+  cash_flow: generateCashFlowReport,
+  inventory_movement: generateInventoryMovementReport,
 };
 
 // ---------------------------------------------------------------------------
@@ -619,18 +792,23 @@ Deno.serve(withLogging("export-report", async (req: Request) => {
       body.date_range.to,
     );
 
-    const csv = toCsv(headers, rows);
+    const format = body.format === "pdf" ? "pdf" : "csv";
+    const fileBytes: Uint8Array | string = format === "pdf"
+      ? await renderPdf(REPORT_TITLES[body.report_type], headers, rows)
+      : toCsv(headers, rows);
+    const contentType = format === "pdf" ? "application/pdf" : "text/csv";
 
     // ── Upload to Storage ────────────────────────────────────
     const timestamp = Date.now();
     const year = new Date(body.date_range.from).getFullYear();
-    const filename = `${body.report_type}_${timestamp}.csv`;
+    const filename = `${body.report_type}_${timestamp}.${format}`;
     const storagePath = `reports/${businessId}/${year}/${filename}`;
 
+    const uploadBody = typeof fileBytes === "string" ? new TextEncoder().encode(fileBytes) : fileBytes;
     const { error: uploadErr } = await supabaseAdmin.storage
       .from("reports")
-      .upload(storagePath, new TextEncoder().encode(csv), {
-        contentType: "text/csv",
+      .upload(storagePath, uploadBody, {
+        contentType,
         upsert: false,
       });
 
@@ -644,6 +822,19 @@ Deno.serve(withLogging("export-report", async (req: Request) => {
     if (signErr) throw signErr;
 
     const expiresAt = new Date(Date.now() + 3600 * 1000).toISOString();
+
+    // Best-effort — a logging failure shouldn't fail a report the user
+    // already successfully generated and can already download.
+    const { error: historyErr } = await supabaseAdmin.from("report_history").insert({
+      business_id: businessId,
+      report_type: body.report_type,
+      period_from: body.date_range.from,
+      period_to: body.date_range.to,
+      format,
+      file_path: storagePath,
+      generated_by: ctx.userId,
+    });
+    if (historyErr) console.error("report_history insert failed:", historyErr.message);
 
     return new Response(
       JSON.stringify({

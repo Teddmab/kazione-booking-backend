@@ -126,3 +126,13 @@ verify_jwt = false
 # track-event is a public analytics endpoint — no auth required.
 [functions.track-event]
 verify_jwt = false
+
+# tax-deadline-notifier is cron-triggered, authenticating via its own
+# x-cron-secret header check (see supabase/functions/tax-deadline-notifier/
+# index.ts) rather than gateway JWT verification — same S62-precedent gap
+# as send-completion-reminders above: with no entry here, verify_jwt
+# defaults to true and the gateway would 401 the request before the
+# function's own secret check ever runs. Schedule: daily, see
+# .github/workflows/tax-deadline-notifier.yml.
+[functions.tax-deadline-notifier]
+verify_jwt = false

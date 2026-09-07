@@ -4,6 +4,7 @@ import { badRequest, serverError } from "../_shared/errors.ts";
 import { withLogging } from "../_shared/logger.ts";
 import { requireOwnerOrManagerCtx } from "../_shared/auth.ts";
 import { checkMonthNotLocked } from "../_shared/financialPeriods.ts";
+import { rewriteLocalUrl } from "../_shared/storage.ts";
 
 // "rent" -> "Rent", "internet_phone" -> "Internet phone" — used as a
 // fallback "source" label for fixed-cost rows in the bookkeeping feed,
@@ -96,10 +97,12 @@ async function computeStaffCommissionsGross(businessId: string, monthStart: stri
  * GET  ?action=reminders&business_id=
  * GET  ?action=report-history&business_id=&[report_type=&page=&limit=]
  * GET  ?action=tax-draft&business_id=&period=&obligation_type= → wizard step + review status for a period (defaults to {step:1, reviewed_at:null} if none saved)
+ * GET  ?action=receipts-for-period&business_id=&from=&to= → signed URLs for every receipt/document file in a date range, for the "Receipts archive" package item
  * POST ?action=expense        → create expense (body: business_id + fields, no file upload)
  * PATCH ?action=expense&id=   → update expense
  * PATCH ?action=tax-profile   → update tax profile (body: business_id + fields, confirm:true stamps tax_profile_confirmed_at)
- * POST ?action=tax-filings    → mark a period filed (body: business_id, period)
+ * POST ?action=tax-filings    → mark a period filed, optionally with submission details (body: business_id, period, [obligation_type, submission_date, submitted_by_name, authority_reference, declared_amount, payment_due_date, confirmation_receipt_id])
+ * PATCH ?action=tax-filings   → record a payment against an already-filed period (body: business_id, period, obligation_type, payment_amount, payment_date, payment_reference)
  * POST ?action=reminders      → set/replace a deadline reminder (body: business_id, deadline_key, remind_at)
  * POST ?action=vat-adjustment → create a manual VAT adjustment (body: business_id, period, description, amount, tax_rate, reason)
  * PATCH ?action=vat-adjustment&id= → update a manual VAT adjustment
@@ -962,7 +965,7 @@ Deno.serve(withLogging("finance", async (req: Request) => {
         // deno-lint-ignore no-explicit-any
         let filingsQuery: any = supabaseAdmin
           .from("tax_filings")
-          .select("period, filed_at, obligation_type")
+          .select("id, period, filed_at, obligation_type, submission_date, submitted_by_name, authority_reference, declared_amount, payment_due_date, confirmation_receipt_id, payment_amount, payment_date, payment_reference, payment_recorded_at")
           .eq("business_id", businessId);
         if (year) filingsQuery = filingsQuery.like("period", `${year}-%`);
         if (obligationType) filingsQuery = filingsQuery.eq("obligation_type", obligationType);
@@ -970,7 +973,22 @@ Deno.serve(withLogging("finance", async (req: Request) => {
           .order("period", { ascending: false })
           .order("filed_at", { ascending: false });
         if (error) return serverError(error.message);
-        return jsonCors(req, data ?? []);
+
+        const rows = (data ?? []) as Record<string, unknown>[];
+        const receiptIds = rows.map((r) => r.confirmation_receipt_id).filter((id): id is string => !!id);
+        const urlByReceiptId: Record<string, string> = {};
+        if (receiptIds.length > 0) {
+          const { data: receiptsData } = await supabaseAdmin.from("receipts").select("id, storage_path").in("id", receiptIds);
+          for (const r of receiptsData ?? []) {
+            const { data: signed } = await supabaseAdmin.storage.from("receipts").createSignedUrl(r.storage_path as string, 3600);
+            if (signed?.signedUrl) urlByReceiptId[r.id as string] = rewriteLocalUrl(signed.signedUrl);
+          }
+        }
+        const enriched = rows.map((r) => ({
+          ...r,
+          confirmation_url: r.confirmation_receipt_id ? urlByReceiptId[r.confirmation_receipt_id as string] ?? null : null,
+        }));
+        return jsonCors(req, enriched);
       }
 
       if (action === "reminders") {
@@ -1015,6 +1033,48 @@ Deno.serve(withLogging("finance", async (req: Request) => {
         if (error) return serverError(error.message);
         const row = data as Record<string, unknown> | null;
         return jsonCors(req, { step: row?.step ?? 1, reviewed_at: row?.reviewed_at ?? null });
+      }
+
+      if (action === "receipts-for-period") {
+        // Bundlable file list for the wizard's "Receipts archive" package
+        // item — merges the two places a receipt file can live: attached
+        // directly to an expense (expenses.receipt_url, no receipts-table
+        // row) and the standalone documents inbox (receipts table).
+        const from = url.searchParams.get("from");
+        const to = url.searchParams.get("to");
+        if (!from || !to) return badRequest("from and to are required");
+
+        const [expensesResult, receiptsResult] = await Promise.all([
+          supabaseAdmin
+            .from("expenses")
+            .select("receipt_url")
+            .eq("business_id", businessId)
+            .not("receipt_url", "is", null)
+            .gte("date", from)
+            .lte("date", to),
+          supabaseAdmin
+            .from("receipts")
+            .select("storage_path, original_filename")
+            .eq("business_id", businessId)
+            .gte("created_at", from)
+            .lte("created_at", to),
+        ]);
+        if (expensesResult.error) return serverError(expensesResult.error.message);
+        if (receiptsResult.error) return serverError(receiptsResult.error.message);
+
+        const files: { url: string; filename: string }[] = [];
+        for (const e of expensesResult.data ?? []) {
+          const path = e.receipt_url as string | null;
+          if (!path) continue;
+          const { data: signed } = await supabaseAdmin.storage.from("receipts").createSignedUrl(path, 3600);
+          if (signed?.signedUrl) files.push({ url: rewriteLocalUrl(signed.signedUrl), filename: path.split("/").pop() ?? "receipt" });
+        }
+        for (const r of receiptsResult.data ?? []) {
+          const path = r.storage_path as string;
+          const { data: signed } = await supabaseAdmin.storage.from("receipts").createSignedUrl(path, 3600);
+          if (signed?.signedUrl) files.push({ url: rewriteLocalUrl(signed.signedUrl), filename: (r.original_filename as string | null) ?? path.split("/").pop() ?? "document" });
+        }
+        return jsonCors(req, { files });
       }
 
       return badRequest(`Unknown action: ${action}`);
@@ -1148,6 +1208,9 @@ Deno.serve(withLogging("finance", async (req: Request) => {
     }
 
     // ── POST tax-filings — mark a month filed (idempotent re-file) ──────────
+    // Optional submission-detail fields (all from the wizard's Export &
+    // submit step) are folded into the same upsert as the filed_at stamp,
+    // so "mark filed" and "record the submission details" are one call.
     if (method === "POST" && action === "tax-filings") {
       const body = await req.json() as Record<string, unknown>;
       const ctx = await requireOwnerOrManagerCtx(req, body.business_id as string);
@@ -1159,22 +1222,54 @@ Deno.serve(withLogging("finance", async (req: Request) => {
         return badRequest("obligation_type must be vat_return, income_social_tax, or annual_report");
       }
 
+      const upsertData: Record<string, unknown> = {
+        business_id: ctx.businessId,
+        period,
+        obligation_type: obligationType,
+        filed_at: new Date().toISOString(),
+        filed_by: ctx.userId,
+      };
+      if (body.submission_date !== undefined) upsertData.submission_date = body.submission_date;
+      if (body.submitted_by_name !== undefined) upsertData.submitted_by_name = body.submitted_by_name;
+      if (body.authority_reference !== undefined) upsertData.authority_reference = body.authority_reference;
+      if (body.declared_amount !== undefined) upsertData.declared_amount = body.declared_amount;
+      if (body.payment_due_date !== undefined) upsertData.payment_due_date = body.payment_due_date;
+      if (body.confirmation_receipt_id !== undefined) upsertData.confirmation_receipt_id = body.confirmation_receipt_id;
+
       const { data, error } = await supabaseAdmin
         .from("tax_filings")
-        .upsert(
-          {
-            business_id: ctx.businessId,
-            period,
-            obligation_type: obligationType,
-            filed_at: new Date().toISOString(),
-            filed_by: ctx.userId,
-          },
-          { onConflict: "business_id,period,obligation_type" },
-        )
+        .upsert(upsertData, { onConflict: "business_id,period,obligation_type" })
         .select()
         .single();
       if (error) return serverError(error.message);
       return jsonCors(req, data, 201);
+    }
+
+    // ── PATCH tax-filings — record payment against an already-filed return ──
+    if (method === "PATCH" && action === "tax-filings") {
+      const body = await req.json() as Record<string, unknown>;
+      const ctx = await requireOwnerOrManagerCtx(req, body.business_id as string);
+      if (ctx instanceof Response) return ctx;
+      const period = body.period as string;
+      if (!period) return badRequest("period is required");
+      const obligationType = (body.obligation_type as string) ?? "vat_return";
+
+      const { data, error } = await supabaseAdmin
+        .from("tax_filings")
+        .update({
+          payment_amount: body.payment_amount ?? null,
+          payment_date: body.payment_date ?? null,
+          payment_reference: body.payment_reference ?? null,
+          payment_recorded_at: new Date().toISOString(),
+        })
+        .eq("business_id", ctx.businessId)
+        .eq("period", period)
+        .eq("obligation_type", obligationType)
+        .select()
+        .maybeSingle();
+      if (error) return serverError(error.message);
+      if (!data) return badRequest("No filing found for this period to record a payment against");
+      return jsonCors(req, data);
     }
 
     // ── POST reminders — set/replace a deadline reminder ────────────────────

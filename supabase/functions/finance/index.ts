@@ -36,6 +36,41 @@ async function uploadExpenseReceipt(businessId: string, base64: string, mimeType
   return path;
 }
 
+// Shared by tsd-summary and vat-calculation — both need "gross wages paid
+// to staff for the month," which is outside VAT (staff remuneration isn't
+// a VAT-relevant purchase) but relevant to income & social tax.
+async function computeStaffCommissionsGross(businessId: string, monthStart: string, monthEnd: string): Promise<{ gross: number; count: number }> {
+  const { data: appts, error } = await supabaseAdmin
+    .from("appointments")
+    .select("price, service:services(staff_commission_type, staff_commission_value), staff:staff_profiles!staff_profile_id(commission_rate)")
+    .eq("business_id", businessId)
+    .eq("status", "completed")
+    .not("staff_profile_id", "is", null)
+    .is("deleted_at", null)
+    .gte("starts_at", monthStart)
+    .lte("starts_at", monthEnd);
+  if (error) throw new Error(error.message);
+
+  let count = 0;
+  const gross = (appts ?? []).reduce((sum, a) => {
+    const row = a as Record<string, unknown>;
+    const svc = row.service as Record<string, unknown> | null;
+    const staff = row.staff as Record<string, unknown> | null;
+    const price = Number(row.price ?? 0);
+    const commType = (svc?.staff_commission_type as string) ?? "none";
+    const commValue = Number(svc?.staff_commission_value ?? 0);
+    const staffCommRate = Number(staff?.commission_rate ?? 0);
+    let commAmt = 0;
+    if (commType === "percentage" && commValue > 0) commAmt = price * commValue / 100;
+    else if (commType === "fixed" && commValue > 0) commAmt = commValue;
+    else if (staffCommRate > 0) commAmt = price * staffCommRate / 100;
+    if (commAmt > 0) count += 1;
+    return sum + commAmt;
+  }, 0);
+
+  return { gross, count };
+}
+
 /**
  * /finance — finance analytics, expense CRUD, bookkeeping
  *
@@ -53,13 +88,14 @@ async function uploadExpenseReceipt(businessId: string, base64: string, mimeType
  * GET  ?action=payroll-summary&business_id=&year=YYYY
  * GET  ?action=vat-summary&business_id=&month=YYYY-MM
  * GET  ?action=vat-ledger&business_id=&month=YYYY-MM
+ * GET  ?action=vat-calculation&business_id=&month=YYYY-MM → structured sales/purchases/adjustments breakdown for the wizard's Calculation/Review steps
  * GET  ?action=tsd-summary&business_id=&month=YYYY-MM
  * GET  ?action=inventory-value&business_id=
  * GET  ?action=tax-profile&business_id=
  * GET  ?action=tax-filings&business_id=&[year=]
  * GET  ?action=reminders&business_id=
  * GET  ?action=report-history&business_id=&[report_type=&page=&limit=]
- * GET  ?action=tax-draft&business_id=&period=&obligation_type= → wizard step reached for a period (defaults to {step:1} if none saved)
+ * GET  ?action=tax-draft&business_id=&period=&obligation_type= → wizard step + review status for a period (defaults to {step:1, reviewed_at:null} if none saved)
  * POST ?action=expense        → create expense (body: business_id + fields, no file upload)
  * PATCH ?action=expense&id=   → update expense
  * PATCH ?action=tax-profile   → update tax profile (body: business_id + fields, confirm:true stamps tax_profile_confirmed_at)
@@ -67,7 +103,7 @@ async function uploadExpenseReceipt(businessId: string, base64: string, mimeType
  * POST ?action=reminders      → set/replace a deadline reminder (body: business_id, deadline_key, remind_at)
  * POST ?action=vat-adjustment → create a manual VAT adjustment (body: business_id, period, description, amount, tax_rate, reason)
  * PATCH ?action=vat-adjustment&id= → update a manual VAT adjustment
- * POST ?action=tax-draft      → save/upsert the wizard step reached (body: business_id, period, obligation_type, step)
+ * POST ?action=tax-draft      → save/upsert the wizard step reached (body: business_id, period, obligation_type, step, [reviewed])
  * DELETE ?action=vat-adjustment&id= → delete a manual VAT adjustment
  * DELETE ?action=tax-draft&business_id=&period=&obligation_type= → clear a saved draft (e.g. once filed)
  * DELETE ?id=                 → delete expense
@@ -735,6 +771,126 @@ Deno.serve(withLogging("finance", async (req: Request) => {
         return jsonCors(req, { month, sales, expenses: expenseRows, adjustments: [...refundRows, ...manualRows] });
       }
 
+      if (action === "vat-calculation") {
+        // Structured breakdown for the VAT wizard's Calculation/Review
+        // steps — same underlying data as vat-summary/vat-ledger, grouped
+        // for direct rendering instead of the frontend re-deriving
+        // groupings. `totals` is computed independently from the same
+        // payments/expenses/adjustments sums vat-summary uses (not by
+        // summing the categories below), so it always matches vat-summary's
+        // headline numbers exactly — credit notes are shown for visibility
+        // but, like vat-summary, aren't folded into the totals (refunded
+        // payments already drop out of the "paid" sales query entirely).
+        const month = url.searchParams.get("month"); // YYYY-MM
+        if (!month) return badRequest("month is required");
+        const [y, m] = month.split("-").map(Number);
+        const lastDay = new Date(y, m, 0).getDate();
+        const monthStart = `${month}-01`;
+        const monthEnd = `${month}-${String(lastDay).padStart(2, "0")}`;
+        const nextMonth = new Date(Date.UTC(y, m, 1)).toISOString().slice(0, 10);
+        const r2 = (n: number) => Math.round(n * 100) / 100;
+
+        const [salesResult, expensesResult, refundsResult, adjustmentsResult] = await Promise.all([
+          supabaseAdmin
+            .from("payments")
+            .select("amount, tax_amount, tax_rate")
+            .eq("business_id", businessId)
+            .eq("status", "paid")
+            .eq("is_test", false)
+            .gte("paid_at", monthStart)
+            .lt("paid_at", nextMonth),
+          supabaseAdmin
+            .from("expenses")
+            .select("category, amount, tax_amount")
+            .eq("business_id", businessId)
+            .gte("date", monthStart)
+            .lt("date", nextMonth),
+          supabaseAdmin
+            .from("payments")
+            .select("refund_amount, tax_rate")
+            .eq("business_id", businessId)
+            .in("status", ["refunded", "partial_refund"])
+            .gte("refunded_at", monthStart)
+            .lt("refunded_at", nextMonth),
+          supabaseAdmin
+            .from("vat_adjustments")
+            .select("amount, tax_amount")
+            .eq("business_id", businessId)
+            .eq("period", month),
+        ]);
+        if (salesResult.error) return serverError(salesResult.error.message);
+        if (expensesResult.error) return serverError(expensesResult.error.message);
+        if (refundsResult.error) return serverError(refundsResult.error.message);
+        if (adjustmentsResult.error) return serverError(adjustmentsResult.error.message);
+
+        const standardRows = (salesResult.data ?? []).filter((p) => Number(p.tax_rate ?? 0) > 0);
+        const zeroRatedRows = (salesResult.data ?? []).filter((p) => Number(p.tax_rate ?? 0) === 0);
+        const sumTaxable = (rows: { amount: number | null; tax_amount: number | null }[]) =>
+          rows.reduce((s, p) => s + Number(p.amount ?? 0) - Number(p.tax_amount ?? 0), 0);
+        const sumVat = (rows: { tax_amount: number | null }[]) => rows.reduce((s, p) => s + Number(p.tax_amount ?? 0), 0);
+
+        const creditNotes = (refundsResult.data ?? []).map((p) => {
+          const refundAmount = Number(p.refund_amount ?? 0);
+          const taxRate = Number(p.tax_rate ?? 0);
+          const vatPortion = taxRate > 0 ? refundAmount * taxRate / (100 + taxRate) : 0;
+          return { taxable: -(refundAmount - vatPortion), vat: -vatPortion };
+        });
+
+        const purchasesByCategory = new Map<string, { net: number; vat_on_invoices: number; count: number }>();
+        for (const e of expensesResult.data ?? []) {
+          const category = (e.category as string) ?? "other";
+          const entry = purchasesByCategory.get(category) ?? { net: 0, vat_on_invoices: 0, count: 0 };
+          entry.net += Number(e.amount ?? 0) - Number(e.tax_amount ?? 0);
+          entry.vat_on_invoices += Number(e.tax_amount ?? 0);
+          entry.count += 1;
+          purchasesByCategory.set(category, entry);
+        }
+
+        let staffCommissions: { gross: number; count: number };
+        try {
+          staffCommissions = await computeStaffCommissionsGross(businessId, monthStart, monthEnd);
+        } catch (e) {
+          return serverError(e instanceof Error ? e.message : "Failed to compute staff commissions");
+        }
+
+        const adjustmentNet = (adjustmentsResult.data ?? []).reduce((s, a) => s + Number(a.amount ?? 0), 0);
+        const adjustmentVat = (adjustmentsResult.data ?? []).reduce((s, a) => s + Number(a.tax_amount ?? 0), 0);
+
+        // Matches vat-summary's own math exactly (see action=vat-summary above).
+        const grossSales = (salesResult.data ?? []).reduce((s, p) => s + Number(p.amount ?? 0), 0)
+          + adjustmentNet + adjustmentVat;
+        const vatCollected = sumVat(standardRows) + adjustmentVat;
+        const deductibleVat = (expensesResult.data ?? []).reduce((s, e) => s + Number(e.tax_amount ?? 0), 0);
+
+        return jsonCors(req, {
+          month,
+          sales: {
+            standard_rate: { taxable: r2(sumTaxable(standardRows)), vat: r2(sumVat(standardRows)), count: standardRows.length },
+            zero_rated: { taxable: r2(sumTaxable(zeroRatedRows)), vat: 0, count: zeroRatedRows.length },
+            credit_notes: {
+              taxable: r2(creditNotes.reduce((s, c) => s + c.taxable, 0)),
+              vat: r2(creditNotes.reduce((s, c) => s + c.vat, 0)),
+              count: creditNotes.length,
+            },
+          },
+          purchases: Array.from(purchasesByCategory.entries()).map(([category, v]) => ({
+            category,
+            net: r2(v.net),
+            vat_on_invoices: r2(v.vat_on_invoices),
+            deductible_vat: r2(v.vat_on_invoices),
+            count: v.count,
+          })),
+          staff_commissions: { gross: r2(staffCommissions.gross), count: staffCommissions.count },
+          adjustments: { net: r2(adjustmentNet), vat: r2(adjustmentVat), count: (adjustmentsResult.data ?? []).length },
+          totals: {
+            output_vat: r2(vatCollected),
+            deductible_vat: r2(deductibleVat),
+            estimated_payable: r2(vatCollected - deductibleVat),
+            taxable_sales_excl_vat: r2(grossSales - vatCollected),
+          },
+        });
+      }
+
       if (action === "tsd-summary") {
         // Estonia's TSD (income & social tax declaration) reports wages paid
         // to staff for the month. "Gross payments" sums the same per-
@@ -750,33 +906,13 @@ Deno.serve(withLogging("finance", async (req: Request) => {
         const monthStart = `${month}-01`;
         const monthEnd = `${month}-${String(lastDay).padStart(2, "0")}`;
 
-        const { data: appts, error: apptErr } = await supabaseAdmin
-          .from("appointments")
-          .select("price, service:services(staff_commission_type, staff_commission_value), staff:staff_profiles!staff_profile_id(commission_rate)")
-          .eq("business_id", businessId)
-          .eq("status", "completed")
-          .not("staff_profile_id", "is", null)
-          .is("deleted_at", null)
-          .gte("starts_at", monthStart)
-          .lte("starts_at", monthEnd);
-        if (apptErr) return serverError(apptErr.message);
-
         const ESTONIA_SOCIAL_TAX_RATE = 0.33;
-
-        const grossPayments = (appts ?? []).reduce((sum, a) => {
-          const row = a as Record<string, unknown>;
-          const svc = row.service as Record<string, unknown> | null;
-          const staff = row.staff as Record<string, unknown> | null;
-          const price = Number(row.price ?? 0);
-          const commType = (svc?.staff_commission_type as string) ?? "none";
-          const commValue = Number(svc?.staff_commission_value ?? 0);
-          const staffCommRate = Number(staff?.commission_rate ?? 0);
-          let commAmt = 0;
-          if (commType === "percentage" && commValue > 0) commAmt = price * commValue / 100;
-          else if (commType === "fixed" && commValue > 0) commAmt = commValue;
-          else if (staffCommRate > 0) commAmt = price * staffCommRate / 100;
-          return sum + commAmt;
-        }, 0);
+        let grossPayments: number;
+        try {
+          ({ gross: grossPayments } = await computeStaffCommissionsGross(businessId, monthStart, monthEnd));
+        } catch (e) {
+          return serverError(e instanceof Error ? e.message : "Failed to compute gross payments");
+        }
 
         const r2 = (n: number) => Math.round(n * 100) / 100;
         return jsonCors(req, {
@@ -871,13 +1007,14 @@ Deno.serve(withLogging("finance", async (req: Request) => {
         if (!period) return badRequest("period is required");
         const { data, error } = await supabaseAdmin
           .from("tax_return_drafts")
-          .select("step")
+          .select("step, reviewed_at")
           .eq("business_id", businessId)
           .eq("period", period)
           .eq("obligation_type", obligationType)
           .maybeSingle();
         if (error) return serverError(error.message);
-        return jsonCors(req, { step: (data as Record<string, unknown> | null)?.step ?? 1 });
+        const row = data as Record<string, unknown> | null;
+        return jsonCors(req, { step: row?.step ?? 1, reviewed_at: row?.reviewed_at ?? null });
       }
 
       return badRequest(`Unknown action: ${action}`);
@@ -1142,6 +1279,9 @@ Deno.serve(withLogging("finance", async (req: Request) => {
     }
 
     // ── POST tax-draft — save/upsert the wizard step reached for a period ───
+    // Optional body.reviewed stamps/clears the single self-attestation
+    // reviewed_at/reviewed_by — omit it entirely on a plain step-save so an
+    // already-set review stamp isn't touched by the upsert.
     if (method === "POST" && action === "tax-draft") {
       const body = await req.json() as Record<string, unknown>;
       const ctx = await requireOwnerOrManagerCtx(req, body.business_id as string);
@@ -1152,13 +1292,19 @@ Deno.serve(withLogging("finance", async (req: Request) => {
       if (!period) return badRequest("period is required");
       if (!Number.isInteger(step) || step < 1) return badRequest("step must be a positive integer");
 
+      const upsertData: Record<string, unknown> = { business_id: ctx.businessId, period, obligation_type: obligationType, step, updated_by: ctx.userId };
+      if (body.reviewed === true) {
+        upsertData.reviewed_at = new Date().toISOString();
+        upsertData.reviewed_by = ctx.userId;
+      } else if (body.reviewed === false) {
+        upsertData.reviewed_at = null;
+        upsertData.reviewed_by = null;
+      }
+
       const { data, error } = await supabaseAdmin
         .from("tax_return_drafts")
-        .upsert(
-          { business_id: ctx.businessId, period, obligation_type: obligationType, step, updated_by: ctx.userId },
-          { onConflict: "business_id,period,obligation_type" },
-        )
-        .select("step")
+        .upsert(upsertData, { onConflict: "business_id,period,obligation_type" })
+        .select("step, reviewed_at")
         .single();
       if (error) return serverError(error.message);
       return jsonCors(req, data, 201);

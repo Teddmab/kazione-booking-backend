@@ -52,6 +52,7 @@ async function uploadExpenseReceipt(businessId: string, base64: string, mimeType
  * GET  ?action=bank-coverage&business_id=&year=YYYY
  * GET  ?action=payroll-summary&business_id=&year=YYYY
  * GET  ?action=vat-summary&business_id=&month=YYYY-MM
+ * GET  ?action=tsd-summary&business_id=&month=YYYY-MM
  * GET  ?action=tax-profile&business_id=
  * GET  ?action=tax-filings&business_id=&[year=]
  * GET  ?action=reminders&business_id=
@@ -609,6 +610,57 @@ Deno.serve(withLogging("finance", async (req: Request) => {
           vat_collected: r3(vatCollected),
           deductible_vat: r3(deductibleVat),
           estimated_vat_position: r3(vatCollected - deductibleVat),
+        });
+      }
+
+      if (action === "tsd-summary") {
+        // Estonia's TSD (income & social tax declaration) reports wages paid
+        // to staff for the month. "Gross payments" sums the same per-
+        // appointment commission calc used by staff?action=unassigned-
+        // commissions, applied to completed appointments that DO have a
+        // staff member assigned (the wage was actually attributable).
+        // "Estimated taxes" applies Estonia's employer social tax rate —
+        // hardcoded, same precedent as computeDeadlines()/vatDueDate().
+        const month = url.searchParams.get("month"); // YYYY-MM
+        if (!month) return badRequest("month is required");
+        const [y, m] = month.split("-").map(Number);
+        const lastDay = new Date(y, m, 0).getDate();
+        const monthStart = `${month}-01`;
+        const monthEnd = `${month}-${String(lastDay).padStart(2, "0")}`;
+
+        const { data: appts, error: apptErr } = await supabaseAdmin
+          .from("appointments")
+          .select("price, service:services(staff_commission_type, staff_commission_value), staff:staff_profiles!staff_profile_id(commission_rate)")
+          .eq("business_id", businessId)
+          .eq("status", "completed")
+          .not("staff_profile_id", "is", null)
+          .is("deleted_at", null)
+          .gte("starts_at", monthStart)
+          .lte("starts_at", monthEnd);
+        if (apptErr) return serverError(apptErr.message);
+
+        const ESTONIA_SOCIAL_TAX_RATE = 0.33;
+
+        const grossPayments = (appts ?? []).reduce((sum, a) => {
+          const row = a as Record<string, unknown>;
+          const svc = row.service as Record<string, unknown> | null;
+          const staff = row.staff as Record<string, unknown> | null;
+          const price = Number(row.price ?? 0);
+          const commType = (svc?.staff_commission_type as string) ?? "none";
+          const commValue = Number(svc?.staff_commission_value ?? 0);
+          const staffCommRate = Number(staff?.commission_rate ?? 0);
+          let commAmt = 0;
+          if (commType === "percentage" && commValue > 0) commAmt = price * commValue / 100;
+          else if (commType === "fixed" && commValue > 0) commAmt = commValue;
+          else if (staffCommRate > 0) commAmt = price * staffCommRate / 100;
+          return sum + commAmt;
+        }, 0);
+
+        const r2 = (n: number) => Math.round(n * 100) / 100;
+        return jsonCors(req, {
+          month,
+          gross_payments: r2(grossPayments),
+          estimated_taxes: r2(grossPayments * ESTONIA_SOCIAL_TAX_RATE),
         });
       }
 

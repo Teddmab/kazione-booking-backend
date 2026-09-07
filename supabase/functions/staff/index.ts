@@ -2530,13 +2530,11 @@ Deno.serve(withLogging("staff", async (req: Request) => {
       const ctx = await requireOwnerOrManagerCtx(req, url.searchParams.get("business_id") ?? undefined);
       if (ctx instanceof Response) return ctx;
 
-      const { data: bizRow } = await supabaseAdmin
-        .from("businesses")
-        .select("commission_rate")
-        .eq("id", ctx.businessId)
-        .maybeSingle();
-      const bizCommRate = Number((bizRow as Record<string, unknown> | null)?.commission_rate ?? 0);
-
+      // No business-wide fallback commission rate exists in the schema —
+      // commission_rate lives per-staff on staff_profiles, and these rows
+      // by definition have no staff assigned yet, so there's nothing to
+      // fall back to; a service with staff_commission_type='none' simply
+      // has no computable commission until a staff member is assigned.
       const month = url.searchParams.get("month"); // YYYY-MM, optional
       // deno-lint-ignore no-explicit-any
       let apptQuery: any = supabaseAdmin
@@ -2551,18 +2549,28 @@ Deno.serve(withLogging("staff", async (req: Request) => {
         .is("staff_profile_id", null)
         .is("commission_paid_at", null)
         .is("deleted_at", null);
+      // deno-lint-ignore no-explicit-any
+      let totalQuery: any = supabaseAdmin
+        .from("appointments")
+        .select("id", { count: "exact", head: true })
+        .eq("business_id", ctx.businessId)
+        .eq("status", "completed")
+        .is("deleted_at", null);
       if (month && /^\d{4}-\d{2}$/.test(month)) {
         const [y, m] = month.split("-").map(Number);
         const lastDay = new Date(y, m, 0).getDate();
-        apptQuery = apptQuery
-          .gte("starts_at", `${month}-01`)
-          .lte("starts_at", `${month}-${String(lastDay).padStart(2, "0")}`);
+        const from = `${month}-01`;
+        const to = `${month}-${String(lastDay).padStart(2, "0")}`;
+        apptQuery = apptQuery.gte("starts_at", from).lte("starts_at", to);
+        totalQuery = totalQuery.gte("starts_at", from).lte("starts_at", to);
       }
-      const { data: appts, error: apptErr } = await apptQuery
-        .order("starts_at", { ascending: false })
-        .limit(200);
+      const [{ data: appts, error: apptErr }, { count: total, error: totalErr }] = await Promise.all([
+        apptQuery.order("starts_at", { ascending: false }).limit(200),
+        totalQuery,
+      ]);
 
       if (apptErr) return serverError(apptErr.message);
+      if (totalErr) return serverError(totalErr.message);
 
       const rows = (appts ?? []) as Record<string, unknown>[];
       const commissions = rows.map((a) => {
@@ -2574,7 +2582,6 @@ Deno.serve(withLogging("staff", async (req: Request) => {
         let commAmt = 0;
         if (commType === "percentage" && commValue > 0) commAmt = price * commValue / 100;
         else if (commType === "fixed" && commValue > 0) commAmt = commValue;
-        else if (bizCommRate > 0) commAmt = price * bizCommRate / 100;
         return {
           appointment_id: a.id as string,
           starts_at: a.starts_at as string,
@@ -2587,7 +2594,7 @@ Deno.serve(withLogging("staff", async (req: Request) => {
         };
       }).filter(Boolean);
 
-      return jsonCors(req, { commissions });
+      return jsonCors(req, { commissions, total: total ?? 0 });
     }
 
     // ── PATCH /staff?action=pay-commissions — owner bulk marks commissions paid ─

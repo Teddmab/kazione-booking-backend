@@ -41,7 +41,10 @@ Deno.serve(withLogging("financial-periods", async (req: Request) => {
       const { from, to } = monthBounds(month);
       const periodMonth = monthKeyOf(from);
 
-      const [periodRes, unreconciledRes, uncategorizedRes, missingReceiptRes] = await Promise.all([
+      const [
+        periodRes, unreconciledRes, uncategorizedRes, missingReceiptRes,
+        needingAttentionRes, totalTransactionsRes, totalExpensesRes,
+      ] = await Promise.all([
         supabaseAdmin.from("financial_periods").select("*")
           .eq("business_id", ctx.businessId).eq("period_month", periodMonth).maybeSingle(),
         supabaseAdmin.from("bank_transactions").select("id", { count: "exact", head: true })
@@ -53,11 +56,27 @@ Deno.serve(withLogging("financial-periods", async (req: Request) => {
           .eq("business_id", ctx.businessId).gte("date", from).lte("date", to).is("category", null),
         supabaseAdmin.from("expenses").select("id", { count: "exact", head: true })
           .eq("business_id", ctx.businessId).gte("date", from).lte("date", to).is("receipt_url", null),
+        // Distinct count of transactions that are unreconciled OR uncategorized —
+        // used wherever a single "needs attention" figure is shown (e.g. VAT
+        // blocking), since summing the two counts above can double-count a
+        // transaction that is both.
+        supabaseAdmin.from("bank_transactions").select("id", { count: "exact", head: true })
+          .eq("business_id", ctx.businessId).gte("date", from).lte("date", to)
+          .or(
+            "and(reconciled_payment_id.is.null,reconciled_expense_id.is.null,reconciled_fixed_cost_id.is.null,reconciled_debt_payment_id.is.null,reconciled_appointment_id.is.null,reconciled_stock_movement_id.is.null),category.is.null",
+          ),
+        supabaseAdmin.from("bank_transactions").select("id", { count: "exact", head: true })
+          .eq("business_id", ctx.businessId).gte("date", from).lte("date", to),
+        supabaseAdmin.from("expenses").select("id", { count: "exact", head: true })
+          .eq("business_id", ctx.businessId).gte("date", from).lte("date", to),
       ]);
       if (periodRes.error) return serverError(req, periodRes.error.message);
       if (unreconciledRes.error) return serverError(req, unreconciledRes.error.message);
       if (uncategorizedRes.error) return serverError(req, uncategorizedRes.error.message);
       if (missingReceiptRes.error) return serverError(req, missingReceiptRes.error.message);
+      if (needingAttentionRes.error) return serverError(req, needingAttentionRes.error.message);
+      if (totalTransactionsRes.error) return serverError(req, totalTransactionsRes.error.message);
+      if (totalExpensesRes.error) return serverError(req, totalExpensesRes.error.message);
 
       const period = periodRes.data as Record<string, unknown> | null;
       const checklist = {
@@ -73,6 +92,11 @@ Deno.serve(withLogging("financial-periods", async (req: Request) => {
         close_note: period?.close_note ?? null,
         reopened_at: period?.reopened_at ?? null,
         checklist,
+        transactions_needing_attention: needingAttentionRes.count ?? 0,
+        totals: {
+          transactions: totalTransactionsRes.count ?? 0,
+          expenses: totalExpensesRes.count ?? 0,
+        },
         ready: Object.values(checklist).every((n) => n === 0),
       });
     }
@@ -124,7 +148,7 @@ Deno.serve(withLogging("financial-periods", async (req: Request) => {
         const b = buckets[m];
         const isPast = year * 12 + (m - 1) < currentMonthIndex;
         const clean = b.unreconciled === 0 && b.uncategorized === 0 && b.missingReceipt === 0;
-        return { month: `${year}-${String(m).padStart(2, "0")}`, ready: isPast && clean };
+        return { month: `${year}-${String(m).padStart(2, "0")}`, is_past: isPast, clean, ready: isPast && clean };
       });
 
       return jsonCors(req, {

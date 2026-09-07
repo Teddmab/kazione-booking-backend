@@ -51,8 +51,16 @@ async function uploadExpenseReceipt(businessId: string, base64: string, mimeType
  * GET  ?action=annual-summary&business_id=&year=YYYY
  * GET  ?action=bank-coverage&business_id=&year=YYYY
  * GET  ?action=payroll-summary&business_id=&year=YYYY
+ * GET  ?action=vat-summary&business_id=&month=YYYY-MM
+ * GET  ?action=tax-profile&business_id=
+ * GET  ?action=tax-filings&business_id=&[year=]
+ * GET  ?action=reminders&business_id=
+ * GET  ?action=report-history&business_id=&[report_type=&page=&limit=]
  * POST ?action=expense        → create expense (body: business_id + fields, no file upload)
  * PATCH ?action=expense&id=   → update expense
+ * PATCH ?action=tax-profile   → update tax profile (body: business_id + fields, confirm:true stamps tax_profile_confirmed_at)
+ * POST ?action=tax-filings    → mark a period filed (body: business_id, period)
+ * POST ?action=reminders      → set/replace a deadline reminder (body: business_id, deadline_key, remind_at)
  * DELETE ?id=                 → delete expense
  */
 Deno.serve(withLogging("finance", async (req: Request) => {
@@ -564,6 +572,104 @@ Deno.serve(withLogging("finance", async (req: Request) => {
         });
       }
 
+      if (action === "vat-summary") {
+        const month = url.searchParams.get("month"); // YYYY-MM
+        if (!month) return badRequest("month is required");
+        const [y, m] = month.split("-").map(Number);
+        const monthStart = `${month}-01`;
+        const nextMonth = new Date(Date.UTC(y, m, 1)).toISOString().slice(0, 10);
+
+        const [paymentsResult, expensesResult] = await Promise.all([
+          supabaseAdmin
+            .from("payments")
+            .select("amount, tax_amount")
+            .eq("business_id", businessId)
+            .eq("status", "paid")
+            .eq("is_test", false)
+            .gte("paid_at", monthStart)
+            .lt("paid_at", nextMonth),
+          supabaseAdmin
+            .from("expenses")
+            .select("tax_amount")
+            .eq("business_id", businessId)
+            .gte("date", monthStart)
+            .lt("date", nextMonth),
+        ]);
+        if (paymentsResult.error) return serverError(paymentsResult.error.message);
+        if (expensesResult.error) return serverError(expensesResult.error.message);
+
+        const grossSales = (paymentsResult.data ?? []).reduce((s, p) => s + Number(p.amount ?? 0), 0);
+        const vatCollected = (paymentsResult.data ?? []).reduce((s, p) => s + Number(p.tax_amount ?? 0), 0);
+        const deductibleVat = (expensesResult.data ?? []).reduce((s, e) => s + Number(e.tax_amount ?? 0), 0);
+        const r3 = (n: number) => Math.round(n * 100) / 100;
+
+        return jsonCors(req, {
+          month,
+          taxable_sales_excl_vat: r3(grossSales - vatCollected),
+          vat_collected: r3(vatCollected),
+          deductible_vat: r3(deductibleVat),
+          estimated_vat_position: r3(vatCollected - deductibleVat),
+        });
+      }
+
+      if (action === "tax-profile") {
+        const [settingsResult, bizResult] = await Promise.all([
+          supabaseAdmin
+            .from("business_settings")
+            .select("vat_registered, vat_number, tax_reporting_frequency, tax_profile_confirmed_at, tax_enabled, tax_rate, tax_label, tax_number")
+            .eq("business_id", businessId)
+            .maybeSingle(),
+          supabaseAdmin.from("businesses").select("country").eq("id", businessId).maybeSingle(),
+        ]);
+        if (settingsResult.error) return serverError(settingsResult.error.message);
+        if (bizResult.error) return serverError(bizResult.error.message);
+        return jsonCors(req, {
+          ...(settingsResult.data ?? {}),
+          country: (bizResult.data as Record<string, unknown> | null)?.country ?? null,
+        });
+      }
+
+      if (action === "tax-filings") {
+        const year = url.searchParams.get("year");
+        // deno-lint-ignore no-explicit-any
+        let filingsQuery: any = supabaseAdmin
+          .from("tax_filings")
+          .select("period, filed_at")
+          .eq("business_id", businessId);
+        if (year) filingsQuery = filingsQuery.like("period", `${year}-%`);
+        const { data, error } = await filingsQuery.order("period", { ascending: false });
+        if (error) return serverError(error.message);
+        return jsonCors(req, data ?? []);
+      }
+
+      if (action === "reminders") {
+        const { data, error } = await supabaseAdmin
+          .from("tax_deadline_reminders")
+          .select("deadline_key, remind_at, notified_at")
+          .eq("business_id", businessId)
+          .is("notified_at", null);
+        if (error) return serverError(error.message);
+        return jsonCors(req, data ?? []);
+      }
+
+      if (action === "report-history") {
+        const reportType = url.searchParams.get("report_type");
+        const page = parseInt(url.searchParams.get("page") ?? "1", 10);
+        const limit = parseInt(url.searchParams.get("limit") ?? "25", 10);
+        // deno-lint-ignore no-explicit-any
+        let historyQuery: any = supabaseAdmin
+          .from("report_history")
+          .select("*", { count: "exact" })
+          .eq("business_id", businessId)
+          .order("created_at", { ascending: false });
+        if (reportType) historyQuery = historyQuery.eq("report_type", reportType);
+        const from = (page - 1) * limit;
+        historyQuery = historyQuery.range(from, from + limit - 1);
+        const { data, error, count } = await historyQuery;
+        if (error) return serverError(error.message);
+        return jsonCors(req, { reports: data ?? [], total: count ?? 0 });
+      }
+
       return badRequest(`Unknown action: ${action}`);
     }
 
@@ -648,6 +754,69 @@ Deno.serve(withLogging("finance", async (req: Request) => {
 
       if (error) return serverError(error.message);
       return jsonCors(req, { ...expense, supplier: (expense as Record<string, unknown>).supplier ?? null });
+    }
+
+    // ── PATCH tax-profile ────────────────────────────────────────────────────
+    if (method === "PATCH" && action === "tax-profile") {
+      const body = await req.json() as Record<string, unknown>;
+      const ctx = await requireOwnerOrManagerCtx(req, body.business_id as string);
+      if (ctx instanceof Response) return ctx;
+
+      const update: Record<string, unknown> = {};
+      if (body.vat_registered !== undefined) update.vat_registered = body.vat_registered;
+      if (body.vat_number !== undefined) update.vat_number = body.vat_number;
+      if (body.tax_reporting_frequency !== undefined) update.tax_reporting_frequency = body.tax_reporting_frequency;
+      if (body.confirm === true) update.tax_profile_confirmed_at = new Date().toISOString();
+
+      const { data, error } = await supabaseAdmin
+        .from("business_settings")
+        .update(update)
+        .eq("business_id", ctx.businessId)
+        .select("vat_registered, vat_number, tax_reporting_frequency, tax_profile_confirmed_at")
+        .single();
+      if (error) return serverError(error.message);
+      return jsonCors(req, data);
+    }
+
+    // ── POST tax-filings — mark a month filed (idempotent re-file) ──────────
+    if (method === "POST" && action === "tax-filings") {
+      const body = await req.json() as Record<string, unknown>;
+      const ctx = await requireOwnerOrManagerCtx(req, body.business_id as string);
+      if (ctx instanceof Response) return ctx;
+      const period = body.period as string;
+      if (!period) return badRequest("period is required");
+
+      const { data, error } = await supabaseAdmin
+        .from("tax_filings")
+        .upsert(
+          { business_id: ctx.businessId, period, filed_at: new Date().toISOString(), filed_by: ctx.userId },
+          { onConflict: "business_id,period" },
+        )
+        .select()
+        .single();
+      if (error) return serverError(error.message);
+      return jsonCors(req, data, 201);
+    }
+
+    // ── POST reminders — set/replace a deadline reminder ────────────────────
+    if (method === "POST" && action === "reminders") {
+      const body = await req.json() as Record<string, unknown>;
+      const ctx = await requireOwnerOrManagerCtx(req, body.business_id as string);
+      if (ctx instanceof Response) return ctx;
+      const deadlineKey = body.deadline_key as string;
+      const remindAt = body.remind_at as string;
+      if (!deadlineKey || !remindAt) return badRequest("deadline_key and remind_at are required");
+
+      const { data, error } = await supabaseAdmin
+        .from("tax_deadline_reminders")
+        .upsert(
+          { business_id: ctx.businessId, deadline_key: deadlineKey, remind_at: remindAt, notified_at: null, created_by: ctx.userId },
+          { onConflict: "business_id,deadline_key" },
+        )
+        .select()
+        .single();
+      if (error) return serverError(error.message);
+      return jsonCors(req, data, 201);
     }
 
     // ── DELETE ─────────────────────────────────────────────────────────────

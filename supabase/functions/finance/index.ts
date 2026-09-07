@@ -59,11 +59,17 @@ async function uploadExpenseReceipt(businessId: string, base64: string, mimeType
  * GET  ?action=tax-filings&business_id=&[year=]
  * GET  ?action=reminders&business_id=
  * GET  ?action=report-history&business_id=&[report_type=&page=&limit=]
+ * GET  ?action=tax-draft&business_id=&period=&obligation_type= → wizard step reached for a period (defaults to {step:1} if none saved)
  * POST ?action=expense        → create expense (body: business_id + fields, no file upload)
  * PATCH ?action=expense&id=   → update expense
  * PATCH ?action=tax-profile   → update tax profile (body: business_id + fields, confirm:true stamps tax_profile_confirmed_at)
  * POST ?action=tax-filings    → mark a period filed (body: business_id, period)
  * POST ?action=reminders      → set/replace a deadline reminder (body: business_id, deadline_key, remind_at)
+ * POST ?action=vat-adjustment → create a manual VAT adjustment (body: business_id, period, description, amount, tax_rate, reason)
+ * PATCH ?action=vat-adjustment&id= → update a manual VAT adjustment
+ * POST ?action=tax-draft      → save/upsert the wizard step reached (body: business_id, period, obligation_type, step)
+ * DELETE ?action=vat-adjustment&id= → delete a manual VAT adjustment
+ * DELETE ?action=tax-draft&business_id=&period=&obligation_type= → clear a saved draft (e.g. once filed)
  * DELETE ?id=                 → delete expense
  */
 Deno.serve(withLogging("finance", async (req: Request) => {
@@ -582,7 +588,7 @@ Deno.serve(withLogging("finance", async (req: Request) => {
         const monthStart = `${month}-01`;
         const nextMonth = new Date(Date.UTC(y, m, 1)).toISOString().slice(0, 10);
 
-        const [paymentsResult, expensesResult] = await Promise.all([
+        const [paymentsResult, expensesResult, adjustmentsResult] = await Promise.all([
           supabaseAdmin
             .from("payments")
             .select("amount, tax_amount")
@@ -597,12 +603,24 @@ Deno.serve(withLogging("finance", async (req: Request) => {
             .eq("business_id", businessId)
             .gte("date", monthStart)
             .lt("date", nextMonth),
+          supabaseAdmin
+            .from("vat_adjustments")
+            .select("amount, tax_amount")
+            .eq("business_id", businessId)
+            .eq("period", month),
         ]);
         if (paymentsResult.error) return serverError(paymentsResult.error.message);
         if (expensesResult.error) return serverError(expensesResult.error.message);
+        if (adjustmentsResult.error) return serverError(adjustmentsResult.error.message);
 
-        const grossSales = (paymentsResult.data ?? []).reduce((s, p) => s + Number(p.amount ?? 0), 0);
-        const vatCollected = (paymentsResult.data ?? []).reduce((s, p) => s + Number(p.tax_amount ?? 0), 0);
+        // Manual adjustments are stored excl. VAT — fold in their gross
+        // (amount + tax_amount) equivalent so grossSales - vatCollected
+        // still yields the correct taxable_sales_excl_vat below.
+        const adjustmentGross = (adjustmentsResult.data ?? []).reduce((s, a) => s + Number(a.amount ?? 0) + Number(a.tax_amount ?? 0), 0);
+        const adjustmentVat = (adjustmentsResult.data ?? []).reduce((s, a) => s + Number(a.tax_amount ?? 0), 0);
+
+        const grossSales = (paymentsResult.data ?? []).reduce((s, p) => s + Number(p.amount ?? 0), 0) + adjustmentGross;
+        const vatCollected = (paymentsResult.data ?? []).reduce((s, p) => s + Number(p.tax_amount ?? 0), 0) + adjustmentVat;
         const deductibleVat = (expensesResult.data ?? []).reduce((s, e) => s + Number(e.tax_amount ?? 0), 0);
         const r3 = (n: number) => Math.round(n * 100) / 100;
 
@@ -618,9 +636,10 @@ Deno.serve(withLogging("finance", async (req: Request) => {
       if (action === "vat-ledger") {
         // Itemized rows behind the vat-summary totals, for the VAT prep
         // wizard's "Records included" table — same three sources as
-        // vat-summary (payments, expenses) plus refunded payments as the
-        // "Adjustments" row type (the real-world equivalent of a VAT
-        // credit note; this system has no separate credit-note concept).
+        // vat-summary (payments, expenses) plus refunded payments and
+        // manual vat_adjustments rows, both folded into the "Adjustments"
+        // tab. Manual rows carry an `id` so the frontend can offer edit/
+        // delete; refund rows don't (they're derived, not owned records).
         const month = url.searchParams.get("month"); // YYYY-MM
         if (!month) return badRequest("month is required");
         const [y, m] = month.split("-").map(Number);
@@ -628,7 +647,7 @@ Deno.serve(withLogging("finance", async (req: Request) => {
         const nextMonth = new Date(Date.UTC(y, m, 1)).toISOString().slice(0, 10);
         const r2 = (n: number) => Math.round(n * 100) / 100;
 
-        const [salesResult, expensesResult, adjustmentsResult] = await Promise.all([
+        const [salesResult, expensesResult, refundsResult, manualAdjustmentsResult] = await Promise.all([
           supabaseAdmin
             .from("payments")
             .select("paid_at, amount, tax_amount, tax_rate, method, appointment:appointments(service:services(name))")
@@ -653,10 +672,17 @@ Deno.serve(withLogging("finance", async (req: Request) => {
             .gte("refunded_at", monthStart)
             .lt("refunded_at", nextMonth)
             .order("refunded_at", { ascending: true }),
+          supabaseAdmin
+            .from("vat_adjustments")
+            .select("id, description, amount, tax_rate, tax_amount, reason, created_at")
+            .eq("business_id", businessId)
+            .eq("period", month)
+            .order("created_at", { ascending: true }),
         ]);
         if (salesResult.error) return serverError(salesResult.error.message);
         if (expensesResult.error) return serverError(expensesResult.error.message);
-        if (adjustmentsResult.error) return serverError(adjustmentsResult.error.message);
+        if (refundsResult.error) return serverError(refundsResult.error.message);
+        if (manualAdjustmentsResult.error) return serverError(manualAdjustmentsResult.error.message);
 
         // deno-lint-ignore no-explicit-any
         const sales = (salesResult.data ?? []).map((p: any) => ({
@@ -679,7 +705,7 @@ Deno.serve(withLogging("finance", async (req: Request) => {
         }));
 
         // deno-lint-ignore no-explicit-any
-        const adjustments = (adjustmentsResult.data ?? []).map((p: any) => {
+        const refundRows = (refundsResult.data ?? []).map((p: any) => {
           const refundAmount = Number(p.refund_amount ?? 0);
           const taxRate = Number(p.tax_rate ?? 0);
           // refund_amount is VAT-inclusive (gross) — back out the VAT
@@ -695,7 +721,18 @@ Deno.serve(withLogging("finance", async (req: Request) => {
           };
         });
 
-        return jsonCors(req, { month, sales, expenses: expenseRows, adjustments });
+        // deno-lint-ignore no-explicit-any
+        const manualRows = (manualAdjustmentsResult.data ?? []).map((a: any) => ({
+          id: a.id as string,
+          date: (a.created_at as string)?.split("T")[0] ?? "",
+          description: a.description ?? "Adjustment",
+          source: a.reason ? `Manual — ${a.reason}` : "Manual",
+          amount: r2(Number(a.amount ?? 0)),
+          tax_rate: Number(a.tax_rate ?? 0),
+          tax_amount: r2(Number(a.tax_amount ?? 0)),
+        }));
+
+        return jsonCors(req, { month, sales, expenses: expenseRows, adjustments: [...refundRows, ...manualRows] });
       }
 
       if (action === "tsd-summary") {
@@ -826,6 +863,21 @@ Deno.serve(withLogging("finance", async (req: Request) => {
         const { data, error, count } = await historyQuery;
         if (error) return serverError(error.message);
         return jsonCors(req, { reports: data ?? [], total: count ?? 0 });
+      }
+
+      if (action === "tax-draft") {
+        const period = url.searchParams.get("period");
+        const obligationType = url.searchParams.get("obligation_type") ?? "vat_return";
+        if (!period) return badRequest("period is required");
+        const { data, error } = await supabaseAdmin
+          .from("tax_return_drafts")
+          .select("step")
+          .eq("business_id", businessId)
+          .eq("period", period)
+          .eq("obligation_type", obligationType)
+          .maybeSingle();
+        if (error) return serverError(error.message);
+        return jsonCors(req, { step: (data as Record<string, unknown> | null)?.step ?? 1 });
       }
 
       return badRequest(`Unknown action: ${action}`);
@@ -1007,6 +1059,153 @@ Deno.serve(withLogging("finance", async (req: Request) => {
         .single();
       if (error) return serverError(error.message);
       return jsonCors(req, data, 201);
+    }
+
+    // ── POST vat-adjustment — create a manual VAT adjustment line item ──────
+    if (method === "POST" && action === "vat-adjustment") {
+      const body = await req.json() as Record<string, unknown>;
+      const ctx = await requireOwnerOrManagerCtx(req, body.business_id as string);
+      if (ctx instanceof Response) return ctx;
+      const period = body.period as string;
+      const description = body.description as string;
+      if (!period || !description) return badRequest("period and description are required");
+
+      const lockCheck = await checkMonthNotLocked(req, ctx.businessId, `${period}-01`);
+      if (lockCheck) return lockCheck;
+
+      const amount = Number(body.amount ?? 0);
+      const taxRate = Number(body.tax_rate ?? 0);
+      const taxAmount = Math.round(amount * taxRate) / 100;
+
+      const { data, error } = await supabaseAdmin
+        .from("vat_adjustments")
+        .insert({
+          business_id: ctx.businessId,
+          period,
+          description,
+          amount,
+          tax_rate: taxRate,
+          tax_amount: taxAmount,
+          reason: body.reason ?? null,
+          created_by: ctx.userId,
+        })
+        .select()
+        .single();
+      if (error) return serverError(error.message);
+      return jsonCors(req, data, 201);
+    }
+
+    // ── PATCH vat-adjustment — update a manual VAT adjustment ───────────────
+    if (method === "PATCH" && action === "vat-adjustment") {
+      const id = url.searchParams.get("id");
+      if (!id) return badRequest("id is required");
+      const body = await req.json() as Record<string, unknown>;
+
+      const { data: existing, error: fetchErr } = await supabaseAdmin
+        .from("vat_adjustments")
+        .select("business_id, period")
+        .eq("id", id)
+        .single();
+      if (fetchErr || !existing) return badRequest("Adjustment not found");
+      const existingAdjustment = existing as Record<string, unknown>;
+
+      const ctx = await requireOwnerOrManagerCtx(req, existingAdjustment.business_id as string);
+      if (ctx instanceof Response) return ctx;
+
+      const lockCheck = await checkMonthNotLocked(req, ctx.businessId, `${existingAdjustment.period}-01`);
+      if (lockCheck) return lockCheck;
+
+      const amount = body.amount !== undefined ? Number(body.amount) : undefined;
+      const taxRate = body.tax_rate !== undefined ? Number(body.tax_rate) : undefined;
+      const update: Record<string, unknown> = {};
+      if (body.description !== undefined) update.description = body.description;
+      if (body.reason !== undefined) update.reason = body.reason;
+      if (amount !== undefined) update.amount = amount;
+      if (taxRate !== undefined) update.tax_rate = taxRate;
+      if (amount !== undefined || taxRate !== undefined) {
+        // Re-fetch whichever side wasn't provided so tax_amount stays consistent.
+        const { data: current } = await supabaseAdmin.from("vat_adjustments").select("amount, tax_rate").eq("id", id).single();
+        const c = current as Record<string, unknown> | null;
+        const effAmount = amount ?? Number(c?.amount ?? 0);
+        const effRate = taxRate ?? Number(c?.tax_rate ?? 0);
+        update.tax_amount = Math.round(effAmount * effRate) / 100;
+      }
+
+      const { data, error } = await supabaseAdmin
+        .from("vat_adjustments")
+        .update(update)
+        .eq("id", id)
+        .select()
+        .single();
+      if (error) return serverError(error.message);
+      return jsonCors(req, data);
+    }
+
+    // ── POST tax-draft — save/upsert the wizard step reached for a period ───
+    if (method === "POST" && action === "tax-draft") {
+      const body = await req.json() as Record<string, unknown>;
+      const ctx = await requireOwnerOrManagerCtx(req, body.business_id as string);
+      if (ctx instanceof Response) return ctx;
+      const period = body.period as string;
+      const obligationType = (body.obligation_type as string) ?? "vat_return";
+      const step = Number(body.step ?? 1);
+      if (!period) return badRequest("period is required");
+      if (!Number.isInteger(step) || step < 1) return badRequest("step must be a positive integer");
+
+      const { data, error } = await supabaseAdmin
+        .from("tax_return_drafts")
+        .upsert(
+          { business_id: ctx.businessId, period, obligation_type: obligationType, step, updated_by: ctx.userId },
+          { onConflict: "business_id,period,obligation_type" },
+        )
+        .select("step")
+        .single();
+      if (error) return serverError(error.message);
+      return jsonCors(req, data, 201);
+    }
+
+    // ── DELETE vat-adjustment ────────────────────────────────────────────────
+    if (method === "DELETE" && action === "vat-adjustment") {
+      const id = url.searchParams.get("id");
+      if (!id) return badRequest("id is required");
+
+      const { data: existing, error: fetchErr } = await supabaseAdmin
+        .from("vat_adjustments")
+        .select("business_id, period")
+        .eq("id", id)
+        .single();
+      if (fetchErr || !existing) return badRequest("Adjustment not found");
+      const existingAdjustment = existing as Record<string, unknown>;
+
+      const ctx = await requireOwnerOrManagerCtx(req, existingAdjustment.business_id as string);
+      if (ctx instanceof Response) return ctx;
+
+      const lockCheck = await checkMonthNotLocked(req, ctx.businessId, `${existingAdjustment.period}-01`);
+      if (lockCheck) return lockCheck;
+
+      const { error } = await supabaseAdmin.from("vat_adjustments").delete().eq("id", id);
+      if (error) return serverError(error.message);
+      return new Response(null, { status: 204, headers: corsHeadersFor(req) });
+    }
+
+    // ── DELETE tax-draft — clear a saved draft (e.g. once filed) ────────────
+    if (method === "DELETE" && action === "tax-draft") {
+      const businessIdParam = url.searchParams.get("business_id");
+      const period = url.searchParams.get("period");
+      const obligationType = url.searchParams.get("obligation_type") ?? "vat_return";
+      if (!businessIdParam || !period) return badRequest("business_id and period are required");
+
+      const ctx = await requireOwnerOrManagerCtx(req, businessIdParam);
+      if (ctx instanceof Response) return ctx;
+
+      const { error } = await supabaseAdmin
+        .from("tax_return_drafts")
+        .delete()
+        .eq("business_id", ctx.businessId)
+        .eq("period", period)
+        .eq("obligation_type", obligationType);
+      if (error) return serverError(error.message);
+      return new Response(null, { status: 204, headers: corsHeadersFor(req) });
     }
 
     // ── DELETE ─────────────────────────────────────────────────────────────

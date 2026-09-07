@@ -52,6 +52,7 @@ async function uploadExpenseReceipt(businessId: string, base64: string, mimeType
  * GET  ?action=bank-coverage&business_id=&year=YYYY
  * GET  ?action=payroll-summary&business_id=&year=YYYY
  * GET  ?action=vat-summary&business_id=&month=YYYY-MM
+ * GET  ?action=vat-ledger&business_id=&month=YYYY-MM
  * GET  ?action=tsd-summary&business_id=&month=YYYY-MM
  * GET  ?action=tax-profile&business_id=
  * GET  ?action=tax-filings&business_id=&[year=]
@@ -611,6 +612,89 @@ Deno.serve(withLogging("finance", async (req: Request) => {
           deductible_vat: r3(deductibleVat),
           estimated_vat_position: r3(vatCollected - deductibleVat),
         });
+      }
+
+      if (action === "vat-ledger") {
+        // Itemized rows behind the vat-summary totals, for the VAT prep
+        // wizard's "Records included" table — same three sources as
+        // vat-summary (payments, expenses) plus refunded payments as the
+        // "Adjustments" row type (the real-world equivalent of a VAT
+        // credit note; this system has no separate credit-note concept).
+        const month = url.searchParams.get("month"); // YYYY-MM
+        if (!month) return badRequest("month is required");
+        const [y, m] = month.split("-").map(Number);
+        const monthStart = `${month}-01`;
+        const nextMonth = new Date(Date.UTC(y, m, 1)).toISOString().slice(0, 10);
+        const r2 = (n: number) => Math.round(n * 100) / 100;
+
+        const [salesResult, expensesResult, adjustmentsResult] = await Promise.all([
+          supabaseAdmin
+            .from("payments")
+            .select("paid_at, amount, tax_amount, tax_rate, method, appointment:appointments(service:services(name))")
+            .eq("business_id", businessId)
+            .eq("status", "paid")
+            .eq("is_test", false)
+            .gte("paid_at", monthStart)
+            .lt("paid_at", nextMonth)
+            .order("paid_at", { ascending: true }),
+          supabaseAdmin
+            .from("expenses")
+            .select("date, description, amount, tax_amount, tax_rate, supplier:suppliers(name)")
+            .eq("business_id", businessId)
+            .gte("date", monthStart)
+            .lt("date", nextMonth)
+            .order("date", { ascending: true }),
+          supabaseAdmin
+            .from("payments")
+            .select("refunded_at, refund_amount, tax_rate, appointment:appointments(service:services(name))")
+            .eq("business_id", businessId)
+            .in("status", ["refunded", "partial_refund"])
+            .gte("refunded_at", monthStart)
+            .lt("refunded_at", nextMonth)
+            .order("refunded_at", { ascending: true }),
+        ]);
+        if (salesResult.error) return serverError(salesResult.error.message);
+        if (expensesResult.error) return serverError(expensesResult.error.message);
+        if (adjustmentsResult.error) return serverError(adjustmentsResult.error.message);
+
+        // deno-lint-ignore no-explicit-any
+        const sales = (salesResult.data ?? []).map((p: any) => ({
+          date: (p.paid_at as string)?.split("T")[0] ?? "",
+          description: p.appointment?.service?.name ?? "Service",
+          source: p.method ?? "card",
+          amount: r2(Number(p.amount ?? 0) - Number(p.tax_amount ?? 0)),
+          tax_rate: Number(p.tax_rate ?? 0),
+          tax_amount: r2(Number(p.tax_amount ?? 0)),
+        }));
+
+        // deno-lint-ignore no-explicit-any
+        const expenseRows = (expensesResult.data ?? []).map((e: any) => ({
+          date: e.date ?? "",
+          description: e.description ?? "Expense",
+          source: e.supplier?.name ?? "Supplier",
+          amount: r2(Number(e.amount ?? 0) - Number(e.tax_amount ?? 0)),
+          tax_rate: Number(e.tax_rate ?? 0),
+          tax_amount: r2(Number(e.tax_amount ?? 0)),
+        }));
+
+        // deno-lint-ignore no-explicit-any
+        const adjustments = (adjustmentsResult.data ?? []).map((p: any) => {
+          const refundAmount = Number(p.refund_amount ?? 0);
+          const taxRate = Number(p.tax_rate ?? 0);
+          // refund_amount is VAT-inclusive (gross) — back out the VAT
+          // portion using the original payment's own rate.
+          const vatPortion = taxRate > 0 ? refundAmount * taxRate / (100 + taxRate) : 0;
+          return {
+            date: (p.refunded_at as string)?.split("T")[0] ?? "",
+            description: `Refund — ${p.appointment?.service?.name ?? "Service"}`,
+            source: "Refund",
+            amount: r2(-(refundAmount - vatPortion)),
+            tax_rate: taxRate,
+            tax_amount: r2(-vatPortion),
+          };
+        });
+
+        return jsonCors(req, { month, sales, expenses: expenseRows, adjustments });
       }
 
       if (action === "tsd-summary") {

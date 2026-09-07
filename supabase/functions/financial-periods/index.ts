@@ -17,6 +17,7 @@ function monthBounds(month: string): { from: string; to: string } {
  * /financial-periods — per-business-per-month bookkeeping lock + live-computed readiness
  *
  * GET  ?action=status&business_id=&month=YYYY-MM  → lock status + checklist counts
+ * GET  ?action=year-status&business_id=&year=YYYY → per-month readiness across a year
  * POST ?action=close  body={business_id, month, note?}    → close the month
  * POST ?action=reopen body={business_id, month, reason?}  → reopen the month
  */
@@ -73,6 +74,64 @@ Deno.serve(withLogging("financial-periods", async (req: Request) => {
         reopened_at: period?.reopened_at ?? null,
         checklist,
         ready: Object.values(checklist).every((n) => n === 0),
+      });
+    }
+
+    if (req.method === "GET" && action === "year-status") {
+      const businessId = url.searchParams.get("business_id");
+      const year = parseInt(url.searchParams.get("year") ?? "", 10);
+      if (!businessId) return badRequest(req, "business_id is required");
+      if (!year) return badRequest(req, "year is required");
+
+      const ctx = await requireOwnerOrManagerCtx(req, businessId);
+      if (ctx instanceof Response) return ctx;
+
+      const yearStart = `${year}-01-01`;
+      const yearEnd = `${year + 1}-01-01`;
+
+      const [bankRes, expenseRes] = await Promise.all([
+        supabaseAdmin.from("bank_transactions")
+          .select("date, category, reconciled_payment_id, reconciled_expense_id, reconciled_fixed_cost_id, reconciled_debt_payment_id, reconciled_appointment_id, reconciled_stock_movement_id")
+          .eq("business_id", ctx.businessId).gte("date", yearStart).lt("date", yearEnd),
+        supabaseAdmin.from("expenses")
+          .select("date, receipt_url")
+          .eq("business_id", ctx.businessId).gte("date", yearStart).lt("date", yearEnd),
+      ]);
+      if (bankRes.error) return serverError(req, bankRes.error.message);
+      if (expenseRes.error) return serverError(req, expenseRes.error.message);
+
+      const buckets: Record<number, { unreconciled: number; uncategorized: number; missingReceipt: number }> = {};
+      for (let m = 1; m <= 12; m++) buckets[m] = { unreconciled: 0, uncategorized: 0, missingReceipt: 0 };
+
+      for (const tx of bankRes.data ?? []) {
+        const t = tx as Record<string, unknown>;
+        const m = new Date(t.date as string).getUTCMonth() + 1;
+        const isUnreconciled = !t.reconciled_payment_id && !t.reconciled_expense_id && !t.reconciled_fixed_cost_id &&
+          !t.reconciled_debt_payment_id && !t.reconciled_appointment_id && !t.reconciled_stock_movement_id;
+        if (isUnreconciled) buckets[m].unreconciled += 1;
+        if (t.category == null) buckets[m].uncategorized += 1;
+      }
+      for (const e of expenseRes.data ?? []) {
+        const t = e as Record<string, unknown>;
+        const m = new Date(t.date as string).getUTCMonth() + 1;
+        if (t.receipt_url == null) buckets[m].missingReceipt += 1;
+      }
+
+      const now = new Date();
+      const currentMonthIndex = now.getUTCFullYear() * 12 + now.getUTCMonth();
+      const months = Array.from({ length: 12 }, (_, i) => {
+        const m = i + 1;
+        const b = buckets[m];
+        const isPast = year * 12 + (m - 1) < currentMonthIndex;
+        const clean = b.unreconciled === 0 && b.uncategorized === 0 && b.missingReceipt === 0;
+        return { month: `${year}-${String(m).padStart(2, "0")}`, ready: isPast && clean };
+      });
+
+      return jsonCors(req, {
+        year,
+        months,
+        ready_count: months.filter((mo) => mo.ready).length,
+        total_count: months.length,
       });
     }
 

@@ -2537,7 +2537,9 @@ Deno.serve(withLogging("staff", async (req: Request) => {
         .maybeSingle();
       const bizCommRate = Number((bizRow as Record<string, unknown> | null)?.commission_rate ?? 0);
 
-      const { data: appts, error: apptErr } = await supabaseAdmin
+      const month = url.searchParams.get("month"); // YYYY-MM, optional
+      // deno-lint-ignore no-explicit-any
+      let apptQuery: any = supabaseAdmin
         .from("appointments")
         .select(`
           id, starts_at, price,
@@ -2548,7 +2550,15 @@ Deno.serve(withLogging("staff", async (req: Request) => {
         .eq("status", "completed")
         .is("staff_profile_id", null)
         .is("commission_paid_at", null)
-        .is("deleted_at", null)
+        .is("deleted_at", null);
+      if (month && /^\d{4}-\d{2}$/.test(month)) {
+        const [y, m] = month.split("-").map(Number);
+        const lastDay = new Date(y, m, 0).getDate();
+        apptQuery = apptQuery
+          .gte("starts_at", `${month}-01`)
+          .lte("starts_at", `${month}-${String(lastDay).padStart(2, "0")}`);
+      }
+      const { data: appts, error: apptErr } = await apptQuery
         .order("starts_at", { ascending: false })
         .limit(200);
 

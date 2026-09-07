@@ -774,14 +774,31 @@ Deno.serve(withLogging("finance", async (req: Request) => {
       if (body.tax_reporting_frequency !== undefined) update.tax_reporting_frequency = body.tax_reporting_frequency;
       if (body.confirm === true) update.tax_profile_confirmed_at = new Date().toISOString();
 
-      const { data, error } = await supabaseAdmin
-        .from("business_settings")
-        .update(update)
-        .eq("business_id", ctx.businessId)
-        .select("vat_registered, vat_number, tax_reporting_frequency, tax_profile_confirmed_at")
-        .single();
-      if (error) return serverError(error.message);
-      return jsonCors(req, data);
+      let settingsData: Record<string, unknown> = {};
+      if (Object.keys(update).length > 0) {
+        const { data, error } = await supabaseAdmin
+          .from("business_settings")
+          .update(update)
+          .eq("business_id", ctx.businessId)
+          .select("vat_registered, vat_number, tax_reporting_frequency, tax_profile_confirmed_at")
+          .single();
+        if (error) return serverError(error.message);
+        settingsData = data;
+      }
+
+      let legalForm: string | null | undefined;
+      if (body.legal_form !== undefined) {
+        const { data, error } = await supabaseAdmin
+          .from("businesses")
+          .update({ legal_form: body.legal_form })
+          .eq("id", ctx.businessId)
+          .select("legal_form")
+          .single();
+        if (error) return serverError(error.message);
+        legalForm = (data as Record<string, unknown>).legal_form as string | null;
+      }
+
+      return jsonCors(req, { ...settingsData, ...(legalForm !== undefined ? { legal_form: legalForm } : {}) });
     }
 
     // ── POST tax-filings — mark a month filed (idempotent re-file) ──────────

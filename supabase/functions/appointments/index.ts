@@ -21,6 +21,7 @@ import { generateIcs, icsToBase64, googleCalendarUrl } from "../_shared/ics.ts";
 import { localDateRangeToUtcIso, localWallClockToUtcIso, utcIsoToLocalParts } from "../_shared/timezone.ts";
 import { getBookingNotificationRecipients } from "../_shared/bookingNotificationRecipients.ts";
 import { notifyUserPush } from "../_shared/sendExpoPush.ts";
+import { insertNotificationAndPush } from "../_shared/insertNotificationAndPush.ts";
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const TIME_RE = /^\d{2}:\d{2}$/;
@@ -136,6 +137,17 @@ async function fetchOwnerEmail(businessId: string): Promise<string | null> {
     .maybeSingle();
   const u = (ownerMember as Record<string, unknown> | null)?.user as Record<string, unknown> | null;
   return (u?.email as string | null) ?? null;
+}
+
+async function fetchOwnerUserId(businessId: string): Promise<string | null> {
+  const { data: ownerMember } = await supabaseAdmin
+    .from("business_members")
+    .select("user_id")
+    .eq("business_id", businessId)
+    .eq("role", "owner")
+    .eq("is_active", true)
+    .maybeSingle();
+  return ((ownerMember as Record<string, unknown> | null)?.user_id as string | null) ?? null;
 }
 
 interface StaffSummaryRow {
@@ -889,6 +901,8 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
         const staffDisplayName = (staffRow?.display_name as string | null) ?? "TBD";
 
         // Booking notification — every supervisor, or the owner if none is set
+        const manualTitle = "New booking";
+        const manualBody = `${clientName} — ${serviceName} on ${formattedDate} at ${formattedTime}`;
         for (const recipient of recipients) {
           const ownerEmailData = bookingReceivedOwnerEmail({
             clientName,
@@ -907,11 +921,24 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
           sendEmail(recipient.email, ownerEmailData.subject, ownerEmailData.html).catch(
             (err) => console.error("Booking notification email (manual booking) failed:", err),
           );
+          void insertNotificationAndPush({
+            businessId: ctx.businessId,
+            userId: recipient.userId,
+            type: "new_booking",
+            title: manualTitle,
+            body: manualBody,
+            metadata: {
+              appointment_id: apptId,
+              booking_reference: bookingReference,
+            },
+            pushData: { appointment_id: apptId },
+          });
         }
 
         // Staff notification with ICS calendar invite
         if (body.staff_profile_id) {
-          const staffEmail = await fetchStaffEmail(body.staff_profile_id as string).catch(() => null);
+          const staffProfileIdManual = body.staff_profile_id as string;
+          const staffEmail = await fetchStaffEmail(staffProfileIdManual).catch(() => null);
           if (staffEmail) {
             const startDate = new Date(startsAt);
             const durationMs = (serviceRow.duration_minutes as number) * 60_000;
@@ -945,6 +972,21 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
               undefined,
               [{ filename: "appointment.ics", content: icsToBase64(icsString) }],
             ).catch((err) => console.error("Staff new-booking email failed:", err));
+          }
+          const staffUserIdManual = await fetchStaffUserId(staffProfileIdManual).catch(() => null);
+          if (staffUserIdManual) {
+            void insertNotificationAndPush({
+              businessId: ctx.businessId,
+              userId: staffUserIdManual,
+              type: "new_booking",
+              title: manualTitle,
+              body: manualBody,
+              metadata: {
+                appointment_id: apptId,
+                booking_reference: bookingReference,
+              },
+              pushData: { appointment_id: apptId },
+            });
           }
         }
 
@@ -1466,6 +1508,23 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
               manageUrl: `${appUrl}/owner/appointments`,
             }).html,
           ).catch((e) => console.warn("respond-offer owner email failed:", e));
+
+          const ownerUserId = await fetchOwnerUserId(ex.business_id);
+          if (ownerUserId) {
+            await insertNotificationAndPush({
+              businessId: ex.business_id,
+              userId: ownerUserId,
+              type: "appointment_offer_response",
+              title: `Staff ${verb} appointment`,
+              body: `${staffDisplayName} ${verb} — ${service?.name ?? "Service"} (${apptRow.booking_reference})`,
+              metadata: {
+                appointment_id: id,
+                booking_reference: apptRow.booking_reference,
+                response,
+              },
+              pushData: { appointment_id: id },
+            });
+          }
         } catch (e) { console.warn("respond-offer owner email error:", e); }
       })();
 
@@ -1785,6 +1844,39 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
           await sendEmail(to, subject, html, undefined, icsAttachment).catch((e) =>
             console.warn(`reschedule email to ${to} failed:`, e),
           );
+        }
+
+        const rescheduleTitle = "Appointment rescheduled";
+        const rescheduleBody = `${clientName} — ${serviceName} moved to ${formattedDate} at ${formattedTime}`;
+        const rescheduleMeta = {
+          appointment_id: id,
+          booking_reference: ref,
+        };
+        if (ex.staff_profile_id) {
+          const staffUserId = await fetchStaffUserId(ex.staff_profile_id as string).catch(() => null);
+          if (staffUserId) {
+            await insertNotificationAndPush({
+              businessId: ex.business_id as string,
+              userId: staffUserId,
+              type: "appointment_rescheduled",
+              title: rescheduleTitle,
+              body: rescheduleBody,
+              metadata: rescheduleMeta,
+              pushData: { appointment_id: id },
+            });
+          }
+        }
+        const ownerUserId = await fetchOwnerUserId(ex.business_id as string).catch(() => null);
+        if (ownerUserId) {
+          await insertNotificationAndPush({
+            businessId: ex.business_id as string,
+            userId: ownerUserId,
+            type: "appointment_rescheduled",
+            title: rescheduleTitle,
+            body: rescheduleBody,
+            metadata: rescheduleMeta,
+            pushData: { appointment_id: id },
+          });
         }
       } catch (emailErr) {
         console.warn("reschedule email notification failed:", emailErr);
@@ -2368,6 +2460,40 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
                 console.warn(`cancel email to owner failed:`, e),
               );
             }
+
+            const cancelTitle = "Appointment cancelled";
+            const cancelBody = `${clientName} — ${serviceName} on ${formattedDate} at ${formattedTime}`;
+            const cancelMeta = {
+              appointment_id: id,
+              booking_reference: ref,
+              reason: reason ?? null,
+            };
+            if (staffProfileId) {
+              const staffUserId = await fetchStaffUserId(staffProfileId).catch(() => null);
+              if (staffUserId) {
+                await insertNotificationAndPush({
+                  businessId,
+                  userId: staffUserId,
+                  type: "appointment_cancelled",
+                  title: cancelTitle,
+                  body: cancelBody,
+                  metadata: cancelMeta,
+                  pushData: { appointment_id: id },
+                });
+              }
+            }
+            const ownerUserId = await fetchOwnerUserId(businessId).catch(() => null);
+            if (ownerUserId) {
+              await insertNotificationAndPush({
+                businessId,
+                userId: ownerUserId,
+                type: "appointment_cancelled",
+                title: cancelTitle,
+                body: cancelBody,
+                metadata: cancelMeta,
+                pushData: { appointment_id: id },
+              });
+            }
           } catch (cancelEmailErr) {
             console.warn("cancellation email notification failed:", cancelEmailErr);
           }
@@ -2429,6 +2555,23 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
               dashboardUrl: `${appUrl}/owner/appointments`,
             });
             await sendEmail(ownerEmail, subject, html).catch((e) => console.warn("pending_completion owner email failed:", e));
+
+            const ownerUserId = await fetchOwnerUserId(businessId);
+            if (ownerUserId) {
+              await insertNotificationAndPush({
+                businessId,
+                userId: ownerUserId,
+                type: "pending_completion",
+                title: "Completion awaiting confirmation",
+                body: `${staffDisplayName} marked ${service?.name ?? "a service"} complete — confirm payment`,
+                metadata: {
+                  appointment_id: id,
+                  booking_reference: apptRow.booking_reference,
+                  payment_method: submittedMethod,
+                },
+                pushData: { appointment_id: id },
+              });
+            }
           } catch (e) { console.warn("pending_completion owner email error:", e); }
         })();
       }
@@ -2588,6 +2731,22 @@ Deno.serve(withLogging("appointments", async (req: Request) => {
                 reference: apptRow.booking_reference as string,
               });
               await sendEmail(staffEmail, subject, html).catch((e) => console.warn("completion confirmed staff email failed:", e));
+
+              const staffUserId = await fetchStaffUserId(staffProfileIdForComplete);
+              if (staffUserId) {
+                await insertNotificationAndPush({
+                  businessId: existingRow.business_id as string,
+                  userId: staffUserId,
+                  type: "completion_confirmed",
+                  title: "Appointment completed",
+                  body: `${service?.name ?? "Service"} with ${client ? `${client.first_name} ${client.last_name}` : "client"} was confirmed complete`,
+                  metadata: {
+                    appointment_id: id,
+                    booking_reference: apptRow.booking_reference,
+                  },
+                  pushData: { appointment_id: id },
+                });
+              }
             } catch (e) { console.warn("completion confirmed staff email error:", e); }
           })();
         }

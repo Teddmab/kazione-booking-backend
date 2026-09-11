@@ -3,6 +3,7 @@ import { corsHeadersFor, handleCors, jsonCors } from "../_shared/cors.ts";
 import { serverError } from "../_shared/errors.ts";
 import { overdueCompletionReminderEmail, sendEmail } from "../_shared/resend.ts";
 import { logNotificationDelivery } from "../_shared/notificationLog.ts";
+import { insertNotificationAndPush } from "../_shared/insertNotificationAndPush.ts";
 
 /**
  * send-completion-reminders — finds overdue unfinished appointments and
@@ -88,7 +89,7 @@ Deno.serve(async (req: Request) => {
 
     const { data: ownerMember } = await supabaseAdmin
       .from("business_members")
-      .select("user:users(email)")
+      .select("user_id, user:users(email)")
       .eq("business_id", businessId)
       .eq("role", "owner")
       .eq("is_active", true)
@@ -140,6 +141,23 @@ Deno.serve(async (req: Request) => {
     });
 
     if (!sendOk) { skipped++; continue; }
+
+    const ownerUserId = (ownerMember as Record<string, unknown> | null)?.user_id as string | null;
+    if (ownerUserId) {
+      await insertNotificationAndPush({
+        businessId,
+        userId: ownerUserId,
+        type: "completion_reminder",
+        title: "Overdue completion",
+        body: `${service?.name ?? "Service"} with ${client ? `${client.first_name} ${client.last_name}` : "client"} still needs confirmation`,
+        metadata: {
+          appointment_id: row.id,
+          booking_reference: row.booking_reference,
+          reminder_number: reminderCount,
+        },
+        pushData: { appointment_id: String(row.id) },
+      });
+    }
 
     // Update reminder tracking
     await supabaseAdmin

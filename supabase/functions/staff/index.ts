@@ -14,6 +14,7 @@ import { logStaffAction } from "../_shared/staffAudit.ts";
 import { getCallerIp } from "../_shared/adminAuth.ts";
 import { logServiceActivity } from "../_shared/serviceActivity.ts";
 import { notifyUserPush } from "../_shared/sendExpoPush.ts";
+import { insertNotificationAndPush } from "../_shared/insertNotificationAndPush.ts";
 
 /**
  * Resolve the caller's primary owner/manager business from their JWT.
@@ -885,6 +886,16 @@ Deno.serve(withLogging("staff", async (req: Request) => {
             await sendEmail(staffEmail, emailData.subject, emailData.html).catch((e) =>
               console.warn("Service offer accepted email failed:", e),
             );
+
+            await insertNotificationAndPush({
+              businessId: mem.business_id as string,
+              userId: user.id,
+              type: "service_offer_accepted",
+              title: "Service offer accepted",
+              body: `${svc.name as string} is now on your active services.`,
+              metadata: { service_id: serviceId },
+              pushData: { type: "service_offer" },
+            });
           } catch (e) {
             console.warn("Service offer accepted email error:", e);
           }
@@ -2254,15 +2265,13 @@ Deno.serve(withLogging("staff", async (req: Request) => {
       const issuedAt = new Date().toISOString();
 
       if (staffUserId) {
-        supabaseAdmin.from("notifications").insert({
-          business_id: ctx.businessId,
-          user_id: staffUserId,
+        void insertNotificationAndPush({
+          businessId: ctx.businessId,
+          userId: staffUserId,
           type: "staff_magic_link_issued",
           title: "A sign-in link for your account was generated",
           body: `${issuedByName} generated a one-time sign-in link for your staff account.`,
           metadata: { issued_by: ctx.userId, issued_at: issuedAt },
-        }).then(({ error: notifErr }) => {
-          if (notifErr) console.error("staff magic-link notification insert failed:", notifErr);
         });
       }
 

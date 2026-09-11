@@ -7,6 +7,7 @@ import {
 } from "../_shared/resend.ts";
 import { issueCancelToken } from "../_shared/bookingCancelToken.ts";
 import { withLogging } from "../_shared/logger.ts";
+import { insertNotificationAndPush } from "../_shared/insertNotificationAndPush.ts";
 
 // ---------------------------------------------------------------------------
 // Stripe webhook — verify signature, process events, always return 200
@@ -212,20 +213,23 @@ async function handlePaymentSucceeded(pi: Stripe.PaymentIntent) {
   if (ownerErr) throw ownerErr;
 
   if (ownerMember) {
-    const { error: notifErr } = await supabaseAdmin.from("notifications").insert({
-      business_id: bid,
-      user_id: ownerMember.user_id,
+    const title = "Payment Received";
+    const body =
+      `Payment of ${(pi.amount / 100).toFixed(2)} ${pi.currency.toUpperCase()} received for ${bookingReference ?? appointmentId}`;
+    await insertNotificationAndPush({
+      businessId: bid,
+      userId: ownerMember.user_id as string,
       type: "payment_received",
-      title: "Payment Received",
-      body: `Payment of ${(pi.amount / 100).toFixed(2)} ${pi.currency.toUpperCase()} received for ${bookingReference ?? appointmentId}`,
+      title,
+      body,
       metadata: {
         appointment_id: appointmentId,
         booking_reference: bookingReference,
         amount: pi.amount,
         currency: pi.currency,
       },
+      pushData: appointmentId ? { appointment_id: appointmentId } : undefined,
     });
-    if (notifErr) throw notifErr;
   }
 
   console.log(`payment_intent.succeeded: confirmed appointment ${appointmentId}`);

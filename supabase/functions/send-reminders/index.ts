@@ -8,6 +8,8 @@ import { sendSms } from "../_shared/messagebird.ts";
 import { sendClientWaReminder, sendStaffWaReminder } from "../_shared/bird-whatsapp.ts";
 import { logNotificationDelivery } from "../_shared/notificationLog.ts";
 import { getBookingNotificationRecipients, type NotificationRecipient } from "../_shared/bookingNotificationRecipients.ts";
+import { insertNotificationAndPush } from "../_shared/insertNotificationAndPush.ts";
+import { notifyUserPush } from "../_shared/sendExpoPush.ts";
 
 // ---------------------------------------------------------------------------
 // Auth — CRON_SECRET header check
@@ -188,15 +190,21 @@ async function sendReminders(
 
   const staffPhoneMap = new Map<string, string>(); // business_member_id → phone
   const staffEmailMap = new Map<string, string>(); // business_member_id → email (authoritative user email)
+  const staffUserIdByMember = new Map<string, string>(); // business_member_id → user_id
   if (staffMemberIds.length > 0) {
     const { data: memberRows } = await supabaseAdmin
       .from("business_members")
-      .select("id, users(phone, email)")
+      .select("id, user_id, users(phone, email)")
       .in("id", staffMemberIds);
     for (const m of memberRows ?? []) {
-      const user = (m as unknown as { id: string; users: { phone: string | null; email: string | null } | null }).users;
-      if (user?.phone) staffPhoneMap.set((m as unknown as { id: string }).id, user.phone);
-      if (user?.email) staffEmailMap.set((m as unknown as { id: string }).id, user.email);
+      const row = m as unknown as {
+        id: string;
+        user_id: string | null;
+        users: { phone: string | null; email: string | null } | null;
+      };
+      if (row.users?.phone) staffPhoneMap.set(row.id, row.users.phone);
+      if (row.users?.email) staffEmailMap.set(row.id, row.users.email);
+      if (row.user_id) staffUserIdByMember.set(row.id, row.user_id);
     }
   }
 
@@ -306,6 +314,23 @@ async function sendReminders(
           providerMessageId: staffEmailResult.ok ? staffEmailResult.messageId : null,
           errorMessage: staffEmailResult.ok ? null : staffEmailResult.error,
         });
+        if (staff.business_member_id) {
+          const staffUserId = staffUserIdByMember.get(staff.business_member_id);
+          if (staffUserId) {
+            await insertNotificationAndPush({
+              businessId: appt.business_id as string,
+              userId: staffUserId,
+              type: "appointment_reminder",
+              title: "Upcoming appointment",
+              body: `${client.first_name} ${client.last_name} — ${service.name} on ${dateStr} at ${timeStr}`,
+              metadata: {
+                appointment_id: appt.id,
+                booking_reference: appt.booking_reference,
+              },
+              pushData: { appointment_id: String(appt.id) },
+            });
+          }
+        }
       }
 
       // Booking-notification-recipient email reminder (every supervisor, or
@@ -336,6 +361,18 @@ async function sendReminders(
           status: ownerEmailResult.ok ? "sent" : "failed",
           providerMessageId: ownerEmailResult.ok ? ownerEmailResult.messageId : null,
           errorMessage: ownerEmailResult.ok ? null : ownerEmailResult.error,
+        });
+        await insertNotificationAndPush({
+          businessId: appt.business_id as string,
+          userId: recipient.userId,
+          type: "appointment_reminder",
+          title: "Upcoming appointment",
+          body: `${client.first_name} ${client.last_name} — ${service.name} on ${dateStr} at ${timeStr}`,
+          metadata: {
+            appointment_id: appt.id,
+            booking_reference: appt.booking_reference,
+          },
+          pushData: { appointment_id: String(appt.id) },
         });
       }
 
@@ -618,6 +655,18 @@ async function createPendingStatusTasks(
         .from("notifications")
         .insert(notifications);
       if (notifErr) throw notifErr;
+
+      for (const n of notifications) {
+        notifyUserPush({
+          userId: n.user_id,
+          title: n.title,
+          body: n.body,
+          data: {
+            type: n.type,
+            appointment_id: String(meta.appointment_id),
+          },
+        });
+      }
 
       // Mark task as sent — appointment status is NOT changed
       const { error: updateErr } = await supabaseAdmin

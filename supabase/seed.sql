@@ -597,3 +597,38 @@ VALUES (
   'a0000000-0000-4000-8000-000000000001',
   'seed-test-fixture', 'GET', 500, 'Synthetic error for platform-alert-digest tests'
 ) ON CONFLICT DO NOTHING;
+
+-- ── Tax obligation profile fields (Obligations tab redesign) ───────────────
+-- Afrotouch is Estonian OÜ, not yet VAT-registered ("needs confirmation" in
+-- the profile strip), employs staff, and uses an external accountant for
+-- staff-payment reporting — matches the Obligations tab mockup exactly.
+DO $$
+DECLARE
+  v_biz_id  uuid := 'b0000000-0000-4000-8000-000000000001';
+  v_user_id uuid;
+BEGIN
+  UPDATE businesses SET legal_form = 'OÜ' WHERE id = v_biz_id;
+
+  INSERT INTO business_settings (business_id, employs_staff, accountant_name, accountant_email, vat_responsible, tsd_responsible, annual_responsible, fiscal_year_start_month)
+  VALUES (v_biz_id, true, 'Noora Kask', 'noora@afrotouch-accounting.ee', 'owner', 'accountant', 'owner', 1)
+  ON CONFLICT (business_id) DO UPDATE SET
+    employs_staff       = EXCLUDED.employs_staff,
+    accountant_name     = EXCLUDED.accountant_name,
+    accountant_email    = EXCLUDED.accountant_email,
+    vat_responsible      = EXCLUDED.vat_responsible,
+    tsd_responsible      = EXCLUDED.tsd_responsible,
+    annual_responsible   = EXCLUDED.annual_responsible,
+    fiscal_year_start_month = EXCLUDED.fiscal_year_start_month;
+
+  SELECT user_id INTO v_user_id FROM business_members WHERE business_id = v_biz_id AND role = 'owner' AND is_active = true LIMIT 1;
+
+  IF v_user_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM tax_activity_log WHERE business_id = v_biz_id) THEN
+    INSERT INTO tax_activity_log (business_id, obligation_type, period, activity_type, actor_user_id, description, created_at)
+    VALUES
+      (v_biz_id, 'vat_return', to_char(current_date, 'YYYY-MM'), 'draft_updated', v_user_id, 'Draft updated', now() - interval '2 hours'),
+      (v_biz_id, 'income_social_tax', to_char(current_date, 'YYYY-MM'), 'status_changed', v_user_id, 'Status changed to Accountant review', now() - interval '1 day'),
+      (v_biz_id, 'income_social_tax', to_char(current_date - interval '1 month', 'YYYY-MM'), 'external_submission', v_user_id, 'External submission recorded', now() - interval '2 days');
+  END IF;
+
+  RAISE NOTICE 'Tax obligation profile fields seeded for Afrotouch.';
+END $$;

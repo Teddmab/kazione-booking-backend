@@ -37,6 +37,36 @@ async function uploadExpenseReceipt(businessId: string, base64: string, mimeType
   return path;
 }
 
+const OBLIGATION_ACTIVITY_STATUS_LABEL: Record<string, string> = {
+  draft: "Draft",
+  ready: "Ready",
+  under_review: "Accountant review",
+  filed: "Filed",
+};
+
+// Log row for the Obligations tab's "Recent activity" feed. Awaited (edge
+// function isolates don't reliably run background work after the response
+// is sent) but never lets a logging failure break the write that already
+// succeeded — errors are swallowed and just logged to the function's console.
+async function logTaxActivity(params: {
+  businessId: string;
+  actorUserId: string | null;
+  activityType: "draft_updated" | "status_changed" | "external_submission" | "profile_updated" | "payment_recorded";
+  description: string;
+  obligationType?: string | null;
+  period?: string | null;
+}): Promise<void> {
+  const { error } = await supabaseAdmin.from("tax_activity_log").insert({
+    business_id: params.businessId,
+    obligation_type: params.obligationType ?? null,
+    period: params.period ?? null,
+    activity_type: params.activityType,
+    actor_user_id: params.actorUserId,
+    description: params.description,
+  });
+  if (error) console.error("logTaxActivity failed:", error.message);
+}
+
 // Shared by tsd-summary and vat-calculation — both need "gross wages paid
 // to staff for the month," which is outside VAT (staff remuneration isn't
 // a VAT-relevant purchase) but relevant to income & social tax.
@@ -941,21 +971,33 @@ Deno.serve(withLogging("finance", async (req: Request) => {
       }
 
       if (action === "tax-profile") {
-        const [settingsResult, bizResult] = await Promise.all([
+        const [settingsResult, bizResult, ownerResult] = await Promise.all([
           supabaseAdmin
             .from("business_settings")
-            .select("vat_registered, vat_number, tax_reporting_frequency, tax_profile_confirmed_at, tax_enabled, tax_rate, tax_label, tax_number, fiscal_year_start_month")
+            .select("vat_registered, vat_number, vat_registration_date, tax_reporting_frequency, tax_profile_confirmed_at, tax_enabled, tax_rate, tax_label, tax_number, fiscal_year_start_month, employs_staff, accountant_name, accountant_email, vat_responsible, tsd_responsible, annual_responsible")
             .eq("business_id", businessId)
             .maybeSingle(),
           supabaseAdmin.from("businesses").select("country, legal_form").eq("id", businessId).maybeSingle(),
+          supabaseAdmin
+            .from("business_members")
+            .select("user:users(first_name, last_name)")
+            .eq("business_id", businessId)
+            .eq("role", "owner")
+            .eq("is_active", true)
+            .limit(1)
+            .maybeSingle(),
         ]);
         if (settingsResult.error) return serverError(settingsResult.error.message);
         if (bizResult.error) return serverError(bizResult.error.message);
+        if (ownerResult.error) return serverError(ownerResult.error.message);
         const biz = bizResult.data as Record<string, unknown> | null;
+        const ownerUser = (ownerResult.data as Record<string, unknown> | null)?.user as Record<string, unknown> | null | undefined;
+        const ownerName = ownerUser ? [ownerUser.first_name, ownerUser.last_name].filter(Boolean).join(" ") || null : null;
         return jsonCors(req, {
           ...(settingsResult.data ?? {}),
           country: biz?.country ?? null,
           legal_form: biz?.legal_form ?? null,
+          owner_name: ownerName,
         });
       }
 
@@ -1025,14 +1067,32 @@ Deno.serve(withLogging("finance", async (req: Request) => {
         if (!period) return badRequest("period is required");
         const { data, error } = await supabaseAdmin
           .from("tax_return_drafts")
-          .select("step, reviewed_at")
+          .select("step, reviewed_at, status")
           .eq("business_id", businessId)
           .eq("period", period)
           .eq("obligation_type", obligationType)
           .maybeSingle();
         if (error) return serverError(error.message);
         const row = data as Record<string, unknown> | null;
-        return jsonCors(req, { step: row?.step ?? 1, reviewed_at: row?.reviewed_at ?? null });
+        return jsonCors(req, { step: row?.step ?? 1, reviewed_at: row?.reviewed_at ?? null, status: row?.status ?? "draft" });
+      }
+
+      if (action === "tax-activity") {
+        const limit = Math.min(parseInt(url.searchParams.get("limit") ?? "20", 10) || 20, 100);
+        const { data, error } = await supabaseAdmin
+          .from("tax_activity_log")
+          .select("id, obligation_type, period, activity_type, description, created_at, actor:users(first_name, last_name)")
+          .eq("business_id", businessId)
+          .order("created_at", { ascending: false })
+          .limit(limit);
+        if (error) return serverError(error.message);
+        const rows = (data ?? []) as Record<string, unknown>[];
+        const enriched = rows.map((r) => {
+          const actor = r.actor as Record<string, unknown> | null;
+          const actorName = actor ? [actor.first_name, actor.last_name].filter(Boolean).join(" ") || null : null;
+          return { ...r, actor: undefined, actor_name: actorName };
+        });
+        return jsonCors(req, enriched);
       }
 
       if (action === "receipts-for-period") {
@@ -1179,6 +1239,18 @@ Deno.serve(withLogging("finance", async (req: Request) => {
         update.fiscal_year_start_month = m;
       }
       if (body.confirm === true) update.tax_profile_confirmed_at = new Date().toISOString();
+      if (body.vat_registration_date !== undefined) update.vat_registration_date = body.vat_registration_date;
+      if (body.employs_staff !== undefined) update.employs_staff = body.employs_staff;
+      if (body.accountant_name !== undefined) update.accountant_name = body.accountant_name;
+      if (body.accountant_email !== undefined) update.accountant_email = body.accountant_email;
+      for (const field of ["vat_responsible", "tsd_responsible", "annual_responsible"] as const) {
+        if (body[field] !== undefined) {
+          if (body[field] !== "owner" && body[field] !== "accountant") {
+            return badRequest(`${field} must be "owner" or "accountant"`);
+          }
+          update[field] = body[field];
+        }
+      }
 
       let settingsData: Record<string, unknown> = {};
       if (Object.keys(update).length > 0) {
@@ -1186,7 +1258,7 @@ Deno.serve(withLogging("finance", async (req: Request) => {
           .from("business_settings")
           .update(update)
           .eq("business_id", ctx.businessId)
-          .select("vat_registered, vat_number, tax_reporting_frequency, tax_profile_confirmed_at, fiscal_year_start_month")
+          .select("vat_registered, vat_number, vat_registration_date, tax_reporting_frequency, tax_profile_confirmed_at, fiscal_year_start_month, employs_staff, accountant_name, accountant_email, vat_responsible, tsd_responsible, annual_responsible")
           .single();
         if (error) return serverError(error.message);
         settingsData = data;
@@ -1202,6 +1274,15 @@ Deno.serve(withLogging("finance", async (req: Request) => {
           .single();
         if (error) return serverError(error.message);
         legalForm = (data as Record<string, unknown>).legal_form as string | null;
+      }
+
+      if (Object.keys(update).length > 0) {
+        await logTaxActivity({
+          businessId: ctx.businessId,
+          actorUserId: ctx.userId,
+          activityType: "profile_updated",
+          description: "Tax profile updated",
+        });
       }
 
       return jsonCors(req, { ...settingsData, ...(legalForm !== undefined ? { legal_form: legalForm } : {}) });
@@ -1242,6 +1323,16 @@ Deno.serve(withLogging("finance", async (req: Request) => {
         .select()
         .single();
       if (error) return serverError(error.message);
+
+      await logTaxActivity({
+        businessId: ctx.businessId,
+        actorUserId: ctx.userId,
+        activityType: "external_submission",
+        description: "External submission recorded",
+        obligationType: obligationType,
+        period,
+      });
+
       return jsonCors(req, data, 201);
     }
 
@@ -1269,6 +1360,16 @@ Deno.serve(withLogging("finance", async (req: Request) => {
         .maybeSingle();
       if (error) return serverError(error.message);
       if (!data) return badRequest("No filing found for this period to record a payment against");
+
+      await logTaxActivity({
+        businessId: ctx.businessId,
+        actorUserId: ctx.userId,
+        activityType: "payment_recorded",
+        description: "Payment recorded",
+        obligationType: obligationType,
+        period,
+      });
+
       return jsonCors(req, data);
     }
 
@@ -1395,13 +1496,29 @@ Deno.serve(withLogging("finance", async (req: Request) => {
         upsertData.reviewed_at = null;
         upsertData.reviewed_by = null;
       }
+      if (body.status !== undefined) {
+        if (!["draft", "ready", "under_review", "filed"].includes(body.status as string)) {
+          return badRequest("status must be draft, ready, under_review, or filed");
+        }
+        upsertData.status = body.status;
+      }
 
       const { data, error } = await supabaseAdmin
         .from("tax_return_drafts")
         .upsert(upsertData, { onConflict: "business_id,period,obligation_type" })
-        .select("step, reviewed_at")
+        .select("step, reviewed_at, status")
         .single();
       if (error) return serverError(error.message);
+
+      await logTaxActivity({
+        businessId: ctx.businessId,
+        actorUserId: ctx.userId,
+        activityType: body.status !== undefined ? "status_changed" : "draft_updated",
+        description: body.status !== undefined ? `Status changed to ${OBLIGATION_ACTIVITY_STATUS_LABEL[body.status as string] ?? body.status}` : "Draft updated",
+        obligationType,
+        period,
+      });
+
       return jsonCors(req, data, 201);
     }
 
